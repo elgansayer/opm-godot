@@ -55,6 +55,13 @@ Already applied in: `mem_blockalloc.cpp`, `con_arrayset.h`, `con_set.h`, `script
 ### Error recovery — no `exit()` under Godot
 `Sys_Error` and `Sys_Quit` must never call `exit()`. They longjmp to `godot_error_jmpbuf` set up in `MoHAARunner::_ready()`/`_process()`. The `Q_NO_RETURN` attribute is stripped from their declarations in `qcommon.h` under `GODOT_GDEXTENSION` so the compiler doesn't assume they never return.
 
+### Shutdown safety — `Z_MarkShutdown` and cgame symbol visibility
+During `exit()`, global C++ destructors (e.g. `~con_arrayset` for `Event::commandList`) call `Z_Free`/`ARRAYSET_Free`/`SET_Free`. Two mechanisms prevent crashes:
+1. **`Z_MarkShutdown()`** (in `memory.c`) — marks `Z_Free` as a no-op and `Z_TagMalloc` as a system-`malloc` fallback. Called from `MoHAARunner::~MoHAARunner()` and `uninitialize_openmohaa_module()` after `Com_Shutdown()`.
+2. **cgame.so uses `-fvisibility=hidden`** — prevents ELF dynamic linker from interposing cgame's template instantiations (which use `cgi.Free`) onto the main .so's copies (which use `Z_Free`). Only `GetCGameAPI` is exported.
+3. **`Sys_UnloadCGame` does NOT `dlclose`** — avoids unmapping cgame code pages that might still be referenced by atexit handlers.
+4. **Safe `cgi` wrappers** — in `con_arrayset.h`/`con_set.h`, `CGAME_DLL + GODOT_GDEXTENSION` sections use inline functions that check `cgi.Free`/`cgi.Malloc` for NULL before calling, falling back to `free()`/`malloc()`.
+
 ### Header conflict boundary — C accessor layer
 Engine headers (`server.h`, `g_local.h`) cannot be included in godot-cpp C++ translation units due to macro/type collisions. When you need to read engine state from `MoHAARunner.cpp`, add a thin C function in `godot_server_accessors.c` and call it via `extern "C"`.
 
@@ -67,10 +74,11 @@ When linking pulls in new client/UI/renderer symbols, add a no-op stub in `stubs
 scons platform=linux target=template_debug -j$(nproc) dev_build=yes
 
 # Deploy to project
-\cp -f openmohaa/bin/libopenmohaa.linux.template_debug.dev.x86_64.so project/bin/
+\cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
+\cp -f openmohaa/bin/libcgame.so ~/.local/share/openmohaa/main/cgame.so
 
 # Headless smoke test
-cd project && godot --headless --quit-after 1000
+cd project && godot --headless --quit-after 5000
 ```
 **SCons cache gotcha:** After editing widely-included headers (e.g. `qcommon.h`), delete `openmohaa/.sconsign.dblite` to force a full rebuild — SCons sometimes misses transitive dependencies.
 
