@@ -50,12 +50,29 @@ func _on_engine_error(message: String):
 
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
+	# Capture mouse when a map loads so mouse-look works
+	if runner:
+		runner.set_mouse_captured(true)
+		print("Main: Mouse captured for gameplay.")
 
 func _on_map_unloaded():
 	print("Main: SIGNAL map_unloaded")
+	# Release mouse when map unloads
+	if runner:
+		runner.set_mouse_captured(false)
+		print("Main: Mouse released.")
 
 func _on_engine_shutdown():
 	print("Main: SIGNAL engine_shutdown_requested")
+
+func _unhandled_key_input(event: InputEvent):
+	# F10 toggles mouse capture (escape hatch for debugging)
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F10:
+			if runner:
+				var captured = runner.is_mouse_captured()
+				runner.set_mouse_captured(not captured)
+				print("Main: Mouse capture toggled -> ", not captured)
 
 func _process(delta):
 	pass

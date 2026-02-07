@@ -84,14 +84,17 @@ cd project && godot --headless --quit-after 5000
 
 ## Asset & VFS Architecture
 The engine's VFS (`code/qcommon/files.cpp`) is fully functional and must not be bypassed:
-- `fs_basepath` points to the MOHAA install dir (set via `MoHAARunner.basepath`, `MOHAA_BASEPATH` env var, or cwd)
+- **Main data directory:** `/home/elgan/.local/share/openmohaa/main/` — contains Pak0–Pak6.pk3 (36,640 files total), cgame.so, and openmohaa.pk3
+- `fs_basepath` / `fs_homedatapath` resolve to `/home/elgan/.local/share/openmohaa` (set via engine defaults)
+- `fs_homepath` resolves to `/home/elgan/.config/openmohaa` (user configs)
 - `com_basegame` defaults to `"main"` (`BASEGAME` in `q_shared.h`); `com_target_game` selects AA (0), SH (1), or BT (2)
 - Expansion game dirs: `main/` (AA), `mainta/` (SH), `maintt/` (BT) — pk3 files searched in descending pak order
 - `.scr` scripts loaded via `gi.FS_ReadFile` → compiled by `code/script/` → executed by `ScriptMaster` in `code/fgame/`
 - All I/O goes through the engine's `FS_*` functions; never use `fopen`/`std::ifstream` for game assets
+- cgame.so deployed to: `/home/elgan/.local/share/openmohaa/main/cgame.so`
 
 ## Roadmap
-See `openmohaa/TASKS.md` for the full phase breakdown. Phases 1–2.5 are complete. Phase 3 (Morfuse script engine) and Phase 4 (asset pipeline / BSP → Godot mesh) are next.
+See `openmohaa/TASKS.md` for the full phase breakdown. Phases 1–5.5 are complete (build, engine heartbeat, server ops, script engine, full client subsystem with cgame, shutdown stability). Engine boots, loads maps, spawns players, exits cleanly. Next: Phase 6 (input bridge), Phase 7 (BSP renderer), Phase 8 (sound bridge).
 
 ## When Adding Engine Patches
 1. Wrap in `#ifdef GODOT_GDEXTENSION` with a one-line comment explaining *why*.
