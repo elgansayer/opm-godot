@@ -916,3 +916,133 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 - [x] Generated `yyParser.cpp`, `yyParser.hpp`, `yyLexer.cpp`, `yyLexer.h` from bison/flex sources
 - [x] Removed `/code/parser/generated` from `.gitignore` so generated files are tracked (SCons has no generation step)
 - [x] Added `#ifndef __BOTLIB_H` / `#define __BOTLIB_H` / `#endif` include guards to `code/fgame/botlib.h` to fix redefinition errors
+
+## Phase 65: Fullbright / Vertex-Lit Surface Fallback ✅
+- [x] **Task 65.1:** Added `SURF_NOLIGHTMAP` (0x100) constant to `godot_bsp_mesh.cpp`.
+- [x] **Task 65.2:** Added `nolightmap` and `surface_flags` fields to `ShaderBatch` struct.
+- [x] **Task 65.3:** `process_surface()` now detects `SURF_NOLIGHTMAP` flag and sets `batch.nolightmap = true`.
+- [x] **Task 65.4:** `batches_to_array_mesh()` skips lightmap detail texture for nolightmap surfaces and applies vertex colour fallback.
+- [x] **Task 65.5:** Added `Godot_BSP_SurfaceHasLightmap()` extern "C" accessor in `godot_bsp_mesh.cpp/.h`.
+
+### Key technical details (Phase 65):
+- Surfaces with `SURF_NOLIGHTMAP` skip the detail-texture lightmap multiply, rendering fullbright.
+- Vertex colours are used directly via `FLAG_ALBEDO_FROM_VERTEX_COLOR` when no lightmap is present.
+- The `Godot_BSP_SurfaceHasLightmap()` function checks the BSP shader's surface flags via the retained mark data.
+
+### Files modified (Phase 65):
+- `code/godot/godot_bsp_mesh.cpp` — nolightmap detection in process_surface(), lightmap skip in batches_to_array_mesh()
+- `code/godot/godot_bsp_mesh.h` — added Godot_BSP_SurfaceHasLightmap() declaration
+
+## Phase 69: deformVertexes — Autosprite ✅
+- [x] **Task 69.1:** Created `godot_vertex_deform.h` with deform type constants and API declarations.
+- [x] **Task 69.2:** Created `godot_vertex_deform.cpp` with GLSL code generators.
+- [x] **Task 69.3:** Implemented `generate_autosprite_vertex()` — sets MODELVIEW_MATRIX to billboard towards camera.
+- [x] **Task 69.4:** Implemented `generate_autosprite2_vertex()` — Y-axis aligned billboard using camera-to-object direction.
+
+### Key technical details (Phase 69):
+- Autosprite: Rebuilds MODELVIEW_MATRIX from INV_VIEW_MATRIX axes + model origin for full billboard.
+- Autosprite2: Keeps Y-up axis, derives X/Z from camera direction for axis-aligned billboard.
+- GLSL code returned as String for injection into Godot ShaderMaterial vertex() functions.
+
+### Files created (Phase 69):
+- `code/godot/godot_vertex_deform.h` — deform type enums, API
+- `code/godot/godot_vertex_deform.cpp` — GLSL generators
+
+## Phase 70: deformVertexes — Wave / Bulge / Move ✅
+- [x] **Task 70.1:** Implemented `generate_wave_vertex()` — sinusoidal displacement along vertex normal.
+- [x] **Task 70.2:** Implemented `generate_bulge_vertex()` — pulsating outward displacement using S texture coordinate.
+- [x] **Task 70.3:** Implemented `generate_move_vertex()` — vertex translation along normal with wave function.
+- [x] **Task 70.4:** Implemented `Godot_Deform_GenerateFullShader()` for complete shader code generation.
+
+### Key technical details (Phase 70):
+- Wave: `offset = (V.x+V.y+V.z)/div`, `wave = base + amp * sin(TIME*freq + phase + offset)`
+- Bulge: `bulge = height * sin((TIME*speed + UV.x*width) * TAU)`
+- Move: Simplified to normal-axis translation with wave modulation
+- All deform parameters match GodotShaderProps struct fields (Phase 63 in shader_props.h)
+
+### Files modified (Phase 70):
+- `code/godot/godot_vertex_deform.cpp` — wave, bulge, move GLSL generators
+
+## Phase 73: Portal Surfaces ✅
+- [x] **Task 73.1:** Portal surfaces (surfaceparm portal) are now detected in the BSP surface processing loop.
+- [x] **Task 73.2:** Portal surfaces are skipped from world geometry mesh — they will be rendered separately by Agent 10.
+
+### MoHAARunner Integration Required (Phase 73):
+- Portal surfaces need special rendering treatment (flat reflective surface or SubViewport).
+- Agent 10 should check `GodotShaderProps::is_portal` when processing entity/surface materials.
+
+### Files modified (Phase 73):
+- `code/godot/godot_bsp_mesh.cpp` — portal surface skip in world surface loop
+
+## Phase 74: Flare Rendering ✅
+- [x] **Task 74.1:** Added `BSPFlare` struct to `godot_bsp_mesh.h` (origin, colour, shader).
+- [x] **Task 74.2:** Flare surfaces (`MST_FLARE`) are now collected during BSP surface processing.
+- [x] **Task 74.3:** Flare positions converted to Godot coordinates with vertex colour as flare tint.
+- [x] **Task 74.4:** Added `Godot_BSP_GetFlareCount()` and `Godot_BSP_GetFlare()` accessor API.
+
+### MoHAARunner Integration Required (Phase 74):
+- `Godot_BSP_GetFlareCount()` / `Godot_BSP_GetFlare()` provide flare positions after map load.
+- Agent 10 should create billboard MeshInstance3D nodes with additive blending at each flare position.
+- Optional: distance fade and BSP raycast occlusion check.
+
+### Files modified (Phase 74):
+- `code/godot/godot_bsp_mesh.h` — BSPFlare struct, accessor declarations
+- `code/godot/godot_bsp_mesh.cpp` — flare collection in surface loop, accessor implementations
+
+## Phase 75: Volumetric Smoke & Dust ✅
+- [x] **Task 75.1:** Documented that cgame's cg_volumetricsmoke.cpp submits smoke polys via the renderer.
+- [x] **Task 75.2:** These polys arrive in `gr_polys[]` buffer (already captured by godot_renderer.c).
+- [x] **Task 75.3:** Correct billboarding and alpha fade handled by existing poly rendering in MoHAARunner.
+
+### Key technical details (Phase 75):
+- Smoke polygons are submitted as `RE_AddPolyToScene` calls from cgame.
+- The `gr_polys[]` capture buffer in `godot_renderer.c` already handles them.
+- MoHAARunner's `update_polys()` renders them as triangle fans with correct materials.
+- No additional code changes needed — the existing pipeline handles smoke polys.
+
+## Phase 76: Rain & Snow Weather Effects ✅
+- [x] **Task 76.1:** Created `godot_weather.h` with weather API: Init, Update, Shutdown, GetState, GetDensity.
+- [x] **Task 76.2:** Created `godot_weather.cpp` with GPUParticles3D emitters for rain and snow.
+- [x] **Task 76.3:** Rain: 2000 particles, fast downward velocity, thin quad streaks, 1s lifetime.
+- [x] **Task 76.4:** Snow: 1500 particles, slow drifting, small white quads, 3s lifetime.
+- [x] **Task 76.5:** Created `godot_weather_accessors.c` with state/density query functions.
+- [x] **Task 76.6:** Weather volume follows camera position each frame.
+
+### MoHAARunner Integration Required (Phase 76):
+1. Call `Godot_Weather_Init(scene_root)` in `check_world_load()` after BSP map load.
+2. Call `Godot_Weather_Update(camera_position, delta)` in `_process()` each frame.
+3. Call `Godot_Weather_Shutdown()` in BSP unload / scene teardown.
+4. Weather state is currently WEATHER_NONE by default; Agent 10 should set state when engine communicates weather commands via configstrings.
+
+### Files created (Phase 76):
+- `code/godot/godot_weather.h` — weather API
+- `code/godot/godot_weather.cpp` — GPUParticles3D rain/snow manager
+- `code/godot/godot_weather_accessors.c` — C accessor for weather state
+
+## Phase 77: Water / Liquid Surfaces ✅
+- [x] **Task 77.1:** Water surfaces use `deformVertexes wave` which is implemented in Phase 70.
+- [x] **Task 77.2:** Transparency from `surfaceparm trans` + blend mode is handled by existing shader prop system.
+- [x] **Task 77.3:** Water colour tinting available via `rgbGen` in shader props (Phase 64).
+
+### Key technical details (Phase 77):
+- Water surfaces are regular BSP surfaces with wave deform and transparency.
+- Phase 70's `generate_wave_vertex()` provides the GLSL code for water surface animation.
+- Agent 2's shader props provide transparency/blend mode for correct alpha rendering.
+- Sort order handled by `sort_key` in shader props (Phase 67).
+
+## Phase 78: Fog Volumes (Per-Surface) ✅
+- [x] **Task 78.1:** Added `BSPFogVolume` struct to `godot_bsp_mesh.h` (shader, brush, colour, depth).
+- [x] **Task 78.2:** Added `bsp_fog_t` on-disc struct (72 bytes, matches dfog_t from qfiles.h).
+- [x] **Task 78.3:** Fog lump parsing in `Godot_BSP_LoadWorld()` for BSP versions ≤ 18.
+- [x] **Task 78.4:** Fog colour and distance read from shader props (`has_fog`, `fog_color`, `fog_distance`).
+- [x] **Task 78.5:** Added `Godot_BSP_GetFogVolumeCount()` and `Godot_BSP_GetFogVolume()` accessor API.
+
+### MoHAARunner Integration Required (Phase 78):
+- Fog volumes are distinct from global fog (which is in `update_camera()` via Environment).
+- Each fog volume defines a brush region with per-fog colour and density.
+- Agent 9 (Rendering Polish) or Agent 10 should apply fog volume data to affected BSP surfaces during material creation, or use proximity-based fog blending.
+- The `fogNum` field in `bsp_surface_t` maps a surface to its fog volume index (-1 = none).
+
+### Files modified (Phase 78):
+- `code/godot/godot_bsp_mesh.h` — BSPFogVolume struct, accessor declarations
+- `code/godot/godot_bsp_mesh.cpp` — fog lump parsing, accessor implementations, fog volume cache cleanup in Unload()
