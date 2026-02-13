@@ -44,9 +44,10 @@ profile
 
 out
 
-# Flex and Bison
+# Flex and Bison — generated files are tracked for SCons GDExtension build
+# (SCons does not run bison/flex; files must be pre-committed)
 ####################
-/code/parser/generated
+/code/parser/generated/*.os
 
 *.os
 .sconsign.dblite
