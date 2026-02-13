@@ -134,10 +134,35 @@ static GodotShaderTransparency classify_blend(const char *src, const char *dst) 
     return SHADER_ALPHA_BLEND;
 }
 
+/* Phase 66–72: Parse a GL blend factor token into MohaaBlendFactor enum */
+static MohaaBlendFactor parse_blend_factor(const char *tok) {
+    if (str_ieq(tok, "GL_ONE"))                    return BLEND_ONE;
+    if (str_ieq(tok, "GL_ZERO"))                   return BLEND_ZERO;
+    if (str_ieq(tok, "GL_SRC_ALPHA"))              return BLEND_SRC_ALPHA;
+    if (str_ieq(tok, "GL_ONE_MINUS_SRC_ALPHA"))    return BLEND_ONE_MINUS_SRC_ALPHA;
+    if (str_ieq(tok, "GL_DST_COLOR"))              return BLEND_DST_COLOR;
+    if (str_ieq(tok, "GL_SRC_COLOR"))              return BLEND_SRC_COLOR;
+    if (str_ieq(tok, "GL_ONE_MINUS_DST_COLOR"))    return BLEND_ONE_MINUS_DST_COLOR;
+    if (str_ieq(tok, "GL_ONE_MINUS_SRC_COLOR"))    return BLEND_ONE_MINUS_SRC_COLOR;
+    if (str_ieq(tok, "GL_DST_ALPHA"))              return BLEND_DST_ALPHA;
+    if (str_ieq(tok, "GL_ONE_MINUS_DST_ALPHA"))    return BLEND_ONE_MINUS_DST_ALPHA;
+    return BLEND_ONE;
+}
+
+/* Phase 66–72: Parse a wave function name into MohaaWaveFunc enum */
+static MohaaWaveFunc parse_wave_func(const char *tok) {
+    if (str_ieq(tok, "sin"))                return WAVE_SIN;
+    if (str_ieq(tok, "triangle"))           return WAVE_TRIANGLE;
+    if (str_ieq(tok, "square"))             return WAVE_SQUARE;
+    if (str_ieq(tok, "sawtooth"))           return WAVE_SAWTOOTH;
+    if (str_ieq(tok, "inversesawtooth"))    return WAVE_INVERSE_SAWTOOTH;
+    return WAVE_SIN;
+}
+
 /* Parse a single shader definition starting after the opening '{' */
 static void parse_shader_body(const char *p, const char *end, GodotShaderProps *props) {
     int brace_depth = 1;
-    int stage_depth = 0;
+    int stage_index = -1;  /* -1 = not in a stage, 0+ = current stage */
     bool first_stage = true;
 
     char token[256];
@@ -156,8 +181,20 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
         if (*p == '{') {
             brace_depth++;
             if (brace_depth == 2) {
-                stage_depth++;
-                props->num_stages = stage_depth;  /* Phase 69: track stage count */
+                /* Entering a new stage block */
+                stage_index = props->stage_count;
+                if (stage_index < MOHAA_SHADER_STAGE_MAX) {
+                    /* Zero-initialise the new stage */
+                    memset(&props->stages[stage_index], 0, sizeof(MohaaShaderStage));
+                    props->stages[stage_index].blendSrc = BLEND_ONE;
+                    props->stages[stage_index].blendDst = BLEND_ZERO;
+                    props->stages[stage_index].alphaConst = 1.0f;
+                    props->stages[stage_index].rgbConst[0] = 1.0f;
+                    props->stages[stage_index].rgbConst[1] = 1.0f;
+                    props->stages[stage_index].rgbConst[2] = 1.0f;
+                    props->stage_count++;
+                }
+                props->num_stages = props->stage_count;
             }
             p++;
             continue;
@@ -165,6 +202,7 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
         if (*p == '}') {
             if (brace_depth == 2) {
                 /* Closing a stage */
+                stage_index = -1;
                 first_stage = false;
             }
             brace_depth--;
@@ -178,6 +216,10 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
             p = skip_line(p);
             continue;
         }
+
+        /* Pointer to the current stage (or NULL if overflowed) */
+        MohaaShaderStage *stg = (brace_depth == 2 && stage_index >= 0 && stage_index < MOHAA_SHADER_STAGE_MAX)
+                           ? &props->stages[stage_index] : nullptr;
 
         /* ── Outer block directives (brace_depth == 1) ── */
         if (brace_depth == 1) {
@@ -299,20 +341,29 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
 
         /* ── Stage directives (brace_depth == 2) ── */
         if (brace_depth == 2) {
-            /* Phase 69: count stages */
-            if (first_stage && !token[0]) { /* handled via brace tracking */ }
-
-            if (str_ieq(token, "alphaFunc")) {
+            if (str_ieq(token, "map") || str_ieq(token, "clampMap") || str_ieq(token, "clampmap")) {
+                /* Phase 66: per-stage map / clampMap */
+                char map_name[64];
+                p = read_token(p, map_name, sizeof(map_name));
+                if (stg) {
+                    strncpy(stg->map, map_name, sizeof(stg->map) - 1);
+                    stg->map[sizeof(stg->map) - 1] = '\0';
+                    if (str_ieq(token, "clampMap") || str_ieq(token, "clampmap"))
+                        stg->isClampMap = true;
+                    if (str_ieq(map_name, "$lightmap"))
+                        stg->isLightmap = true;
+                }
+            } else if (str_ieq(token, "alphaFunc")) {
                 p = read_token(p, token, sizeof(token));
                 props->transparency = SHADER_ALPHA_TEST;
+                float thresh = 0.5f;
                 if (str_ieq(token, "GT0")) {
-                    props->alpha_threshold = 0.01f;
-                } else if (str_ieq(token, "LT128")) {
-                    props->alpha_threshold = 0.5f;
-                } else if (str_ieq(token, "GE128")) {
-                    props->alpha_threshold = 0.5f;
-                } else {
-                    props->alpha_threshold = 0.5f;
+                    thresh = 0.01f;
+                }
+                props->alpha_threshold = thresh;
+                if (stg) {
+                    stg->hasAlphaFunc = true;
+                    stg->alphaFuncThreshold = thresh;
                 }
             } else if (str_ieq(token, "blendFunc")) {
                 char src_tok[64], dst_tok[64];
@@ -323,66 +374,161 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
                 if (str_ieq(src_tok, "blend") || str_ieq(src_tok, "add") ||
                     str_ieq(src_tok, "filter")) {
                     GodotShaderTransparency t = classify_blend(src_tok, "");
-                    /* Only upgrade, never downgrade from alphaFunc */
                     if (props->transparency != SHADER_ALPHA_TEST)
                         props->transparency = t;
+                    /* Phase 66: per-stage blend factors for shorthand */
+                    if (stg) {
+                        stg->hasBlendFunc = true;
+                        if (str_ieq(src_tok, "blend")) {
+                            stg->blendSrc = BLEND_SRC_ALPHA;
+                            stg->blendDst = BLEND_ONE_MINUS_SRC_ALPHA;
+                        } else if (str_ieq(src_tok, "add")) {
+                            stg->blendSrc = BLEND_ONE;
+                            stg->blendDst = BLEND_ONE;
+                        } else if (str_ieq(src_tok, "filter")) {
+                            stg->blendSrc = BLEND_DST_COLOR;
+                            stg->blendDst = BLEND_ZERO;
+                        }
+                    }
                 } else {
                     /* Full form: blendFunc GL_SRC GL_DST */
                     p = read_token(p, dst_tok, sizeof(dst_tok));
                     GodotShaderTransparency t = classify_blend(src_tok, dst_tok);
                     if (props->transparency != SHADER_ALPHA_TEST)
                         props->transparency = t;
+                    /* Phase 66: per-stage blend factors */
+                    if (stg) {
+                        stg->hasBlendFunc = true;
+                        stg->blendSrc = parse_blend_factor(src_tok);
+                        stg->blendDst = parse_blend_factor(dst_tok);
+                    }
                 }
             } else if (str_ieq(token, "animMap") || str_ieq(token, "animmap")) {
-                /* Phase 61: animMap <freq> <tex1> <tex2> ... */
+                /* Phase 61/68: animMap <freq> <tex1> <tex2> ... */
                 char freq_val[64];
                 p = read_token(p, freq_val, sizeof(freq_val));
-                props->animmap_freq = (float)atof(freq_val);
-                props->has_animmap = true;
-                props->animmap_num_frames = 0;
+                float freq = (float)atof(freq_val);
 
+                /* Backward compat: populate flat fields from first stage */
+                if (first_stage) {
+                    props->animmap_freq = freq;
+                    props->has_animmap = true;
+                    props->animmap_num_frames = 0;
+                }
+
+                int frame_count = 0;
                 /* Read texture names until end of line */
-                while (props->animmap_num_frames < 8) {
+                while (frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES) {
                     p = skip_ws(p);
                     if (!*p || *p == '\n' || *p == '\r') break;
                     char frame_name[64];
                     p = read_token(p, frame_name, sizeof(frame_name));
                     if (!frame_name[0]) break;
-                    strncpy(props->animmap_frames[props->animmap_num_frames],
-                            frame_name, 63);
-                    props->animmap_frames[props->animmap_num_frames][63] = '\0';
-                    props->animmap_num_frames++;
+
+                    /* Backward compat: flat fields */
+                    if (first_stage && frame_count < 8) {
+                        strncpy(props->animmap_frames[frame_count], frame_name, 63);
+                        props->animmap_frames[frame_count][63] = '\0';
+                        props->animmap_num_frames = frame_count + 1;
+                    }
+
+                    /* Per-stage data */
+                    if (stg && frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES) {
+                        strncpy(stg->animMapFrames[frame_count], frame_name, 63);
+                        stg->animMapFrames[frame_count][63] = '\0';
+                    }
+                    frame_count++;
+                }
+                if (stg) {
+                    stg->animMapFreq = freq;
+                    stg->animMapFrameCount = frame_count;
                 }
             } else if (str_ieq(token, "tcGen") || str_ieq(token, "tcgen")) {
-                /* Phase 62: tcGen environment */
+                /* Phase 62/67/72: tcGen */
                 p = read_token(p, token, sizeof(token));
                 if (str_ieq(token, "environment") || str_ieq(token, "environmentmodel")) {
-                    props->tcgen_environment = true;
+                    if (first_stage) props->tcgen_environment = true;
+                    if (stg) stg->tcGen = STAGE_TCGEN_ENVIRONMENT;
+                } else if (str_ieq(token, "lightmap")) {
+                    /* Phase 72: tcGen lightmap — use UV2 */
+                    if (stg) {
+                        stg->tcGen = STAGE_TCGEN_LIGHTMAP;
+                        stg->isLightmap = true;
+                    }
+                } else if (str_ieq(token, "vector")) {
+                    /* Phase 72: tcGen vector ( sx sy sz ) ( tx ty tz ) */
+                    if (stg) stg->tcGen = STAGE_TCGEN_VECTOR;
+                    p = skip_ws(p);
+                    if (*p == '(') p++;
+                    char v0[64], v1[64], v2[64];
+                    p = read_token(p, v0, sizeof(v0));
+                    p = read_token(p, v1, sizeof(v1));
+                    p = read_token(p, v2, sizeof(v2));
+                    p = skip_ws(p);
+                    if (*p == ')') p++;
+                    if (stg) {
+                        stg->tcGenVecS[0] = (float)atof(v0);
+                        stg->tcGenVecS[1] = (float)atof(v1);
+                        stg->tcGenVecS[2] = (float)atof(v2);
+                    }
+                    p = skip_ws(p);
+                    if (*p == '(') p++;
+                    p = read_token(p, v0, sizeof(v0));
+                    p = read_token(p, v1, sizeof(v1));
+                    p = read_token(p, v2, sizeof(v2));
+                    p = skip_ws(p);
+                    if (*p == ')') p++;
+                    if (stg) {
+                        stg->tcGenVecT[0] = (float)atof(v0);
+                        stg->tcGenVecT[1] = (float)atof(v1);
+                        stg->tcGenVecT[2] = (float)atof(v2);
+                    }
                 }
+                /* tcGen base is the default — no action needed */
             } else if (str_ieq(token, "rgbGen") || str_ieq(token, "rgbgen")) {
-                /* Phase 64: rgbGen */
+                /* Phase 64/71: rgbGen */
                 p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "identity") || str_ieq(token, "identityLighting")) {
-                    props->rgbgen_type = 0;
-                } else if (str_ieq(token, "vertex") || str_ieq(token, "exactVertex") ||
-                           str_ieq(token, "lightingDiffuse")) {
-                    props->rgbgen_type = 1;
+                if (str_ieq(token, "identity")) {
+                    if (first_stage) props->rgbgen_type = 0;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY;
+                } else if (str_ieq(token, "identityLighting")) {
+                    if (first_stage) props->rgbgen_type = 0;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY_LIGHTING;
+                } else if (str_ieq(token, "vertex") || str_ieq(token, "exactVertex")) {
+                    if (first_stage) props->rgbgen_type = 1;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_VERTEX;
+                } else if (str_ieq(token, "lightingDiffuse")) {
+                    if (first_stage) props->rgbgen_type = 1;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_LIGHTING_DIFFUSE;
                 } else if (str_ieq(token, "wave")) {
-                    props->rgbgen_type = 2;
-                    char func[64], base_v[64], amp[64], freq[64], phase[64];
+                    char func[64], base_v[64], amp[64], phase[64], freq[64];
                     p = read_token(p, func, sizeof(func));
                     p = read_token(p, base_v, sizeof(base_v));
                     p = read_token(p, amp, sizeof(amp));
                     p = read_token(p, phase, sizeof(phase));
                     p = read_token(p, freq, sizeof(freq));
-                    props->rgbgen_wave_base  = (float)atof(base_v);
-                    props->rgbgen_wave_amp   = (float)atof(amp);
-                    props->rgbgen_wave_phase = (float)atof(phase);
-                    props->rgbgen_wave_freq  = (float)atof(freq);
+                    if (first_stage) {
+                        props->rgbgen_type = 2;
+                        props->rgbgen_wave_base  = (float)atof(base_v);
+                        props->rgbgen_wave_amp   = (float)atof(amp);
+                        props->rgbgen_wave_phase = (float)atof(phase);
+                        props->rgbgen_wave_freq  = (float)atof(freq);
+                    }
+                    if (stg) {
+                        stg->rgbGen = STAGE_RGBGEN_WAVE;
+                        stg->rgbWave.func      = parse_wave_func(func);
+                        stg->rgbWave.base      = (float)atof(base_v);
+                        stg->rgbWave.amplitude = (float)atof(amp);
+                        stg->rgbWave.phase     = (float)atof(phase);
+                        stg->rgbWave.frequency = (float)atof(freq);
+                    }
                 } else if (str_ieq(token, "entity")) {
-                    props->rgbgen_type = 3;
+                    if (first_stage) props->rgbgen_type = 3;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_ENTITY;
+                } else if (str_ieq(token, "oneMinusEntity")) {
+                    if (first_stage) props->rgbgen_type = 3;
+                    if (stg) stg->rgbGen = STAGE_RGBGEN_ONE_MINUS_ENTITY;
                 } else if (str_ieq(token, "const") || str_ieq(token, "constant")) {
-                    props->rgbgen_type = 4;
                     /* const ( r g b ) */
                     p = skip_ws(p);
                     if (*p == '(') p++;
@@ -392,59 +538,120 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
                     p = read_token(p, bv, sizeof(bv));
                     p = skip_ws(p);
                     if (*p == ')') p++;
-                    props->rgbgen_const[0] = (float)atof(rv);
-                    props->rgbgen_const[1] = (float)atof(gv);
-                    props->rgbgen_const[2] = (float)atof(bv);
+                    if (first_stage) {
+                        props->rgbgen_type = 4;
+                        props->rgbgen_const[0] = (float)atof(rv);
+                        props->rgbgen_const[1] = (float)atof(gv);
+                        props->rgbgen_const[2] = (float)atof(bv);
+                    }
+                    if (stg) {
+                        stg->rgbGen = STAGE_RGBGEN_CONST;
+                        stg->rgbConst[0] = (float)atof(rv);
+                        stg->rgbConst[1] = (float)atof(gv);
+                        stg->rgbConst[2] = (float)atof(bv);
+                    }
                 }
             } else if (str_ieq(token, "alphaGen") || str_ieq(token, "alphagen")) {
-                /* Phase 65: alphaGen */
+                /* Phase 65/71: alphaGen */
                 p = read_token(p, token, sizeof(token));
                 if (str_ieq(token, "identity")) {
-                    props->alphagen_type = 0;
+                    if (first_stage) props->alphagen_type = 0;
+                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_IDENTITY;
                 } else if (str_ieq(token, "vertex")) {
-                    props->alphagen_type = 1;
+                    if (first_stage) props->alphagen_type = 1;
+                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_VERTEX;
                 } else if (str_ieq(token, "wave")) {
-                    props->alphagen_type = 2;
                     char func[64], base_v[64], amp[64], phase[64], freq[64];
                     p = read_token(p, func, sizeof(func));
                     p = read_token(p, base_v, sizeof(base_v));
                     p = read_token(p, amp, sizeof(amp));
                     p = read_token(p, phase, sizeof(phase));
                     p = read_token(p, freq, sizeof(freq));
-                    props->alphagen_wave_base  = (float)atof(base_v);
-                    props->alphagen_wave_amp   = (float)atof(amp);
-                    props->alphagen_wave_phase = (float)atof(phase);
-                    props->alphagen_wave_freq  = (float)atof(freq);
+                    if (first_stage) {
+                        props->alphagen_type = 2;
+                        props->alphagen_wave_base  = (float)atof(base_v);
+                        props->alphagen_wave_amp   = (float)atof(amp);
+                        props->alphagen_wave_phase = (float)atof(phase);
+                        props->alphagen_wave_freq  = (float)atof(freq);
+                    }
+                    if (stg) {
+                        stg->alphaGen = STAGE_ALPHAGEN_WAVE;
+                        stg->alphaWave.func      = parse_wave_func(func);
+                        stg->alphaWave.base      = (float)atof(base_v);
+                        stg->alphaWave.amplitude = (float)atof(amp);
+                        stg->alphaWave.phase     = (float)atof(phase);
+                        stg->alphaWave.frequency = (float)atof(freq);
+                    }
                 } else if (str_ieq(token, "entity")) {
-                    props->alphagen_type = 3;
+                    if (first_stage) props->alphagen_type = 3;
+                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_ENTITY;
+                } else if (str_ieq(token, "oneMinusEntity")) {
+                    if (first_stage) props->alphagen_type = 3;
+                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_ONE_MINUS_ENTITY;
+                } else if (str_ieq(token, "portal")) {
+                    char dist_v[64];
+                    p = read_token(p, dist_v, sizeof(dist_v));
+                    if (stg) {
+                        stg->alphaGen = STAGE_ALPHAGEN_PORTAL;
+                        stg->alphaPortalDist = (float)atof(dist_v);
+                    }
                 } else if (str_ieq(token, "const") || str_ieq(token, "constant")) {
-                    props->alphagen_type = 4;
                     char av[64];
                     p = read_token(p, av, sizeof(av));
-                    props->alphagen_const = (float)atof(av);
+                    if (first_stage) {
+                        props->alphagen_type = 4;
+                        props->alphagen_const = (float)atof(av);
+                    }
+                    if (stg) {
+                        stg->alphaGen = STAGE_ALPHAGEN_CONST;
+                        stg->alphaConst = (float)atof(av);
+                    }
                 }
             } else if (str_ieq(token, "tcMod") || str_ieq(token, "tcmod")) {
-                /* Phase 36 + 66: Parse tcMod directives for UV animation */
+                /* Phase 36/66: Parse tcMod directives for UV animation */
                 p = read_token(p, token, sizeof(token));
                 if (str_ieq(token, "scroll")) {
                     char sval[64], tval[64];
                     p = read_token(p, sval, sizeof(sval));
                     p = read_token(p, tval, sizeof(tval));
-                    props->tcmod_scroll_s = (float)atof(sval);
-                    props->tcmod_scroll_t = (float)atof(tval);
-                    props->has_tcmod = true;
+                    if (first_stage) {
+                        props->tcmod_scroll_s = (float)atof(sval);
+                        props->tcmod_scroll_t = (float)atof(tval);
+                        props->has_tcmod = true;
+                    }
+                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                        tm->type = TCMOD_SCROLL;
+                        tm->params[0] = (float)atof(sval);
+                        tm->params[1] = (float)atof(tval);
+                    }
                 } else if (str_ieq(token, "rotate")) {
                     char rval[64];
                     p = read_token(p, rval, sizeof(rval));
-                    props->tcmod_rotate = (float)atof(rval);
-                    props->has_tcmod = true;
+                    if (first_stage) {
+                        props->tcmod_rotate = (float)atof(rval);
+                        props->has_tcmod = true;
+                    }
+                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                        tm->type = TCMOD_ROTATE;
+                        tm->params[0] = (float)atof(rval);
+                    }
                 } else if (str_ieq(token, "scale")) {
                     char sval[64], tval[64];
                     p = read_token(p, sval, sizeof(sval));
                     p = read_token(p, tval, sizeof(tval));
-                    props->tcmod_scale_s = (float)atof(sval);
-                    props->tcmod_scale_t = (float)atof(tval);
-                    props->has_tcmod = true;
+                    if (first_stage) {
+                        props->tcmod_scale_s = (float)atof(sval);
+                        props->tcmod_scale_t = (float)atof(tval);
+                        props->has_tcmod = true;
+                    }
+                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                        tm->type = TCMOD_SCALE;
+                        tm->params[0] = (float)atof(sval);
+                        tm->params[1] = (float)atof(tval);
+                    }
                 } else if (str_ieq(token, "turb")) {
                     /* turb <base> <amplitude> <phase> <freq> */
                     char base_v[64], amp[64], phase[64], freq[64];
@@ -452,23 +659,44 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
                     p = read_token(p, amp, sizeof(amp));
                     p = read_token(p, phase, sizeof(phase));
                     p = read_token(p, freq, sizeof(freq));
-                    props->tcmod_turb_amp  = (float)atof(amp);
-                    props->tcmod_turb_freq = (float)atof(freq);
-                    props->has_tcmod = true;
+                    if (first_stage) {
+                        props->tcmod_turb_amp  = (float)atof(amp);
+                        props->tcmod_turb_freq = (float)atof(freq);
+                        props->has_tcmod = true;
+                    }
+                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                        tm->type = TCMOD_TURB;
+                        tm->params[0] = (float)atof(base_v);
+                        tm->params[1] = (float)atof(amp);
+                        tm->params[2] = (float)atof(phase);
+                        tm->params[3] = (float)atof(freq);
+                    }
                 } else if (str_ieq(token, "stretch")) {
-                    /* Phase 66: tcMod stretch <func> <base> <amp> <phase> <freq> */
+                    /* tcMod stretch <func> <base> <amp> <phase> <freq> */
                     char func[64], base_v[64], amp[64], phase[64], freq[64];
                     p = read_token(p, func, sizeof(func));
                     p = read_token(p, base_v, sizeof(base_v));
                     p = read_token(p, amp, sizeof(amp));
                     p = read_token(p, phase, sizeof(phase));
                     p = read_token(p, freq, sizeof(freq));
-                    props->has_tcmod_stretch = true;
-                    props->tcmod_stretch_base  = (float)atof(base_v);
-                    props->tcmod_stretch_amp   = (float)atof(amp);
-                    props->tcmod_stretch_phase = (float)atof(phase);
-                    props->tcmod_stretch_freq  = (float)atof(freq);
-                    props->has_tcmod = true;
+                    if (first_stage) {
+                        props->has_tcmod_stretch = true;
+                        props->tcmod_stretch_base  = (float)atof(base_v);
+                        props->tcmod_stretch_amp   = (float)atof(amp);
+                        props->tcmod_stretch_phase = (float)atof(phase);
+                        props->tcmod_stretch_freq  = (float)atof(freq);
+                        props->has_tcmod = true;
+                    }
+                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                        tm->type = TCMOD_STRETCH;
+                        tm->wave.func      = parse_wave_func(func);
+                        tm->wave.base      = (float)atof(base_v);
+                        tm->wave.amplitude = (float)atof(amp);
+                        tm->wave.phase     = (float)atof(phase);
+                        tm->wave.frequency = (float)atof(freq);
+                    }
                 }
             }
         }
