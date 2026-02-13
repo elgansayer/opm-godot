@@ -119,20 +119,35 @@ private:
     std::vector<AudioStreamPlayer3D *> sfx_players_3d;               // Pool of 3D audio players
     std::vector<AudioStreamPlayer *>   sfx_players_2d;               // Pool of 2D audio players
     std::unordered_map<int, Ref<AudioStreamWAV>> sfx_cache;          // sfxHandle → loaded WAV stream
-    // Looping sound tracking: key = sfxHandle, value = player index in pool
-    std::unordered_map<int, int> active_loops;                       // sfxHandle → 3D player index
+    // Looping sound tracking (Phase 40): key = composite of sfxHandle + quantised position
+    std::unordered_map<int64_t, int> active_loops;                   // loop key → 3D player index
     int next_3d_player = 0;                                          // Round-robin index for 3D pool
     int next_2d_player = 0;                                          // Round-robin index for 2D pool
     static const int MAX_3D_PLAYERS = 32;
     static const int MAX_2D_PLAYERS = 16;
 
-    // Music playback (Phase 17)
+    // Sound channel tracking for priority eviction (Phase 41)
+    // Tracks which entity+channel is using each 3D player slot
+    struct PlayerSlotInfo {
+        int entnum = -1;
+        int channel = -1;
+        bool in_use = false;
+    };
+    std::vector<PlayerSlotInfo> player_slot_info;                    // Size = MAX_3D_PLAYERS
+
+    // Music playback (Phase 17, improved Phase 39)
     AudioStreamPlayer *music_player = nullptr;                       // Background music player
     String current_music_name;                                       // Currently playing soundtrack name
     float music_target_volume = 1.0f;                                // Target volume for fading
+    // Smooth fade state (Phase 39)
+    float music_fade_from = 1.0f;                                    // Volume at fade start (linear)
+    float music_fade_to = 1.0f;                                      // Volume at fade end (linear)
+    float music_fade_duration = 0.0f;                                // Total fade time (seconds)
+    float music_fade_elapsed = 0.0f;                                 // Elapsed fade time (seconds)
+    bool music_fading = false;                                       // Whether a fade is in progress
 
     void setup_audio();                                              // Create audio player pools
-    void update_audio();                                             // Process sound events + loops
+    void update_audio(double delta);                                 // Process sound events + loops
     Ref<AudioStreamWAV> load_wav_from_vfs(int sfxHandle);            // Load WAV via engine VFS
 
     // Cinematic display (Phase 11)

@@ -29,6 +29,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  *****************************************************************************/
 
+#ifndef __BOTLIB_H
+#define __BOTLIB_H
+
 #define	BOTLIB_API_VERSION		2
 
 struct aas_clientmove_s;
@@ -514,4 +517,6 @@ name:						default:			module(s):			description:
 "max_levelitems"			"256"				be_ai_goal.c		maximum number of level items
 
 */
+
+#endif /* __BOTLIB_H */
 

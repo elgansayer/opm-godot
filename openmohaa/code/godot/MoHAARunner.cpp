@@ -2444,6 +2444,9 @@ void MoHAARunner::setup_audio() {
                             String::num_int64(MAX_3D_PLAYERS) + " 3D + " +
                             String::num_int64(MAX_2D_PLAYERS) + " 2D players.");
 
+    // Initialise player slot tracking (Phase 41)
+    player_slot_info.resize(MAX_3D_PLAYERS);
+
     // Music player (Phase 17)
     music_player = memnew(AudioStreamPlayer);
     music_player->set_name("MusicPlayer");
@@ -2576,7 +2579,7 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
     return wav;
 }
 
-void MoHAARunner::update_audio() {
+void MoHAARunner::update_audio(double delta) {
     if (!audio_root) return;
 
     // -- 1. Update listener position from engine camera --
@@ -2623,8 +2626,33 @@ void MoHAARunner::update_audio() {
         if (wav.is_null()) continue;
 
         if (type == 0) {
-            AudioStreamPlayer3D *p = sfx_players_3d[next_3d_player];
-            next_3d_player = (next_3d_player + 1) % MAX_3D_PLAYERS;
+            // Phase 41: Try to evict a player on the same entity+channel first
+            int pi = -1;
+            if (entnum > 0 && channel > 0) {
+                for (int s = 0; s < MAX_3D_PLAYERS; s++) {
+                    if (player_slot_info[s].in_use &&
+                        player_slot_info[s].entnum == entnum &&
+                        player_slot_info[s].channel == channel) {
+                        pi = s;
+                        break;
+                    }
+                }
+            }
+            if (pi < 0) {
+                // Fallback: find an idle player, then round-robin
+                for (int s = 0; s < MAX_3D_PLAYERS; s++) {
+                    int idx = (next_3d_player + s) % MAX_3D_PLAYERS;
+                    if (!sfx_players_3d[idx]->is_playing()) {
+                        pi = idx;
+                        break;
+                    }
+                }
+                if (pi < 0) {
+                    pi = next_3d_player;
+                }
+                next_3d_player = (pi + 1) % MAX_3D_PLAYERS;
+            }
+            AudioStreamPlayer3D *p = sfx_players_3d[pi];
             p->set_stream(wav);
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
@@ -2636,6 +2664,7 @@ void MoHAARunner::update_audio() {
             float unit_m = (minDist > 0) ? (minDist * MOHAA_UNIT_SCALE) : 1.0f;
             p->set_unit_size(unit_m);
             p->play();
+            player_slot_info[pi] = {entnum, channel, true};
         } else if (type == 1) {
             AudioStreamPlayer *p = sfx_players_2d[next_2d_player];
             next_2d_player = (next_2d_player + 1) % MAX_2D_PLAYERS;
@@ -2648,9 +2677,19 @@ void MoHAARunner::update_audio() {
     }
     Godot_Sound_ClearEvents();
 
-    // -- 3. Update looping sounds --
+    // -- 3. Update looping sounds (Phase 40: position-aware tracking) --
     int loop_count = Godot_Sound_GetLoopCount();
-    std::unordered_map<int, int> new_loops;
+    // Build a composite key = sfxHandle * 65537 + quantised position hash
+    // This allows the same sfxHandle to loop at multiple positions
+    auto make_loop_key = [](int sfxHandle, float ox, float oy, float oz) -> int64_t {
+        // Quantise to 128-unit grid for stable matching across frames
+        int qx = (int)(ox / 128.0f);
+        int qy = (int)(oy / 128.0f);
+        int qz = (int)(oz / 128.0f);
+        int64_t posHash = ((int64_t)(qx & 0xFFF)) | ((int64_t)(qy & 0xFFF) << 12) | ((int64_t)(qz & 0xFFF) << 24);
+        return ((int64_t)sfxHandle << 36) | posHash;
+    };
+    std::unordered_map<int64_t, int> new_loops_64;
 
     for (int i = 0; i < loop_count; i++) {
         float origin[3], velocity[3];
@@ -2659,9 +2698,10 @@ void MoHAARunner::update_audio() {
         Godot_Sound_GetLoop(i, origin, velocity, &sfxHandle, &volume,
                             &minDist, &maxDist, &pitch, &flags);
         if (sfxHandle <= 0) continue;
-        new_loops[sfxHandle] = i;
+        int64_t lkey = make_loop_key(sfxHandle, origin[0], origin[1], origin[2]);
+        new_loops_64[lkey] = i;
 
-        auto it = active_loops.find(sfxHandle);
+        auto it = active_loops.find(lkey);
         if (it != active_loops.end()) {
             int pi = it->second;
             if (pi >= 0 && pi < MAX_3D_PLAYERS) {
@@ -2701,12 +2741,12 @@ void MoHAARunner::update_audio() {
             float unit_m = (minDist > 0) ? (minDist * MOHAA_UNIT_SCALE) : 1.0f;
             p->set_unit_size(unit_m);
             p->play();
-            active_loops[sfxHandle] = pi;
+            active_loops[lkey] = pi;
         }
     }
 
     for (auto it = active_loops.begin(); it != active_loops.end(); ) {
-        if (new_loops.find(it->first) == new_loops.end()) {
+        if (new_loops_64.find(it->first) == new_loops_64.end()) {
             int pi = it->second;
             if (pi >= 0 && pi < MAX_3D_PLAYERS) sfx_players_3d[pi]->stop();
             it = active_loops.erase(it);
@@ -2801,12 +2841,40 @@ void MoHAARunner::update_audio() {
                 current_music_name = "";
                 UtilityFunctions::print("[MoHAA] Music: stopped.");
             } else if (music_action == 3) {
+                // Phase 39: Smooth volume fading using fadeTime
                 float new_vol = Godot_Sound_GetMusicVolume();
-                music_target_volume = new_vol;
-                float vol_db = (new_vol > 0.001f) ? (20.0f * log10f(new_vol)) : -80.0f;
-                music_player->set_volume_db(vol_db);
+                float fade_time = Godot_Sound_GetMusicFadeTime();
+                if (fade_time > 0.01f) {
+                    // Start a gradual fade
+                    music_fade_from = music_target_volume;
+                    music_fade_to = new_vol;
+                    music_fade_duration = fade_time;
+                    music_fade_elapsed = 0.0f;
+                    music_fading = true;
+                } else {
+                    // Instant volume change
+                    music_target_volume = new_vol;
+                    float vol_db = (new_vol > 0.001f) ? (20.0f * log10f(new_vol)) : -80.0f;
+                    music_player->set_volume_db(vol_db);
+                    music_fading = false;
+                }
             }
             Godot_Sound_ClearMusicAction();
+        }
+
+        // Phase 39: Per-frame music volume fade interpolation
+        if (music_fading && music_fade_duration > 0.0f) {
+            float dt = (float)delta;
+            music_fade_elapsed += dt;
+            float t = music_fade_elapsed / music_fade_duration;
+            if (t >= 1.0f) {
+                t = 1.0f;
+                music_fading = false;
+            }
+            float cur_vol = music_fade_from + (music_fade_to - music_fade_from) * t;
+            music_target_volume = cur_vol;
+            float vol_db = (cur_vol > 0.001f) ? (20.0f * log10f(cur_vol)) : -80.0f;
+            music_player->set_volume_db(vol_db);
         }
     }
 
@@ -3074,7 +3142,7 @@ void MoHAARunner::_process(double delta) {
     update_2d_overlay();
 
     // ── Update audio from captured sound events (Phase 8) ──
-    update_audio();
+    update_audio(delta);
 
     // ── Update cinematic video display (Phase 11) ──
     update_cinematic();

@@ -868,3 +868,51 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 
 ### Files modified (Phase 38):
 - `code/godot/MoHAARunner.cpp` — static-model angle basis + load-origin offset transform fix
+
+## Phase 39: Music Fade Transitions ✅
+- [x] **Task 39.1:** Added smooth music volume fading using engine's `fadeTime` parameter.
+- [x] **Task 39.2:** When `MUSIC_UpdateVolume` provides a non-zero `fadeTime`, music volume interpolates linearly over that duration instead of snapping instantly.
+- [x] **Task 39.3:** Fade state tracked via `music_fade_from`, `music_fade_to`, `music_fade_duration`, `music_fade_elapsed` members in MoHAARunner.
+- [x] **Task 39.4:** Per-frame interpolation in `update_audio(delta)` uses the real Godot frame delta for accurate timing.
+
+### Key technical details (Phase 39):
+- `update_audio()` now takes `double delta` parameter from `_process(delta)`
+- Fade uses linear interpolation: `cur_vol = from + (to - from) * (elapsed / duration)`
+- Instant volume change still used when `fadeTime <= 0.01`
+
+### Files modified (Phase 39):
+- `code/godot/MoHAARunner.h` — added fade state members, changed `update_audio` signature
+- `code/godot/MoHAARunner.cpp` — fade interpolation logic, delta pass-through
+
+## Phase 40: Position-Aware Looping Sounds ✅
+- [x] **Task 40.1:** Changed looping sound tracking key from `sfxHandle` alone to a composite key of `sfxHandle + quantised position`.
+- [x] **Task 40.2:** Allows multiple instances of the same sound effect at different world positions (e.g. two water fountains).
+- [x] **Task 40.3:** Position quantised to 128-unit grid for stable matching across frames.
+
+### Key technical details (Phase 40):
+- Loop key = `(sfxHandle << 36) | posHash` where posHash encodes quantised X/Y/Z
+- `active_loops` map changed from `int` to `int64_t` keys
+- Existing loop update/cleanup logic preserved
+
+### Files modified (Phase 40):
+- `code/godot/MoHAARunner.h` — changed `active_loops` key type to `int64_t`
+- `code/godot/MoHAARunner.cpp` — composite loop key generation via lambda
+
+## Phase 41: Sound Channel Priority Eviction ✅
+- [x] **Task 41.1:** Added `PlayerSlotInfo` tracking for each 3D audio player slot (entity number + channel).
+- [x] **Task 41.2:** When starting a new 3D sound, first check if the same entity+channel already has a slot — evict it to reuse that slot.
+- [x] **Task 41.3:** Fallback: find an idle (non-playing) slot before resorting to round-robin eviction.
+
+### Key technical details (Phase 41):
+- `player_slot_info` vector tracks `{entnum, channel, in_use}` per 3D player slot
+- Priority: same entity+channel eviction > idle slot > round-robin
+- Prevents the same entity playing duplicate sounds on the same channel
+
+### Files modified (Phase 41):
+- `code/godot/MoHAARunner.h` — added `PlayerSlotInfo` struct and `player_slot_info` vector
+- `code/godot/MoHAARunner.cpp` — channel-aware player allocation logic
+
+## Build Fix: Generated Parser Files & Include Guards
+- [x] Generated `yyParser.cpp`, `yyParser.hpp`, `yyLexer.cpp`, `yyLexer.h` from bison/flex sources
+- [x] Removed `/code/parser/generated` from `.gitignore` so generated files are tracked (SCons has no generation step)
+- [x] Added `#ifndef __BOTLIB_H` / `#define __BOTLIB_H` / `#endif` include guards to `code/fgame/botlib.h` to fix redefinition errors
