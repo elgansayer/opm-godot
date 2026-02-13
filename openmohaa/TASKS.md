@@ -916,3 +916,54 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 - [x] Generated `yyParser.cpp`, `yyParser.hpp`, `yyLexer.cpp`, `yyLexer.h` from bison/flex sources
 - [x] Removed `/code/parser/generated` from `.gitignore` so generated files are tracked (SCons has no generation step)
 - [x] Added `#ifndef __BOTLIB_H` / `#define __BOTLIB_H` / `#endif` include guards to `code/fgame/botlib.h` to fix redefinition errors
+
+## Phase 43: MP3-in-WAV Audio Decoding ✅
+- [x] **Task 43.1:** Detect MP3-encoded data inside WAV containers (WAVE format tag 0x0055) in `load_wav_from_vfs()`.
+- [x] **Task 43.2:** When format 0x0055 is detected, extract the data chunk and create `AudioStreamMP3` instead of rejecting the file.
+- [x] **Task 43.3:** Also detect raw MP3 files (ID3 tag or MP3 sync word) and load them as `AudioStreamMP3`.
+- [x] **Task 43.4:** Changed return type and cache from `Ref<AudioStreamWAV>` to `Ref<AudioStream>` to support both WAV and MP3.
+- [x] **Task 43.5:** Updated looping sound code to handle both `AudioStreamWAV` (set_loop_mode) and `AudioStreamMP3` (set_loop) for loop creation.
+
+### Key technical details (Phase 43):
+- MOHAA stores many sound effects as MP3-encoded WAV files (RIFF/WAVE with fmt tag 0x0055)
+- The data chunk contains raw MP3 frames that Godot's `AudioStreamMP3` can decode
+- `Ref<AudioStream>` is the common base type for both `AudioStreamWAV` and `AudioStreamMP3`
+- Loop handling uses `dynamic_cast`-style Ref conversion to determine stream type
+
+### Files modified (Phase 43):
+- `code/godot/MoHAARunner.h` — changed `sfx_cache` to `Ref<AudioStream>`, changed `load_wav_from_vfs` return type, added `array_mesh.hpp` include
+- `code/godot/MoHAARunner.cpp` — MP3-in-WAV detection, raw MP3 detection, dual-type loop handling
+
+## Phase 60: Per-Entity Skeletal Mesh Caching ✅
+- [x] **Task 60.1:** Added `SkelMeshCacheEntry` struct with animation state hash and cached `ArrayMesh`.
+- [x] **Task 60.2:** Compute FNV-1a hash of frameInfoBuf + boneTagBuf + boneQuatBuf + actionWeight + hModel per entity per frame.
+- [x] **Task 60.3:** Check cache before CPU skinning — if animation state hash matches, reuse the cached mesh.
+- [x] **Task 60.4:** Cache newly built skinned meshes after successful CPU skinning.
+- [x] **Task 60.5:** Clear skeletal mesh cache on map change.
+
+### Key technical details (Phase 60):
+- Cache key is `entityNumber` → `(anim_hash, Ref<ArrayMesh>)`
+- FNV-1a hash computed over 256-byte frameInfo + 20-byte boneTag + 80-byte boneQuat + actionWeight + hModel
+- When animation state hasn't changed between frames, the expensive bone preparation and CPU skinning are skipped entirely
+- Cache is invalidated on map change (BSP unload)
+
+### Files modified (Phase 60):
+- `code/godot/MoHAARunner.h` — added `SkelMeshCacheEntry` struct and `skel_mesh_cache` map
+- `code/godot/MoHAARunner.cpp` — animation hash computation, cache lookup/store, cache clear on map change
+
+## Phase 61: Tinted Material Cache ✅
+- [x] **Task 61.1:** Added `tinted_mat_cache` mapping composite key → cached `StandardMaterial3D`.
+- [x] **Task 61.2:** Cache key combines hModel, surface index, entity RGBA, and quantised lightgrid colour.
+- [x] **Task 61.3:** On cache hit, reuse the previously duplicated tinted material instead of creating a new one.
+- [x] **Task 61.4:** On cache miss, duplicate the base material, apply tinting, and store in cache.
+- [x] **Task 61.5:** Clear tinted material cache on map change.
+
+### Key technical details (Phase 61):
+- Previously, entity colour tinting duplicated materials every frame for every entity with non-white RGBA or lightgrid tint
+- Cache key: `(hModel:20b | surfIdx:8b | rgba[0..3]:32b | quantised_light:4b)` packed into `uint64_t`
+- Light colour quantised to 4-bit precision (16 levels per channel) for stable cache matching
+- Cache is invalidated on map change alongside skeletal mesh cache
+
+### Files modified (Phase 61):
+- `code/godot/MoHAARunner.h` — added `tinted_mat_cache` member, added `standard_material3d.hpp` include
+- `code/godot/MoHAARunner.cpp` — cache lookup/store in entity tinting code, cache clear on map change

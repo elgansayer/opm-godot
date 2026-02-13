@@ -562,6 +562,8 @@ void MoHAARunner::check_world_load() {
             static_model_root = nullptr;  // child of bsp_map_node, freed with it
             loaded_bsp_name = "";
             GodotSkelModelCache::get().clear();  // Invalidate model cache
+            skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
+            tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -1307,7 +1309,7 @@ void MoHAARunner::update_entities() {
                     }
                 }
 
-                // ── Phase 13: CPU skinning ──
+                // ── Phase 13: CPU skinning (Phase 60: with anim state caching) ──
                 // Try to get animation data and compute skinned mesh
                 void *tikiPtr = nullptr;
                 int entNum = 0;
@@ -1335,107 +1337,139 @@ void MoHAARunner::update_entities() {
                 }
 
                 if (has_anim && tikiPtr) {
-                    int boneCount = 0;
-                    void *boneCache = Godot_Skel_PrepareBones(
-                        tikiPtr, entNum,
-                        (const void *)frameInfoBuf, boneTagBuf,
-                        (const float *)boneQuatBuf,
-                        actionWeight, &boneCount);
+                    // Phase 60: Compute FNV-1a hash of animation state to
+                    // skip mesh rebuild when the pose hasn't changed.
+                    uint64_t anim_hash = 14695981039346656037ULL;
+                    auto fnv_bytes = [&anim_hash](const void *p, size_t n) {
+                        const unsigned char *b = (const unsigned char *)p;
+                        for (size_t j = 0; j < n; j++) {
+                            anim_hash ^= b[j];
+                            anim_hash *= 1099511628211ULL;
+                        }
+                    };
+                    fnv_bytes(frameInfoBuf, sizeof(frameInfoBuf));
+                    fnv_bytes(boneTagBuf, sizeof(boneTagBuf));
+                    fnv_bytes(boneQuatBuf, sizeof(boneQuatBuf));
+                    fnv_bytes(&actionWeight, sizeof(actionWeight));
+                    fnv_bytes(&hModel, sizeof(hModel));
 
-                    if (boneCache && boneCount > 0) {
-                        skinned_mesh.instantiate();
-                        int meshCount = Godot_Skel_GetMeshCount(tikiPtr);
-                        float tikiScale = Godot_Skel_GetScale(tikiPtr);
+                    // Check cache: if animation state unchanged, reuse mesh
+                    auto cache_it = skel_mesh_cache.find(entNum);
+                    if (cache_it != skel_mesh_cache.end() &&
+                        cache_it->second.anim_hash == anim_hash &&
+                        cache_it->second.mesh != nullptr) {
+                        skinned_mesh = cache_it->second.mesh;
+                    } else {
+                        int boneCount = 0;
+                        void *boneCache = Godot_Skel_PrepareBones(
+                            tikiPtr, entNum,
+                            (const void *)frameInfoBuf, boneTagBuf,
+                            (const float *)boneQuatBuf,
+                            actionWeight, &boneCount);
 
-                        for (int mesh = 0; mesh < meshCount; mesh++) {
-                            int surfCount = Godot_Skel_GetSurfaceCount(tikiPtr, mesh);
-                            for (int surf = 0; surf < surfCount; surf++) {
-                                int numVerts = 0, numTris = 0;
-                                Godot_Skel_GetSurfaceInfo(tikiPtr, mesh, surf,
-                                    &numVerts, &numTris,
-                                    nullptr, 0, nullptr, 0);
-                                if (numVerts <= 0 || numTris <= 0) continue;
+                        if (boneCache && boneCount > 0) {
+                            skinned_mesh.instantiate();
+                            int meshCount = Godot_Skel_GetMeshCount(tikiPtr);
+                            float tikiScale = Godot_Skel_GetScale(tikiPtr);
 
-                                float *positions = (float *)malloc(numVerts * 3 * sizeof(float));
-                                float *normals   = (float *)malloc(numVerts * 3 * sizeof(float));
-                                float *texcoords = (float *)malloc(numVerts * 2 * sizeof(float));
-                                int   *indices   = (int *)malloc(numTris * 3 * sizeof(int));
+                            for (int mesh = 0; mesh < meshCount; mesh++) {
+                                int surfCount = Godot_Skel_GetSurfaceCount(tikiPtr, mesh);
+                                for (int surf = 0; surf < surfCount; surf++) {
+                                    int numVerts = 0, numTris = 0;
+                                    Godot_Skel_GetSurfaceInfo(tikiPtr, mesh, surf,
+                                        &numVerts, &numTris,
+                                        nullptr, 0, nullptr, 0);
+                                    if (numVerts <= 0 || numTris <= 0) continue;
 
-                                if (!positions || !normals || !texcoords || !indices) {
-                                    ::free(positions); ::free(normals);
-                                    ::free(texcoords); ::free(indices);
-                                    continue;
+                                    float *positions = (float *)malloc(numVerts * 3 * sizeof(float));
+                                    float *normals   = (float *)malloc(numVerts * 3 * sizeof(float));
+                                    float *texcoords = (float *)malloc(numVerts * 2 * sizeof(float));
+                                    int   *indices   = (int *)malloc(numTris * 3 * sizeof(int));
+
+                                    if (!positions || !normals || !texcoords || !indices) {
+                                        ::free(positions); ::free(normals);
+                                        ::free(texcoords); ::free(indices);
+                                        continue;
+                                    }
+
+                                    // Get skinned positions + normals
+                                    if (!Godot_Skel_SkinSurface(tikiPtr, mesh, surf,
+                                            boneCache, boneCount,
+                                            positions, normals)) {
+                                        ::free(positions); ::free(normals);
+                                        ::free(texcoords); ::free(indices);
+                                        continue;
+                                    }
+
+                                    // Get UVs + indices from static data
+                                    Godot_Skel_GetSurfaceVertices(tikiPtr, mesh, surf,
+                                        nullptr, nullptr, texcoords);
+                                    Godot_Skel_GetSurfaceIndices(tikiPtr, mesh, surf,
+                                        indices);
+
+                                    // Build Godot arrays with coord conversion
+                                    PackedVector3Array gPos, gNrm;
+                                    PackedVector2Array gUVs;
+                                    PackedInt32Array   gIdx;
+                                    gPos.resize(numVerts);
+                                    gNrm.resize(numVerts);
+                                    gUVs.resize(numVerts);
+                                    gIdx.resize(numTris * 3);
+
+                                    for (int v = 0; v < numVerts; v++) {
+                                        Vector3 p = id_to_godot_point(
+                                            positions[v*3+0],
+                                            positions[v*3+1],
+                                            positions[v*3+2])
+                                            * tikiScale * MOHAA_UNIT_SCALE;
+                                        Vector3 n = id_to_godot_point(
+                                            normals[v*3+0],
+                                            normals[v*3+1],
+                                            normals[v*3+2]);
+                                        if (n.length_squared() > 0.001f)
+                                            n = n.normalized();
+
+                                        gPos.set(v, p);
+                                        gNrm.set(v, n);
+                                        gUVs.set(v, Vector2(
+                                            texcoords[v*2+0],
+                                            texcoords[v*2+1]));
+                                    }
+
+                                    // Reverse winding (id CW → Godot CCW)
+                                    for (int t = 0; t < numTris; t++) {
+                                        gIdx.set(t*3+0, indices[t*3+0]);
+                                        gIdx.set(t*3+1, indices[t*3+2]);
+                                        gIdx.set(t*3+2, indices[t*3+1]);
+                                    }
+
+                                    Array arrays;
+                                    arrays.resize(Mesh::ARRAY_MAX);
+                                    arrays[Mesh::ARRAY_VERTEX] = gPos;
+                                    arrays[Mesh::ARRAY_NORMAL] = gNrm;
+                                    arrays[Mesh::ARRAY_TEX_UV] = gUVs;
+                                    arrays[Mesh::ARRAY_INDEX]  = gIdx;
+                                    skinned_mesh->add_surface_from_arrays(
+                                        Mesh::PRIMITIVE_TRIANGLES, arrays);
+
+                                    ::free(positions);
+                                    ::free(normals);
+                                    ::free(texcoords);
+                                    ::free(indices);
                                 }
-
-                                // Get skinned positions + normals
-                                if (!Godot_Skel_SkinSurface(tikiPtr, mesh, surf,
-                                        boneCache, boneCount,
-                                        positions, normals)) {
-                                    ::free(positions); ::free(normals);
-                                    ::free(texcoords); ::free(indices);
-                                    continue;
-                                }
-
-                                // Get UVs + indices from static data
-                                Godot_Skel_GetSurfaceVertices(tikiPtr, mesh, surf,
-                                    nullptr, nullptr, texcoords);
-                                Godot_Skel_GetSurfaceIndices(tikiPtr, mesh, surf,
-                                    indices);
-
-                                // Build Godot arrays with coord conversion
-                                PackedVector3Array gPos, gNrm;
-                                PackedVector2Array gUVs;
-                                PackedInt32Array   gIdx;
-                                gPos.resize(numVerts);
-                                gNrm.resize(numVerts);
-                                gUVs.resize(numVerts);
-                                gIdx.resize(numTris * 3);
-
-                                for (int v = 0; v < numVerts; v++) {
-                                    Vector3 p = id_to_godot_point(
-                                        positions[v*3+0],
-                                        positions[v*3+1],
-                                        positions[v*3+2])
-                                        * tikiScale * MOHAA_UNIT_SCALE;
-                                    Vector3 n = id_to_godot_point(
-                                        normals[v*3+0],
-                                        normals[v*3+1],
-                                        normals[v*3+2]);
-                                    if (n.length_squared() > 0.001f)
-                                        n = n.normalized();
-
-                                    gPos.set(v, p);
-                                    gNrm.set(v, n);
-                                    gUVs.set(v, Vector2(
-                                        texcoords[v*2+0],
-                                        texcoords[v*2+1]));
-                                }
-
-                                // Reverse winding (id CW → Godot CCW)
-                                for (int t = 0; t < numTris; t++) {
-                                    gIdx.set(t*3+0, indices[t*3+0]);
-                                    gIdx.set(t*3+1, indices[t*3+2]);
-                                    gIdx.set(t*3+2, indices[t*3+1]);
-                                }
-
-                                Array arrays;
-                                arrays.resize(Mesh::ARRAY_MAX);
-                                arrays[Mesh::ARRAY_VERTEX] = gPos;
-                                arrays[Mesh::ARRAY_NORMAL] = gNrm;
-                                arrays[Mesh::ARRAY_TEX_UV] = gUVs;
-                                arrays[Mesh::ARRAY_INDEX]  = gIdx;
-                                skinned_mesh->add_surface_from_arrays(
-                                    Mesh::PRIMITIVE_TRIANGLES, arrays);
-
-                                ::free(positions);
-                                ::free(normals);
-                                ::free(texcoords);
-                                ::free(indices);
                             }
+
+                            ::free(boneCache);
                         }
 
-                        ::free(boneCache);
-                    }
+                        // Phase 60: Cache the newly built skinned mesh
+                        if (skinned_mesh.is_valid() && skinned_mesh->get_surface_count() > 0) {
+                            auto &entry = skel_mesh_cache[entNum];
+                            entry.anim_hash = anim_hash;
+                            entry.mesh = skinned_mesh;
+                            entry.mesh_surfaces = skinned_mesh->get_surface_count();
+                        }
+                    }  // end else (cache miss)
                 }
 
                 // Use skinned mesh if available, else cached bind pose
@@ -1569,27 +1603,48 @@ void MoHAARunner::update_entities() {
         if (has_tint || has_alpha || has_light_tint) {
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
+                // Phase 61: Quantise light to 4-bit and combine with RGBA for cache key
+                uint8_t lr = (uint8_t)(light_mul.r * 15.0f + 0.5f);
+                uint8_t lg = (uint8_t)(light_mul.g * 15.0f + 0.5f);
+                uint8_t lb = (uint8_t)(light_mul.b * 15.0f + 0.5f);
+                uint32_t light_q = ((uint32_t)lr << 8) | ((uint32_t)lg << 4) | lb;
+
                 Color tint(rgba[0] / 255.0f, rgba[1] / 255.0f,
                            rgba[2] / 255.0f, rgba[3] / 255.0f);
                 int sc = mesh->get_surface_count();
                 for (int s = 0; s < sc; s++) {
-                    Ref<Material> base_mat = mi->get_surface_override_material(s);
-                    if (base_mat.is_null())
-                        base_mat = mesh->surface_get_material(s);
+                    // Build tinted material cache key
+                    uint64_t tint_key = ((uint64_t)(hModel & 0xFFFFF) << 44) |
+                                        ((uint64_t)(s & 0xFF) << 36) |
+                                        ((uint64_t)rgba[0] << 28) |
+                                        ((uint64_t)rgba[1] << 20) |
+                                        ((uint64_t)rgba[2] << 12) |
+                                        ((uint64_t)rgba[3] << 4) |
+                                        (uint64_t)(light_q & 0xF);
+                    tint_key ^= ((uint64_t)light_q << 2);
 
-                    Ref<StandardMaterial3D> smat = base_mat;
-                    if (smat.is_valid()) {
-                        Ref<StandardMaterial3D> dup = smat->duplicate();
-                        // Modulate existing albedo colour with entity shaderRGBA
-                        Color existing = dup->get_albedo();
-                        dup->set_albedo(Color(existing.r * tint.r * light_mul.r,
-                                              existing.g * tint.g * light_mul.g,
-                                              existing.b * tint.b * light_mul.b,
-                                              existing.a * tint.a));
-                        if (has_alpha) {
-                            dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                    auto tint_it = tinted_mat_cache.find(tint_key);
+                    if (tint_it != tinted_mat_cache.end()) {
+                        mi->set_surface_override_material(s, tint_it->second);
+                    } else {
+                        Ref<Material> base_mat = mi->get_surface_override_material(s);
+                        if (base_mat.is_null())
+                            base_mat = mesh->surface_get_material(s);
+
+                        Ref<StandardMaterial3D> smat = base_mat;
+                        if (smat.is_valid()) {
+                            Ref<StandardMaterial3D> dup = smat->duplicate();
+                            Color existing = dup->get_albedo();
+                            dup->set_albedo(Color(existing.r * tint.r * light_mul.r,
+                                                   existing.g * tint.g * light_mul.g,
+                                                   existing.b * tint.b * light_mul.b,
+                                                   existing.a * tint.a));
+                            if (has_alpha) {
+                                dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                            }
+                            tinted_mat_cache[tint_key] = dup;
+                            mi->set_surface_override_material(s, dup);
                         }
-                        mi->set_surface_override_material(s, dup);
                     }
                 }
             }
@@ -2455,17 +2510,17 @@ void MoHAARunner::setup_audio() {
     UtilityFunctions::print("[MoHAA] Music player initialised.");
 }
 
-Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
+Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
     // Check cache first
     auto it = sfx_cache.find(sfxHandle);
     if (it != sfx_cache.end()) return it->second;
 
     // Look up name from the sound registry
     int idx = Godot_Sound_FindSfxIndex(sfxHandle);
-    if (idx < 0) return Ref<AudioStreamWAV>();
+    if (idx < 0) return Ref<AudioStream>();
 
     const char *snd_name = Godot_Sound_GetSfxName(idx);
-    if (!snd_name || !snd_name[0]) return Ref<AudioStreamWAV>();
+    if (!snd_name || !snd_name[0]) return Ref<AudioStream>();
 
     // Try loading via VFS — sound files may or may not have "sound/" prefix
     void *buf = nullptr;
@@ -2480,11 +2535,32 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
 
     if (len <= 0 || !buf) {
         // Cache a null ref so we don't keep retrying
-        sfx_cache[sfxHandle] = Ref<AudioStreamWAV>();
-        return Ref<AudioStreamWAV>();
+        sfx_cache[sfxHandle] = Ref<AudioStream>();
+        return Ref<AudioStream>();
     }
 
     const unsigned char *data = (const unsigned char *)buf;
+
+    // Check if this is a raw MP3 file (starts with ID3 tag or MP3 sync word)
+    bool is_raw_mp3 = false;
+    if (len >= 3 && data[0] == 'I' && data[1] == 'D' && data[2] == '3') {
+        is_raw_mp3 = true;
+    } else if (len >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+        is_raw_mp3 = true;
+    }
+
+    if (is_raw_mp3) {
+        PackedByteArray mp3_data;
+        mp3_data.resize(len);
+        memcpy(mp3_data.ptrw(), data, len);
+        Godot_VFS_FreeFile(buf);
+
+        Ref<AudioStreamMP3> mp3;
+        mp3.instantiate();
+        mp3->set_data(mp3_data);
+        sfx_cache[sfxHandle] = mp3;
+        return mp3;
+    }
 
     // Parse WAV header — RIFF/WAVE format
     // Minimum: RIFF(4) + size(4) + WAVE(4) + fmt (8+16) + data(8) = 44 bytes
@@ -2492,8 +2568,8 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
         data[0] != 'R' || data[1] != 'I' || data[2] != 'F' || data[3] != 'F' ||
         data[8] != 'W' || data[9] != 'A' || data[10] != 'V' || data[11] != 'E') {
         Godot_VFS_FreeFile(buf);
-        sfx_cache[sfxHandle] = Ref<AudioStreamWAV>();
-        return Ref<AudioStreamWAV>();
+        sfx_cache[sfxHandle] = Ref<AudioStream>();
+        return Ref<AudioStream>();
     }
 
     // Find 'fmt ' chunk
@@ -2519,8 +2595,8 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
 
     if (fmt_offset < 0 || data_offset < 0 || data_size <= 0) {
         Godot_VFS_FreeFile(buf);
-        sfx_cache[sfxHandle] = Ref<AudioStreamWAV>();
-        return Ref<AudioStreamWAV>();
+        sfx_cache[sfxHandle] = Ref<AudioStream>();
+        return Ref<AudioStream>();
     }
 
     // Read fmt chunk fields
@@ -2530,7 +2606,26 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
                        (data[fmt_offset + 6] << 16) | (data[fmt_offset + 7] << 24);
     int bits_per_sample = data[fmt_offset + 14] | (data[fmt_offset + 15] << 8);
 
-    // Only support PCM (1) and IMA-ADPCM (17)
+    // Phase 43: Handle MP3-in-WAV (format tag 0x0055)
+    if (audio_format == 0x0055) {
+        // Clamp data_size to available data
+        if (data_offset + data_size > (int)len) {
+            data_size = (int)len - data_offset;
+        }
+        // The data chunk contains raw MP3 frames
+        PackedByteArray mp3_data;
+        mp3_data.resize(data_size);
+        memcpy(mp3_data.ptrw(), &data[data_offset], data_size);
+        Godot_VFS_FreeFile(buf);
+
+        Ref<AudioStreamMP3> mp3;
+        mp3.instantiate();
+        mp3->set_data(mp3_data);
+        sfx_cache[sfxHandle] = mp3;
+        return mp3;
+    }
+
+    // Support PCM (1) and IMA-ADPCM (17)
     AudioStreamWAV::Format godot_format;
     if (audio_format == 1) {
         // PCM
@@ -2540,16 +2635,16 @@ Ref<AudioStreamWAV> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
             godot_format = AudioStreamWAV::FORMAT_16_BITS;
         else {
             Godot_VFS_FreeFile(buf);
-            sfx_cache[sfxHandle] = Ref<AudioStreamWAV>();
-            return Ref<AudioStreamWAV>();
+            sfx_cache[sfxHandle] = Ref<AudioStream>();
+            return Ref<AudioStream>();
         }
     } else if (audio_format == 17) {
         godot_format = AudioStreamWAV::FORMAT_IMA_ADPCM;
     } else {
-        // Unsupported format (e.g. MP3, ADPCM variants)
+        // Unsupported format
         Godot_VFS_FreeFile(buf);
-        sfx_cache[sfxHandle] = Ref<AudioStreamWAV>();
-        return Ref<AudioStreamWAV>();
+        sfx_cache[sfxHandle] = Ref<AudioStream>();
+        return Ref<AudioStream>();
     }
 
     // Clamp data_size to available data
@@ -2622,7 +2717,7 @@ void MoHAARunner::update_audio(double delta) {
         if (type == 2) continue;
         if (sfxHandle <= 0) continue;
 
-        Ref<AudioStreamWAV> wav = load_wav_from_vfs(sfxHandle);
+        Ref<AudioStream> wav = load_wav_from_vfs(sfxHandle);
         if (wav.is_null()) continue;
 
         if (type == 0) {
@@ -2712,25 +2807,37 @@ void MoHAARunner::update_audio(double delta) {
                 p->set_volume_db(vol_db);
             }
         } else {
-            Ref<AudioStreamWAV> wav = load_wav_from_vfs(sfxHandle);
+            Ref<AudioStream> wav = load_wav_from_vfs(sfxHandle);
             if (wav.is_null()) continue;
-            Ref<AudioStreamWAV> loop_wav = wav->duplicate();
-            if (loop_wav.is_valid()) {
-                loop_wav->set_loop_mode(AudioStreamWAV::LOOP_FORWARD);
-                loop_wav->set_loop_begin(0);
-                int total_samples = 0;
-                PackedByteArray d = loop_wav->get_data();
-                int bps = (loop_wav->get_format() == AudioStreamWAV::FORMAT_16_BITS) ? 2 : 1;
-                int ch = loop_wav->is_stereo() ? 2 : 1;
-                if (bps > 0 && ch > 0) total_samples = d.size() / (bps * ch);
-                loop_wav->set_loop_end(total_samples);
-            } else {
-                loop_wav = wav;
+            // Phase 43: Handle looping for both WAV and MP3 streams
+            Ref<AudioStream> loop_stream;
+            Ref<AudioStreamWAV> wav_ref = wav;
+            Ref<AudioStreamMP3> mp3_ref = wav;
+            if (wav_ref.is_valid()) {
+                Ref<AudioStreamWAV> loop_wav = wav_ref->duplicate();
+                if (loop_wav.is_valid()) {
+                    loop_wav->set_loop_mode(AudioStreamWAV::LOOP_FORWARD);
+                    loop_wav->set_loop_begin(0);
+                    int total_samples = 0;
+                    PackedByteArray d = loop_wav->get_data();
+                    int bps = (loop_wav->get_format() == AudioStreamWAV::FORMAT_16_BITS) ? 2 : 1;
+                    int ch = loop_wav->is_stereo() ? 2 : 1;
+                    if (bps > 0 && ch > 0) total_samples = d.size() / (bps * ch);
+                    loop_wav->set_loop_end(total_samples);
+                    loop_stream = loop_wav;
+                }
+            } else if (mp3_ref.is_valid()) {
+                Ref<AudioStreamMP3> loop_mp3 = mp3_ref->duplicate();
+                if (loop_mp3.is_valid()) {
+                    loop_mp3->set_loop(true);
+                    loop_stream = loop_mp3;
+                }
             }
+            if (loop_stream.is_null()) loop_stream = wav;
             int pi = next_3d_player;
             next_3d_player = (next_3d_player + 1) % MAX_3D_PLAYERS;
             AudioStreamPlayer3D *p = sfx_players_3d[pi];
-            p->set_stream(loop_wav);
+            p->set_stream(loop_stream);
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
             float vol_db = (volume > 0.001f) ? (20.0f * log10f(volume)) : -80.0f;
