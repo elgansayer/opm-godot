@@ -8,6 +8,11 @@
  * The parser reads scripts/shaderlist.txt to discover which .shader
  * files to load, then extracts alphaFunc, blendFunc, surfaceparm trans,
  * and cull directives from each shader definition.
+ *
+ * Phases 66–72: Extended to parse ALL stages per shader (not just the
+ * first), with per-stage rgbGen, alphaGen, tcGen, tcMod, animMap, and
+ * blend function data.  The MohaaShaderStage struct holds per-stage data;
+ * GodotShaderProps::stages[] stores up to MOHAA_SHADER_STAGE_MAX stages.
  */
 
 #ifndef GODOT_SHADER_PROPS_H
@@ -27,6 +32,126 @@ enum GodotShaderCull {
     SHADER_CULL_BACK  = 0,   /* default: back-face culling */
     SHADER_CULL_FRONT = 1,   /* cull front */
     SHADER_CULL_NONE  = 2,   /* cull none / cull twosided / cull disable */
+};
+
+/* ── Phase 66–72: Per-stage enums and structs ── */
+
+#define MOHAA_SHADER_STAGE_MAX          8
+#define MOHAA_SHADER_STAGE_MAX_TCMODS   4
+#define MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES 8
+
+/* GL blend factors as used in Q3 .shader blendFunc directives */
+enum MohaaBlendFactor {
+    BLEND_ONE = 0,
+    BLEND_ZERO,
+    BLEND_SRC_ALPHA,
+    BLEND_ONE_MINUS_SRC_ALPHA,
+    BLEND_DST_COLOR,
+    BLEND_SRC_COLOR,
+    BLEND_ONE_MINUS_DST_COLOR,
+    BLEND_ONE_MINUS_SRC_COLOR,
+    BLEND_DST_ALPHA,
+    BLEND_ONE_MINUS_DST_ALPHA,
+};
+
+/* Wave function types for rgbGen wave / alphaGen wave / tcMod stretch */
+enum MohaaWaveFunc {
+    WAVE_SIN = 0,
+    WAVE_TRIANGLE,
+    WAVE_SQUARE,
+    WAVE_SAWTOOTH,
+    WAVE_INVERSE_SAWTOOTH,
+};
+
+/* Per-stage rgbGen type */
+enum MohaaStageRgbGen {
+    STAGE_RGBGEN_IDENTITY = 0,
+    STAGE_RGBGEN_IDENTITY_LIGHTING,
+    STAGE_RGBGEN_VERTEX,
+    STAGE_RGBGEN_WAVE,
+    STAGE_RGBGEN_ENTITY,
+    STAGE_RGBGEN_ONE_MINUS_ENTITY,
+    STAGE_RGBGEN_LIGHTING_DIFFUSE,
+    STAGE_RGBGEN_CONST,
+};
+
+/* Per-stage alphaGen type */
+enum MohaaStageAlphaGen {
+    STAGE_ALPHAGEN_IDENTITY = 0,
+    STAGE_ALPHAGEN_VERTEX,
+    STAGE_ALPHAGEN_WAVE,
+    STAGE_ALPHAGEN_ENTITY,
+    STAGE_ALPHAGEN_ONE_MINUS_ENTITY,
+    STAGE_ALPHAGEN_PORTAL,
+    STAGE_ALPHAGEN_CONST,
+};
+
+/* Per-stage tcGen type */
+enum MohaaStageTcGen {
+    STAGE_TCGEN_BASE = 0,
+    STAGE_TCGEN_LIGHTMAP,
+    STAGE_TCGEN_ENVIRONMENT,
+    STAGE_TCGEN_VECTOR,
+};
+
+/* Per-stage tcMod type */
+enum MohaaStageTcModType {
+    TCMOD_NONE = 0,
+    TCMOD_SCROLL,
+    TCMOD_ROTATE,
+    TCMOD_SCALE,
+    TCMOD_TURB,
+    TCMOD_STRETCH,
+};
+
+/* Wave function parameters (shared by rgbGen wave, alphaGen wave, tcMod stretch) */
+struct MohaaWaveParams {
+    MohaaWaveFunc func;
+    float base;
+    float amplitude;
+    float phase;
+    float frequency;
+};
+
+/* Single tcMod directive within a stage */
+struct MohaaStageTcMod {
+    MohaaStageTcModType type;
+    float params[6];   /* type-dependent: scroll(s,t), rotate(deg), scale(s,t), turb(base,amp,phase,freq), stretch uses wave */
+    MohaaWaveParams wave; /* only for TCMOD_STRETCH */
+};
+
+/* Per-stage shader data — one stage = one { } block inside a shader definition */
+struct MohaaShaderStage {
+    char map[64];                    /* texture path or "$lightmap" */
+    MohaaBlendFactor blendSrc;      /* GL blend source factor */
+    MohaaBlendFactor blendDst;      /* GL blend destination factor */
+    bool hasBlendFunc;               /* explicit blendFunc present */
+
+    MohaaStageRgbGen rgbGen;
+    MohaaWaveParams  rgbWave;       /* valid when rgbGen == STAGE_RGBGEN_WAVE */
+    float rgbConst[3];               /* valid when rgbGen == STAGE_RGBGEN_CONST */
+
+    MohaaStageAlphaGen alphaGen;
+    MohaaWaveParams    alphaWave;   /* valid when alphaGen == STAGE_ALPHAGEN_WAVE */
+    float alphaConst;                /* valid when alphaGen == STAGE_ALPHAGEN_CONST */
+    float alphaPortalDist;           /* valid when alphaGen == STAGE_ALPHAGEN_PORTAL */
+
+    MohaaStageTcGen tcGen;
+    float tcGenVecS[3];              /* valid when tcGen == STAGE_TCGEN_VECTOR */
+    float tcGenVecT[3];              /* valid when tcGen == STAGE_TCGEN_VECTOR */
+
+    MohaaStageTcMod tcMods[MOHAA_SHADER_STAGE_MAX_TCMODS];
+    int tcModCount;
+
+    float animMapFreq;               /* animMap frequency (0 = not animated) */
+    char  animMapFrames[MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES][64];
+    int   animMapFrameCount;
+
+    bool isClampMap;                 /* clampMap vs map */
+    bool isLightmap;                 /* stage uses $lightmap */
+
+    bool hasAlphaFunc;               /* alphaFunc present in this stage */
+    float alphaFuncThreshold;        /* 0.01 for GT0, 0.5 for GE128/LT128 */
 };
 
 /* ── Per-shader properties ── */
@@ -104,6 +229,10 @@ struct GodotShaderProps {
     bool  has_fog;
     float fog_color[3];
     float fog_distance;
+
+    /* Phase 66–72: Per-stage shader data (all stages parsed) */
+    MohaaShaderStage stages[MOHAA_SHADER_STAGE_MAX];
+    int stage_count;             /* number of parsed stages (== num_stages) */
 };
 
 /* ── API ── */
