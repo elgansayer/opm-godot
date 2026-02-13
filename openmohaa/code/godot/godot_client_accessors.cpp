@@ -75,4 +75,50 @@ void Godot_Client_ForceUnpause(void) {
     IN_MouseOff();
 }
 
+/* -------------------------------------------------------------------
+ *  Phase 46–55: UI system accessors
+ * ---------------------------------------------------------------- */
+
+/*
+ * Godot_Client_IsUIActive — Return 1 if the engine's UI system is
+ *   currently capturing input (KEYCATCH_UI flag set).
+ */
+int Godot_Client_IsUIActive(void) {
+    return (cls.keyCatchers & KEYCATCH_UI) ? 1 : 0;
+}
+
+/*
+ * Godot_Client_IsConsoleVisible — Return 1 if the console is
+ *   currently capturing input (KEYCATCH_CONSOLE flag set).
+ */
+int Godot_Client_IsConsoleVisible(void) {
+    return (cls.keyCatchers & KEYCATCH_CONSOLE) ? 1 : 0;
+}
+
+/*
+ * Godot_Client_IsMessageActive — Return 1 if the chat message input
+ *   is active (KEYCATCH_MESSAGE flag set).
+ */
+int Godot_Client_IsMessageActive(void) {
+    return (cls.keyCatchers & KEYCATCH_MESSAGE) ? 1 : 0;
+}
+
+/*
+ * Godot_Client_GetUIMousePos — Retrieve the engine's UI mouse
+ *   coordinates.  These are the same as cl.mousex/cl.mousey but
+ *   with a semantic name for UI usage.
+ */
+void Godot_Client_GetUIMousePos(int *mx, int *my) {
+    if (mx) *mx = cl.mousex;
+    if (my) *my = cl.mousey;
+}
+
+/*
+ * Godot_Client_IsAnyOverlayActive — Return 1 if any overlay is
+ *   capturing input (UI, console, or message mode).
+ */
+int Godot_Client_IsAnyOverlayActive(void) {
+    return (cls.keyCatchers & (KEYCATCH_UI | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
+}
+
 } /* extern "C" */

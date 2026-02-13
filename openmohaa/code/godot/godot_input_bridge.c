@@ -264,3 +264,53 @@ void Godot_InjectMouseButton(int godot_button, int down)
 
     Com_QueueEvent(Sys_Milliseconds(), SE_KEY, engine_key, down, 0, NULL);
 }
+
+/* ====================================================================
+ *  Phase 48: Absolute mouse position injection for UI mode.
+ *
+ *  When the engine's UI system is active, it needs absolute mouse
+ *  coordinates rather than relative deltas.  This function injects
+ *  an SE_MOUSE event with the delta from the previous position,
+ *  allowing the engine's UI code to track cursor position correctly.
+ * ==================================================================== */
+
+static int s_lastAbsX = 0;
+static int s_lastAbsY = 0;
+static int s_absInitialized = 0;
+
+/*
+ * Godot_InjectMousePosition — inject an absolute mouse position by
+ *   computing the delta from the previous call and sending SE_MOUSE.
+ *
+ *   @param x  Absolute horizontal position in engine screen coordinates
+ *   @param y  Absolute vertical position in engine screen coordinates
+ */
+void Godot_InjectMousePosition(int x, int y)
+{
+    if (!s_absInitialized) {
+        s_lastAbsX = x;
+        s_lastAbsY = y;
+        s_absInitialized = 1;
+        return;
+    }
+
+    int dx = x - s_lastAbsX;
+    int dy = y - s_lastAbsY;
+    s_lastAbsX = x;
+    s_lastAbsY = y;
+
+    if (dx != 0 || dy != 0) {
+        Com_QueueEvent(Sys_Milliseconds(), SE_MOUSE, dx, dy, 0, NULL);
+    }
+}
+
+/*
+ * Godot_ResetMousePosition — reset the absolute mouse tracking state.
+ *   Call when switching between UI and game input modes.
+ */
+void Godot_ResetMousePosition(void)
+{
+    s_absInitialized = 0;
+    s_lastAbsX = 0;
+    s_lastAbsY = 0;
+}
