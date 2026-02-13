@@ -1,6 +1,11 @@
 extends Node
 
 var runner = null
+var screenshot_pending = false
+var screenshot_timer = 0.0
+const SCREENSHOT_DELAY = 1.5  # seconds after map load to take screenshot
+var launch_map = "obj/obj_team4"
+var launch_dedicated = false
 
 func _ready():
 	print("Main: Script started.")
@@ -11,10 +16,31 @@ func _ready():
 	print("Main: 'MoHAARunner' found in ClassDB.")
 	runner = ClassDB.instantiate("MoHAARunner")
 
+	# Optional runtime args:
+	#   --dedicated       Launch dedicated server mode
+	#   --client          Force client mode
+	#   --map=<mapname>   Startup map (default: obj/obj_team4)
+	#   --nodev           Disable developer mode
+	var user_args = OS.get_cmdline_user_args()
+	var dev_mode = true
+	for arg in user_args:
+		if arg == "--dedicated":
+			launch_dedicated = true
+		elif arg == "--client":
+			launch_dedicated = false
+		elif arg.begins_with("--map="):
+			launch_map = arg.substr(6)
+		elif arg == "--nodev":
+			dev_mode = false
+
 	if runner:
+		var startup_args = "+set dedicated %d +set developer %d" % [1 if launch_dedicated else 0, 1 if dev_mode else 0]
+		runner.set_startup_args(startup_args)
 		runner.name = "MoHAARunnerInstance"
 		add_child(runner)
 		print("Main: MoHAARunner added to tree (dynamic).")
+		print("Main: Startup args -> ", startup_args)
+		print("Main: Startup map  -> ", launch_map)
 		
 		# Connect signals (Task 2.5.4)
 		runner.engine_error.connect(_on_engine_error)
@@ -30,7 +56,7 @@ func _ready():
 func _on_load_timer():
 	if runner and runner.is_engine_initialized():
 		print("Main: Engine is running, loading test map...")
-		runner.load_map("DM/mohdm1")
+		runner.load_map(launch_map)
 		
 		# Poll server status after giving the map time to load
 		get_tree().create_timer(2.0).timeout.connect(_on_status_check)
@@ -51,9 +77,13 @@ func _on_engine_error(message: String):
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
 	# Capture mouse when a map loads so mouse-look works
-	if runner:
+	if runner and not launch_dedicated:
 		runner.set_mouse_captured(true)
 		print("Main: Mouse captured for gameplay.")
+	# Schedule auto-screenshot
+	screenshot_pending = true
+	screenshot_timer = 0.0
+	print("Main: Screenshot scheduled in ", SCREENSHOT_DELAY, "s")
 
 func _on_map_unloaded():
 	print("Main: SIGNAL map_unloaded")
@@ -66,13 +96,42 @@ func _on_engine_shutdown():
 	print("Main: SIGNAL engine_shutdown_requested")
 
 func _unhandled_key_input(event: InputEvent):
-	# F10 toggles mouse capture (escape hatch for debugging)
 	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_F10:
+		if event.is_action("toggle_mouse_capture"):
 			if runner:
 				var captured = runner.is_mouse_captured()
 				runner.set_mouse_captured(not captured)
 				print("Main: Mouse capture toggled -> ", not captured)
+		elif event.is_action("screenshot"):
+			take_screenshot("manual")
+		elif event.is_action("toggle_hud"):
+			if runner:
+				runner.set_hud_visible(not runner.is_hud_visible())
+				print("Main: HUD toggled -> ", runner.is_hud_visible())
+		elif event.is_action("toggle_fullscreen"):
+			var mode = DisplayServer.window_get_mode()
+			if mode == DisplayServer.WINDOW_MODE_FULLSCREEN:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			else:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+			print("Main: Fullscreen toggled")
 
 func _process(delta):
-	pass
+	# Auto-screenshot after map load delay
+	if screenshot_pending:
+		screenshot_timer += delta
+		if screenshot_timer >= SCREENSHOT_DELAY:
+			screenshot_pending = false
+			take_screenshot("auto")
+
+func take_screenshot(label: String):
+	var img = get_viewport().get_texture().get_image()
+	if img:
+		var path = "/tmp/godot_screenshot_" + label + ".png"
+		var err = img.save_png(path)
+		if err == OK:
+			print("Main: Screenshot saved -> ", path, " (", img.get_width(), "x", img.get_height(), ")")
+		else:
+			printerr("Main: Screenshot save failed: ", err)
+	else:
+		printerr("Main: Could not get viewport image")
