@@ -257,7 +257,7 @@ static std::string gen_uv_code(int stage_idx, const MohaaShaderStage *s) {
                 std::string stretch_val = wave_call(&tm->wave, "TIME");
                 code += "    {\n";
                 code += "        float stretch" + si + " = " + stretch_val + ";\n";
-                code += "        if (stretch" + si + " != 0.0) {\n";
+                code += "        if (abs(stretch" + si + ") > 0.0001) {\n";
                 code += "            float inv_s" + si + " = 1.0 / stretch" + si + ";\n";
                 code += "            uv" + si + " = (uv" + si + " - vec2(0.5)) * inv_s" + si + " + vec2(0.5);\n";
                 code += "        }\n";
@@ -278,7 +278,8 @@ static std::string gen_sample_code(int stage_idx, const MohaaShaderStage *s) {
     std::string code;
 
     if (s->animMapFrameCount > 0 && s->animMapFreq > 0.0f) {
-        /* animMap: cycle through frames based on TIME */
+        /* animMap: cycle through frames based on TIME.
+         * Uses if/else chain bounded by MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES (8). */
         int fc = s->animMapFrameCount;
         float period = (float)fc / s->animMapFreq;
         code += "    float anim_t" + si + " = mod(TIME, " + ftos(period) + ");\n";

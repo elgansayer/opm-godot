@@ -162,7 +162,7 @@ static MohaaWaveFunc parse_wave_func(const char *tok) {
 /* Parse a single shader definition starting after the opening '{' */
 static void parse_shader_body(const char *p, const char *end, GodotShaderProps *props) {
     int brace_depth = 1;
-    int stage_index = -1;  /* -1 = not in a stage, 0+ = current stage */
+    int stage_index = -1;  /* -1 = not in a stage, >= 0 = current stage index */
     bool first_stage = true;
 
     char token[256];
