@@ -916,3 +916,95 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 - [x] Generated `yyParser.cpp`, `yyParser.hpp`, `yyLexer.cpp`, `yyLexer.h` from bison/flex sources
 - [x] Removed `/code/parser/generated` from `.gitignore` so generated files are tracked (SCons has no generation step)
 - [x] Added `#ifndef __BOTLIB_H` / `#define __BOTLIB_H` / `#endif` include guards to `code/fgame/botlib.h` to fix redefinition errors
+
+## Phase 66: Multi-Stage Shader Parsing & Rendering ✅
+- [x] **Task 66.1:** Added `MohaaShaderStage` struct to `godot_shader_props.h` with per-stage fields: `map`, `blendSrc`/`blendDst` (`MohaaBlendFactor`), `rgbGen` (`MohaaStageRgbGen`), `alphaGen` (`MohaaStageAlphaGen`), `tcGen` (`MohaaStageTcGen`), `tcMod` array (`MohaaStageTcMod`), `animMap` frames, `isClampMap`, `isLightmap`, `hasAlphaFunc`.
+- [x] **Task 66.2:** Added supporting enums: `MohaaBlendFactor` (10 GL blend factors), `MohaaWaveFunc` (5 wave types), `MohaaStageRgbGen` (8 types), `MohaaStageAlphaGen` (7 types), `MohaaStageTcGen` (4 types), `MohaaStageTcModType` (6 types).
+- [x] **Task 66.3:** Added `MohaaWaveParams` struct (func, base, amplitude, phase, frequency) and `MohaaStageTcMod` struct (type, params, wave).
+- [x] **Task 66.4:** Extended `GodotShaderProps` with `stages[MOHAA_SHADER_STAGE_MAX]` array and `stage_count` field.
+- [x] **Task 66.5:** Extended `parse_shader_body()` in `godot_shader_props.cpp` to parse ALL stages (not just first). Each `{ }` block at depth 2 populates a `MohaaShaderStage` entry. Backward compatibility maintained: first-stage data still populates the existing flat fields.
+- [x] **Task 66.6:** Added `parse_blend_factor()` and `parse_wave_func()` helper functions for tokenising GL blend factor names and wave function names into enums.
+- [x] **Task 66.7:** Per-stage `map`/`clampMap` parsing — stores texture path, sets `isClampMap` and `isLightmap` (for `$lightmap`).
+- [x] **Task 66.8:** Per-stage `blendFunc` parsing — stores `blendSrc`/`blendDst` as `MohaaBlendFactor` enums; shorthand forms (`blend`, `add`, `filter`) mapped to correct factor pairs.
+- [x] **Task 66.9:** Created `godot_shader_material.h` — public API: `Godot_Shader_BuildMaterial()`, `Godot_Shader_GenerateCode()`, `Godot_Shader_ClearCache()`.
+- [x] **Task 66.10:** Created `godot_shader_material.cpp` — multi-stage `.gdshader` code generator with stage compositing via per-stage blend functions. Common patterns optimised: additive (GL_ONE GL_ONE → `+=`), modulate (GL_DST_COLOR GL_ZERO → `*=`), alpha blend (GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA → `mix()`). Generic fallback for arbitrary blend factor combinations.
+
+### Key technical details (Phase 66):
+- Type names prefixed with `Mohaa` to avoid collision with Godot's `RenderingDevice::ShaderStage` enum
+- Up to `MOHAA_SHADER_STAGE_MAX` (8) stages per shader, `MOHAA_SHADER_STAGE_MAX_TCMODS` (4) tcMod directives per stage, `MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES` (8) animMap frames per stage
+- Shader cache (`s_shader_cache`) maps unique config keys to `Ref<Shader>` to avoid regenerating identical shaders
+- Generated render_mode includes: `unshaded` (default unless `lightingDiffuse`), `blend_add`/`blend_mul`/`blend_mix`, `cull_disabled`/`cull_front`
+- Lightmap stages detected by `isLightmap` flag; composited with `overbright_factor` uniform (default 2.0)
+- Entity color passed via `entity_color` vec4 uniform for `rgbGen entity`/`alphaGen entity`
+
+### Files created (Phase 66):
+- `code/godot/godot_shader_material.h` — public API header
+- `code/godot/godot_shader_material.cpp` — shader code generator and material builder
+
+### Files modified (Phase 66):
+- `code/godot/godot_shader_props.h` — added per-stage structs, enums, stage array in `GodotShaderProps`
+- `code/godot/godot_shader_props.cpp` — extended parser for multi-stage data
+
+## Phase 67: Environment Mapping (`tcGen environment`) ✅
+- [x] **Task 67.1:** Added `STAGE_TCGEN_ENVIRONMENT` enum value to `MohaaStageTcGen`.
+- [x] **Task 67.2:** Parser sets `stg->tcGen = STAGE_TCGEN_ENVIRONMENT` for `tcGen environment` / `tcGen environmentmodel` directives.
+- [x] **Task 67.3:** Shader code generator emits view-dependent UV computation: `reflect(normalize(VERTEX), NORMAL).xy * 0.5 + 0.5` in the fragment shader when a stage uses environment tcGen.
+
+### Key technical details (Phase 67):
+- Environment UVs computed per-fragment from view direction and surface normal
+- Uses Godot's built-in `VERTEX` (view-space position) and `NORMAL` (view-space normal) in the spatial shader
+- Compatible with multi-stage compositing — environment mapping can be one stage among many
+
+## Phase 68: Animated Texture Sequences (`animMap`) ✅
+- [x] **Task 68.1:** Per-stage `animMap` parsing stores `animMapFreq` and up to 8 frame texture paths in `MohaaShaderStage.animMapFrames[]`.
+- [x] **Task 68.2:** Shader code generator emits per-stage frame uniforms (`stage<N>_frame<F>`) and time-based frame selection using `mod(TIME, period)`.
+- [x] **Task 68.3:** Frame selection uses integer index from `int(anim_time * freq)` with if/else chain for each frame.
+
+### Key technical details (Phase 68):
+- Uses Godot's built-in `TIME` uniform — no per-frame uniform update needed from MoHAARunner
+- Period = `frame_count / freq`; wraps via `mod()` for seamless looping
+- Caller sets `stage<N>_frame<F>` sampler2D uniforms with loaded textures
+
+## Phase 71: `rgbGen wave` / `alphaGen wave` ✅
+- [x] **Task 71.1:** Implemented 5 wave functions in generated GLSL: `wave_sin`, `wave_triangle`, `wave_square`, `wave_sawtooth`, `wave_inversesawtooth`.
+- [x] **Task 71.2:** `rgbGen wave <func> <base> <amp> <phase> <freq>` — modulates stage RGB by clamped wave value.
+- [x] **Task 71.3:** `alphaGen wave <func> <base> <amp> <phase> <freq>` — modulates stage alpha by clamped wave value.
+- [x] **Task 71.4:** Also handles: `rgbGen identity`, `rgbGen identityLighting`, `rgbGen vertex`, `rgbGen entity`, `rgbGen oneMinusEntity`, `rgbGen lightingDiffuse`, `rgbGen const`.
+- [x] **Task 71.5:** Also handles: `alphaGen identity`, `alphaGen vertex`, `alphaGen wave`, `alphaGen entity`, `alphaGen oneMinusEntity`, `alphaGen portal <dist>`, `alphaGen const`.
+
+### Key technical details (Phase 71):
+- Wave functions only emitted in GLSL when at least one stage uses them (avoids unused function warnings)
+- `rgbGen vertex` / `alphaGen vertex` multiply by Godot's `COLOR` built-in (vertex color)
+- `alphaGen portal <dist>` uses `length(VERTEX)` as a distance proxy for portal fade
+- Wave values clamped to [0, 1] for RGB/alpha safety
+
+## Phase 72: `tcGen lightmap` / `tcGen vector` ✅
+- [x] **Task 72.1:** `tcGen lightmap` — uses `UV2` channel (Godot's second UV set, used for lightmap coordinates from BSP).
+- [x] **Task 72.2:** `tcGen vector ( sx sy sz ) ( tx ty tz )` — projects UVs from view-space vertex position using two direction vectors via `dot(VERTEX, vec3(...))`.
+- [x] **Task 72.3:** Parser reads vector components from parenthesised format: `( sx sy sz ) ( tx ty tz )`.
+
+### Key technical details (Phase 72):
+- Lightmap stages automatically set `isLightmap = true` when `$lightmap` map or `tcGen lightmap` is encountered
+- Vector projection uses `VERTEX` in view space; world-space projection would require a `MODEL_MATRIX` transform (documented as future enhancement)
+
+### MoHAARunner Integration Required (Phases 66–72):
+
+**Where to call `Godot_Shader_BuildMaterial()`:**
+1. `check_world_load()` — BSP surface materials: replace `StandardMaterial3D` creation with `Godot_Shader_BuildMaterial()` for shaders with `stage_count > 1`; set `stage<N>_tex` uniforms with loaded textures
+2. `update_entities()` — entity materials: use `Godot_Shader_BuildMaterial()` for multi-stage entity shaders
+3. `update_polys()` — poly/particle materials: use for effect shaders with blending
+4. `get_shader_texture()` — can remain as-is; textures loaded here are set as uniforms on the ShaderMaterial
+
+**Animated shaders (TIME uniform):**
+- The generated `.gdshader` uses Godot's built-in `TIME` uniform for all time-based effects (animMap, rgbGen wave, alphaGen wave, tcMod scroll/rotate/turb/stretch)
+- The existing `update_shader_animations()` in MoHAARunner is NOT needed for ShaderMaterial paths (only for StandardMaterial3D fallback)
+- No per-frame uniform update required from C++ code
+
+**Material cache invalidation:**
+- Call `Godot_Shader_ClearCache()` on map change (in `check_world_load()` or `unload_world()`)
+
+**Uniform naming convention:**
+- `stage0_tex`, `stage1_tex`, ... — primary sampler2D per stage
+- `stage0_frame0`, `stage0_frame1`, ... — animMap frame samplers
+- `overbright_factor` — float, default 2.0 (lightmap overbright)
+- `entity_color` — vec4, default (1,1,1,1) (for rgbGen/alphaGen entity)
