@@ -192,6 +192,8 @@ static void parse_shader_body(const char *p, const char *end, GodotShaderProps *
                     props->is_portal = true;
                 } else if (str_ieq(token, "sky")) {
                     props->is_sky = true;
+                } else if (str_ieq(token, "nolightmap")) {
+                    props->no_lightmap = true;
                 }
             } else if (str_ieq(token, "cull")) {
                 p = read_token(p, token, sizeof(token));

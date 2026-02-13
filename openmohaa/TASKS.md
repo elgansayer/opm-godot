@@ -1076,3 +1076,82 @@ Created `code/godot/godot_network_accessors.c` and `code/godot/godot_network_acc
 - **Agent 5 (UI):** Network accessors available for server browser, connection status display.
 - **Agent 10 (Integration):** All functions use `extern "C"` linkage, callable from MoHAARunner.cpp.
 - **No engine files modified** — all networking code is standard upstream OpenMoHAA. The only Godot-specific guards affecting networking are pre-existing in `common.c` (non-blocking frame loop) and `sv_main.c` (no idle sleep).
+## Phase 43: MP3-in-WAV Audio Decoding ✅
+- [x] **Task 43.1:** Detect MP3-encoded data inside WAV containers (WAVE format tag 0x0055) in `load_wav_from_vfs()`.
+- [x] **Task 43.2:** When format 0x0055 is detected, extract the data chunk and create `AudioStreamMP3` instead of rejecting the file.
+- [x] **Task 43.3:** Also detect raw MP3 files (ID3 tag or MP3 sync word) and load them as `AudioStreamMP3`.
+- [x] **Task 43.4:** Changed return type and cache from `Ref<AudioStreamWAV>` to `Ref<AudioStream>` to support both WAV and MP3.
+- [x] **Task 43.5:** Updated looping sound code to handle both `AudioStreamWAV` (set_loop_mode) and `AudioStreamMP3` (set_loop) for loop creation.
+
+### Key technical details (Phase 43):
+- MOHAA stores many sound effects as MP3-encoded WAV files (RIFF/WAVE with fmt tag 0x0055)
+- The data chunk contains raw MP3 frames that Godot's `AudioStreamMP3` can decode
+- `Ref<AudioStream>` is the common base type for both `AudioStreamWAV` and `AudioStreamMP3`
+- Loop handling uses `dynamic_cast`-style Ref conversion to determine stream type
+
+### Files modified (Phase 43):
+- `code/godot/MoHAARunner.h` — changed `sfx_cache` to `Ref<AudioStream>`, changed `load_wav_from_vfs` return type, added `array_mesh.hpp` include
+- `code/godot/MoHAARunner.cpp` — MP3-in-WAV detection, raw MP3 detection, dual-type loop handling
+
+## Phase 60: Per-Entity Skeletal Mesh Caching ✅
+- [x] **Task 60.1:** Added `SkelMeshCacheEntry` struct with animation state hash and cached `ArrayMesh`.
+- [x] **Task 60.2:** Compute FNV-1a hash of frameInfoBuf + boneTagBuf + boneQuatBuf + actionWeight + hModel per entity per frame.
+- [x] **Task 60.3:** Check cache before CPU skinning — if animation state hash matches, reuse the cached mesh.
+- [x] **Task 60.4:** Cache newly built skinned meshes after successful CPU skinning.
+- [x] **Task 60.5:** Clear skeletal mesh cache on map change.
+
+### Key technical details (Phase 60):
+- Cache key is `entityNumber` → `(anim_hash, Ref<ArrayMesh>)`
+- FNV-1a hash computed over 256-byte frameInfo + 20-byte boneTag + 80-byte boneQuat + actionWeight + hModel
+- When animation state hasn't changed between frames, the expensive bone preparation and CPU skinning are skipped entirely
+- Cache is invalidated on map change (BSP unload)
+
+### Files modified (Phase 60):
+- `code/godot/MoHAARunner.h` — added `SkelMeshCacheEntry` struct and `skel_mesh_cache` map
+- `code/godot/MoHAARunner.cpp` — animation hash computation, cache lookup/store, cache clear on map change
+
+## Phase 61: Tinted Material Cache ✅
+- [x] **Task 61.1:** Added `tinted_mat_cache` mapping composite key → cached `StandardMaterial3D`.
+- [x] **Task 61.2:** Cache key combines hModel, surface index, entity RGBA, and quantised lightgrid colour.
+- [x] **Task 61.3:** On cache hit, reuse the previously duplicated tinted material instead of creating a new one.
+- [x] **Task 61.4:** On cache miss, duplicate the base material, apply tinting, and store in cache.
+- [x] **Task 61.5:** Clear tinted material cache on map change.
+
+### Key technical details (Phase 61):
+- Previously, entity colour tinting duplicated materials every frame for every entity with non-white RGBA or lightgrid tint
+- Cache key: `(hModel:20b | surfIdx:8b | rgba[0..3]:32b | quantised_light:4b)` packed into `uint64_t`
+- Light colour quantised to 4-bit precision (16 levels per channel) for stable cache matching
+- Cache is invalidated on map change alongside skeletal mesh cache
+
+### Files modified (Phase 61):
+- `code/godot/MoHAARunner.h` — added `tinted_mat_cache` member, added `standard_material3d.hpp` include
+- `code/godot/MoHAARunner.cpp` — cache lookup/store in entity tinting code, cache clear on map change
+
+## Phase 65: Fullbright/Nolightmap Surface Rendering ✅
+- [x] **Task 65.1:** Added `no_lightmap` field to `GodotShaderProps` struct.
+- [x] **Task 65.2:** Parse `surfaceparm nolightmap` in the shader parser alongside existing surfaceparm handling.
+- [x] **Task 65.3:** In `apply_shader_props_to_material`, set `SHADING_MODE_UNSHADED` for nolightmap surfaces, rendering them fullbright without Godot's lighting calculations.
+
+### Key technical details (Phase 65):
+- Surfaces with `surfaceparm nolightmap` in their .shader definition have no lightmap stage
+- In the original engine, these surfaces are rendered using vertex colours alone (fullbright)
+- In Godot, `SHADING_MODE_UNSHADED` achieves the same effect — the albedo texture renders at full intensity without directional/ambient lighting influence
+- This fixes surfaces like skybox fragments, decal overlays, and certain UI-in-world surfaces that were previously too dark
+
+### Files modified (Phase 65):
+- `code/godot/godot_shader_props.h` — added `bool no_lightmap` to `GodotShaderProps`
+- `code/godot/godot_shader_props.cpp` — parse `surfaceparm nolightmap`
+- `code/godot/MoHAARunner.cpp` — set `SHADING_MODE_UNSHADED` for nolightmap materials
+
+## Phase 81: Gamma/Overbright Tonemap ✅
+- [x] **Task 81.1:** Added Reinhardt tonemap to the WorldEnvironment to approximate MOHAA's overbright gamma.
+- [x] **Task 81.2:** Set exposure to 1.2 to compensate for MOHAA's 2x overbright lightmap factor.
+- [x] **Task 81.3:** Set tonemap white to 1.0 for proper highlight rolloff.
+
+### Key technical details (Phase 81):
+- MOHAA's GL1 renderer applies a 2x overbright factor to lightmap texels during upload
+- Godot's Reinhardt tonemap with a slight exposure boost (1.2) approximates this look
+- The existing lightmap 128×128 overbright in the BSP mesh builder (Phase 7b) combined with tonemap produces visual parity
+
+### Files modified (Phase 81):
+- `code/godot/MoHAARunner.cpp` — added tonemap settings to Environment in `setup_3d_scene()`

@@ -9,6 +9,8 @@
 #include <godot_cpp/classes/directional_light3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/array_mesh.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/audio_stream_player.hpp>
@@ -94,7 +96,7 @@ private:
     float sound_fade_duration = 0.0f;
     bool sound_fading = false;
 
-    // Entity mesh caching (Phase 37)
+    // Entity mesh caching (Phase 37, improved Phase 60)
     // Track per-entity state hash to avoid rebuilding meshes each frame
     struct EntityCacheKey {
         int hModel;
@@ -108,6 +110,18 @@ private:
     };
     std::vector<EntityCacheKey> entity_cache_keys;
 
+    // Phase 60: Skeletal mesh caching by entity number + animation state hash
+    struct SkelMeshCacheEntry {
+        uint64_t anim_hash = 0;
+        int mesh_surfaces = 0;             // surface count as a lightweight mesh identity
+        Ref<ArrayMesh> mesh;
+    };
+    std::unordered_map<int, SkelMeshCacheEntry> skel_mesh_cache; // entityNumber → cached skinned mesh
+
+    // Phase 61: Tinted material cache — avoid per-frame material duplication
+    // Key = (hModel << 20) | (surfIdx << 12) | quantised_rgba
+    std::unordered_map<uint64_t, Ref<StandardMaterial3D>> tinted_mat_cache;
+
     // 2D HUD overlay (Phase 7h)
     CanvasLayer *hud_layer = nullptr;                     // Overlay layer for 2D elements
     Control *hud_control = nullptr;                       // Control node for custom draw
@@ -118,7 +132,7 @@ private:
     AudioListener3D *audio_listener = nullptr;                       // 3D listener driven by engine camera
     std::vector<AudioStreamPlayer3D *> sfx_players_3d;               // Pool of 3D audio players
     std::vector<AudioStreamPlayer *>   sfx_players_2d;               // Pool of 2D audio players
-    std::unordered_map<int, Ref<AudioStreamWAV>> sfx_cache;          // sfxHandle → loaded WAV stream
+    std::unordered_map<int, Ref<AudioStream>> sfx_cache;              // sfxHandle → loaded audio stream (WAV or MP3)
     // Looping sound tracking (Phase 40): key = composite of sfxHandle + quantised position
     std::unordered_map<int64_t, int> active_loops;                   // loop key → 3D player index
     int next_3d_player = 0;                                          // Round-robin index for 3D pool
@@ -148,7 +162,7 @@ private:
 
     void setup_audio();                                              // Create audio player pools
     void update_audio(double delta);                                 // Process sound events + loops
-    Ref<AudioStreamWAV> load_wav_from_vfs(int sfxHandle);            // Load WAV via engine VFS
+    Ref<AudioStream> load_wav_from_vfs(int sfxHandle);                // Load WAV/MP3 via engine VFS
 
     // Cinematic display (Phase 11)
     CanvasLayer *cin_layer = nullptr;                                // Overlay for cinematic video
