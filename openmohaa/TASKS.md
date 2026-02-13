@@ -983,3 +983,16 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 - `code/godot/godot_shader_props.h` — added `bool no_lightmap` to `GodotShaderProps`
 - `code/godot/godot_shader_props.cpp` — parse `surfaceparm nolightmap`
 - `code/godot/MoHAARunner.cpp` — set `SHADING_MODE_UNSHADED` for nolightmap materials
+
+## Phase 81: Gamma/Overbright Tonemap ✅
+- [x] **Task 81.1:** Added Reinhardt tonemap to the WorldEnvironment to approximate MOHAA's overbright gamma.
+- [x] **Task 81.2:** Set exposure to 1.2 to compensate for MOHAA's 2x overbright lightmap factor.
+- [x] **Task 81.3:** Set tonemap white to 1.0 for proper highlight rolloff.
+
+### Key technical details (Phase 81):
+- MOHAA's GL1 renderer applies a 2x overbright factor to lightmap texels during upload
+- Godot's Reinhardt tonemap with a slight exposure boost (1.2) approximates this look
+- The existing lightmap 128×128 overbright in the BSP mesh builder (Phase 7b) combined with tonemap produces visual parity
+
+### Files modified (Phase 81):
+- `code/godot/MoHAARunner.cpp` — added tonemap settings to Environment in `setup_3d_scene()`

@@ -461,6 +461,13 @@ void MoHAARunner::setup_3d_scene() {
     env->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
     env->set_ambient_light_color(Color(0.3, 0.3, 0.3));
     env->set_ambient_light_energy(0.5);
+
+    // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
+    // MOHAA uses 2x overbright on lightmaps. Godot's Reinhardt tonemap
+    // with slight exposure boost approximates the GL1 appearance.
+    env->set_tonemapper(Environment::TONE_MAPPER_REINHARDT);
+    env->set_tonemap_exposure(1.2);
+    env->set_tonemap_white(1.0);
     world_env->set_environment(env);
     game_world->add_child(world_env);
 
@@ -1618,15 +1625,17 @@ void MoHAARunner::update_entities() {
                            rgba[2] / 255.0f, rgba[3] / 255.0f);
                 int sc = mesh->get_surface_count();
                 for (int s = 0; s < sc; s++) {
-                    // Build tinted material cache key
-                    uint64_t tint_key = ((uint64_t)(hModel & 0xFFFFF) << 44) |
-                                        ((uint64_t)(s & 0xFF) << 36) |
-                                        ((uint64_t)rgba[0] << 28) |
-                                        ((uint64_t)rgba[1] << 20) |
-                                        ((uint64_t)rgba[2] << 12) |
-                                        ((uint64_t)rgba[3] << 4) |
-                                        (uint64_t)(light_q & 0xF);
-                    tint_key ^= ((uint64_t)light_q << 2);
+                    // Build tinted material cache key:
+                    //   hModel(16b) | surfIdx(4b) | rgba_q(16b=4×4b) | light_q(12b) = 48 bits
+                    uint8_t rq = rgba[0] >> 4, gq = rgba[1] >> 4;
+                    uint8_t bq = rgba[2] >> 4, aq = rgba[3] >> 4;
+                    uint64_t tint_key = ((uint64_t)(hModel & 0xFFFF) << 32) |
+                                        ((uint64_t)(s & 0xF) << 28) |
+                                        ((uint64_t)rq << 24) |
+                                        ((uint64_t)gq << 20) |
+                                        ((uint64_t)bq << 16) |
+                                        ((uint64_t)aq << 12) |
+                                        (uint64_t)(light_q & 0xFFF);
 
                     auto tint_it = tinted_mat_cache.find(tint_key);
                     if (tint_it != tinted_mat_cache.end()) {
