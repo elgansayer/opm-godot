@@ -28,7 +28,103 @@
 #include <vector>
 #include <unordered_map>
 
+// ── Defensive module integration (compile-time guards) ──
+// Each agent's module is conditionally included only if it exists,
+// allowing MoHAARunner to compile regardless of which agents have merged.
+#if __has_include("godot_music.h")
+#include "godot_music.h"
+#define HAS_MUSIC_MODULE 1
+#endif
+
+#if __has_include("godot_shader_material.h")
+#include "godot_shader_material.h"
+#define HAS_SHADER_MATERIAL_MODULE 1
+#endif
+
+#if __has_include("godot_weather.h")
+#include "godot_weather.h"
+#define HAS_WEATHER_MODULE 1
+#endif
+
+#if __has_include("godot_vertex_deform.h")
+#include "godot_vertex_deform.h"
+#define HAS_VERTEX_DEFORM_MODULE 1
+#endif
+
+#if __has_include("godot_mesh_cache.h")
+#include "godot_mesh_cache.h"
+#define HAS_MESH_CACHE_MODULE 1
+#endif
+
+#if __has_include("godot_entity_lighting.h")
+#include "godot_entity_lighting.h"
+#define HAS_ENTITY_LIGHTING_MODULE 1
+#endif
+
+#if __has_include("godot_weapon_viewport.h")
+#include "godot_weapon_viewport.h"
+#define HAS_WEAPON_VIEWPORT_MODULE 1
+#endif
+
+#if __has_include("godot_ui_system.h")
+#include "godot_ui_system.h"
+#define HAS_UI_SYSTEM_MODULE 1
+#endif
+
+#if __has_include("godot_ui_input.h")
+#include "godot_ui_input.h"
+#define HAS_UI_INPUT_MODULE 1
+#endif
+
+#if __has_include("godot_vfx.h")
+#include "godot_vfx.h"
+#define HAS_VFX_MODULE 1
+#endif
+
+#if __has_include("godot_screen_effects.h")
+#include "godot_screen_effects.h"
+#define HAS_SCREEN_EFFECTS_MODULE 1
+#endif
+
+#if __has_include("godot_game_accessors.h")
+#include "godot_game_accessors.h"
+#define HAS_GAME_ACCESSORS_MODULE 1
+#endif
+
+#if __has_include("godot_network_accessors.h")
+#include "godot_network_accessors.h"
+#define HAS_NETWORK_ACCESSORS_MODULE 1
+#endif
+
+#if __has_include("godot_pvs.h")
+#include "godot_pvs.h"
+#define HAS_PVS_MODULE 1
+#endif
+
+#if __has_include("godot_debug_render.h")
+#include "godot_debug_render.h"
+#define HAS_DEBUG_RENDER_MODULE 1
+#endif
+
+#if __has_include("godot_shadow.h")
+#include "godot_shadow.h"
+#define HAS_SHADOW_MODULE 1
+#endif
+
 using namespace godot;
+
+// ── Game flow state machine (Phase 261) ──
+// Tracks the high-level game state for title screen, menus, gameplay, etc.
+enum class GameFlowState {
+    BOOT,               // Engine just initialised, no map loaded yet
+    TITLE_SCREEN,       // Showing title/splash screen
+    MAIN_MENU,          // Engine main menu active
+    LOADING,            // Map is loading (SS_LOADING / SS_LOADING2)
+    IN_GAME,            // Map loaded and playing (SS_GAME)
+    PAUSED,             // In-game but paused (single-player)
+    MISSION_COMPLETE,   // End-of-mission detected
+    DISCONNECTED,       // Disconnected from server / map unloaded
+};
 
 class MoHAARunner : public Node {
     GDCLASS(MoHAARunner, Node)
@@ -41,6 +137,10 @@ private:
     // Track server state for change detection (signals)
     int last_server_state = 0;   // SS_DEAD
     String last_map_name;
+
+    // Game flow state machine (Phase 261)
+    GameFlowState game_flow_state = GameFlowState::BOOT;
+    void update_game_flow_state();  // Called each frame to advance the state machine
 
     // Input state (Phase 6)
     bool mouse_captured = false;  // Whether mouse is in relative/captured mode
@@ -229,6 +329,37 @@ public:
     bool vfs_file_exists(const String &p_qpath) const;
     PackedStringArray vfs_list_files(const String &p_directory, const String &p_extension) const;
     String vfs_get_gamedir() const;
+
+    // Game flow state (Phase 261)
+    int get_game_flow_state() const;
+    String get_game_flow_state_string() const;
+
+    // New game flow (Phase 262)
+    void start_new_game(int difficulty);
+    void set_difficulty(int difficulty);
+
+    // Save / load game (Phase 264)
+    void quick_save();
+    void quick_load();
+    void save_game(const String &p_slot_name);
+    void load_game(const String &p_slot_name);
+    PackedStringArray get_save_list() const;
+
+    // Multiplayer helpers (Phases 265-266)
+    PackedStringArray list_available_maps() const;
+    void start_server(const String &p_map, const String &p_gametype, int max_clients);
+    void connect_to_server(const String &p_address);
+    void disconnect_from_server();
+
+    // Settings helpers (Phases 267-270)
+    void set_audio_volume(float master, float music, float dialog);
+    void set_video_fullscreen(bool fullscreen);
+    void set_video_resolution(int width, int height);
+    void set_network_rate(const String &p_preset);
+
+    // Main menu control (Phase 261)
+    void open_main_menu();
+    void close_menu();
 };
 
 #endif
