@@ -76,6 +76,7 @@ typedef struct {
     float maxDist;
     float pitch;
     int   flags;
+    int   entnum;           /* entity number for position tracking (-1 = none) */
 } gr_loop_sound_t;
 
 static gr_loop_sound_t gr_loop_sounds[MAX_LOOP_SOUNDS];
@@ -346,6 +347,18 @@ void Godot_Sound_GetLoop(int index, float *origin, float *velocity,
     if (flags)     *flags     = ls->flags;
 }
 
+/* Extended loop accessor — includes entity number for position tracking. */
+void Godot_Sound_GetLoopEx(int index, float *origin, float *velocity,
+                           int *sfxHandle, float *volume, float *minDist,
+                           float *maxDist, float *pitch, int *flags,
+                           int *entnum)
+{
+    Godot_Sound_GetLoop(index, origin, velocity, sfxHandle, volume,
+                        minDist, maxDist, pitch, flags);
+    if (index >= 0 && index < gr_loop_sound_count && entnum)
+        *entnum = gr_loop_sounds[index].entnum;
+}
+
 /* --- Listener accessors --- */
 
 void Godot_Sound_GetListener(float *origin, float *axis, int *entnum)
@@ -595,6 +608,7 @@ void S_AddLoopingSound(const vec3_t origin, const vec3_t velocity,
     ls->maxDist   = max_dist;
     ls->pitch     = pitch;
     ls->flags     = flags;
+    ls->entnum    = -1;  /* Extended API has no entnum; set via matching later */
 }
 
 /* ===================================================================
@@ -837,6 +851,74 @@ int  S_CurrentMoviePosition(void)                     { return 0; }
 const char  *S_GetMusicFilename(void)   { return ""; }
 int          S_GetMusicLoopCount(void)  { return 0; }
 unsigned int S_GetMusicOffset(void)     { return 0; }
+
+/* ===================================================================
+ *  MP3-in-WAV detection (Phase 46)
+ *  Some MOHAA .wav files use WAVE format tag 0x0055 (MPEG audio inside
+ *  a WAV container).  This helper checks the fmt chunk format tag.
+ * ================================================================ */
+
+#define WAV_FORMAT_PCM  0x0001
+#define WAV_FORMAT_MPEG 0x0055
+
+/*
+ * Godot_Sound_DetectMP3InWav — check if raw WAV data contains MP3 payload.
+ *
+ * @param data     Pointer to the RIFF/WAV file data.
+ * @param dataLen  Length of the data in bytes.
+ * @param out_mp3_offset  Receives the byte offset to the MP3 payload (data chunk).
+ * @param out_mp3_length  Receives the length of the MP3 payload in bytes.
+ *
+ * @return  1 if the WAV contains MP3 (format tag 0x0055), 0 if standard PCM.
+ *          Returns -1 on parse error.
+ */
+int Godot_Sound_DetectMP3InWav(const unsigned char *data, int dataLen,
+                               int *out_mp3_offset, int *out_mp3_length)
+{
+    if (!data || dataLen < 44) return -1;
+
+    /* Verify RIFF header */
+    if (data[0] != 'R' || data[1] != 'I' || data[2] != 'F' || data[3] != 'F')
+        return -1;
+    if (data[8] != 'W' || data[9] != 'A' || data[10] != 'V' || data[11] != 'E')
+        return -1;
+
+    /* Walk chunks to find 'fmt ' and 'data' */
+    int pos = 12;
+    int formatTag = 0;
+    int foundFmt = 0;
+
+    while (pos + 8 <= dataLen) {
+        int chunkId   = *(int *)(data + pos);
+        int chunkSize = *(int *)(data + pos + 4);
+
+        /* Little-endian 'fmt ' = 0x20746D66 */
+        if (data[pos] == 'f' && data[pos+1] == 'm' &&
+            data[pos+2] == 't' && data[pos+3] == ' ') {
+            if (pos + 8 + 2 > dataLen) return -1;
+            formatTag = (int)(data[pos + 8] | (data[pos + 9] << 8));
+            foundFmt = 1;
+        }
+
+        /* Little-endian 'data' = 0x61746164 */
+        if (data[pos] == 'd' && data[pos+1] == 'a' &&
+            data[pos+2] == 't' && data[pos+3] == 'a') {
+            if (foundFmt && formatTag == WAV_FORMAT_MPEG) {
+                if (out_mp3_offset) *out_mp3_offset = pos + 8;
+                if (out_mp3_length) *out_mp3_length = chunkSize;
+                return 1;
+            }
+            /* Standard PCM — not MP3-in-WAV */
+            return 0;
+        }
+
+        pos += 8 + chunkSize;
+        /* Chunks are word-aligned */
+        if (chunkSize & 1) pos++;
+    }
+
+    return foundFmt ? 0 : -1;
+}
 
 /* ===================================================================
  *  Variables and functions from snd_local_new.h

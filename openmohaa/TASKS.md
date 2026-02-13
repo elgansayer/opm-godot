@@ -1155,3 +1155,196 @@ Created `code/godot/godot_network_accessors.c` and `code/godot/godot_network_acc
 
 ### Files modified (Phase 81):
 - `code/godot/MoHAARunner.cpp` — added tonemap settings to Environment in `setup_3d_scene()`
+## Phase 42: Music Playback — OGG/MP3 Streaming Module ✅
+Standalone music manager that loads MP3 files from the engine VFS and plays them through Godot AudioStreamPlayer nodes with crossfade support.
+
+- [x] **Task 42.1:** Created `godot_music.h` with C-linkage API: `Godot_Music_Init`, `Godot_Music_Shutdown`, `Godot_Music_Update`, `Godot_Music_SetVolume`, `Godot_Music_IsPlaying`, `Godot_Music_GetCurrentTrack`.
+- [x] **Task 42.2:** Created `godot_music.cpp` — two AudioStreamPlayer nodes for crossfade, plus a triggered-music player.
+- [x] **Task 42.3:** VFS path resolution: tries name as-is, `sound/music/<name>.mp3`, `sound/music/<name>`, `<name>.mp3`.
+- [x] **Task 42.4:** Music state machine reads `Godot_Sound_GetMusicAction()` each frame — handles PLAY, STOP, VOLUME actions.
+- [x] **Task 42.5:** Crossfade: when switching tracks, the old player fades out over `fadeTime` seconds while the new one fades in.
+- [x] **Task 42.6:** Triggered music: reads `Godot_Sound_GetTriggeredAction()` for setup/start/stop/pause/unpause.
+- [x] **Task 42.7:** Volume conversion: linear 0–1 → Godot dB scale via `20 * log10(linear)`, clamped to -80 dB minimum.
+
+### Key technical details (Phase 42):
+- Uses `Godot_VFS_ReadFile` to load MP3 bytes from pk3 archives
+- Creates `AudioStreamMP3` from raw bytes via `PackedByteArray`
+- Two-player crossfade: `s_players[0]` and `s_players[1]` alternate as active
+- `s_triggered_player` handles `S_TriggeredMusic_*` events separately
+- All Godot node creation/destruction uses `memnew`/`memdelete`
+
+### Files created (Phase 42):
+- `code/godot/godot_music.h` — C-linkage header
+- `code/godot/godot_music.cpp` — Implementation (~300 lines)
+
+### MoHAARunner Integration Required (Phase 42):
+**New `#include` lines:**
+```cpp
+#include "godot_music.h"
+```
+
+**New calls needed:**
+- In `setup_audio()` or `_ready()`: `Godot_Music_Init((void*)this);`
+- In `update_audio(delta)`: `Godot_Music_Update((float)delta);`
+- In `~MoHAARunner()` or shutdown: `Godot_Music_Shutdown();`
+- Optionally in volume cvar handling: `Godot_Music_SetVolume(s_musicVolume->value);`
+
+## Phase 43: Enhanced Loop Sound Management ✅
+Added entity number tracking to looping sounds for entity-attached loop position updates.
+
+- [x] **Task 43.1:** Added `entnum` field (int, -1 = none) to `gr_loop_sound_t` struct in `godot_sound.c`.
+- [x] **Task 43.2:** Initialise `entnum = -1` in `S_AddLoopingSound` (extended API has no entity parameter).
+- [x] **Task 43.3:** Added `Godot_Sound_GetLoopEx()` — extended accessor that also returns entity number.
+
+### Key technical details (Phase 43):
+- The extended `S_AddLoopingSound` signature (from `snd_public.h` line 118) does not include an entity number
+- `entnum` field defaults to -1; MoHAARunner can match loop positions to entities for tracking
+- Original `Godot_Sound_GetLoop()` unchanged for backward compatibility
+
+### Files modified (Phase 43):
+- `code/godot/godot_sound.c` — `gr_loop_sound_t` struct + `Godot_Sound_GetLoopEx()`
+
+### MoHAARunner Integration Required (Phase 43):
+**New accessor available:**
+```c
+extern "C" void Godot_Sound_GetLoopEx(int index, float *origin, float *velocity,
+                                       int *sfxHandle, float *volume, float *minDist,
+                                       float *maxDist, float *pitch, int *flags,
+                                       int *entnum);
+```
+Can replace `Godot_Sound_GetLoop()` calls to also receive entity number for position tracking.
+
+## Phase 44: Sound Channel & Priority Metadata
+Reserved for future channel priority enhancements. Current channel-aware eviction (Phase 41) handles the primary use case. Additional priority weighting based on sound type/distance can be added here.
+
+## Phase 45: Sound Alias / Ubersound System ✅
+Ubersound/alias parser that reads `.scr` files from VFS and builds a lookup table for sound alias resolution with random variant selection.
+
+- [x] **Task 45.1:** Created `godot_ubersound.h` with C-linkage API: `Godot_Ubersound_Init`, `Godot_Ubersound_Shutdown`, `Godot_Ubersound_Resolve`, `Godot_Ubersound_GetAliasCount`, `Godot_Ubersound_IsLoaded`, `Godot_Ubersound_HasAlias`.
+- [x] **Task 45.2:** Created `godot_ubersound.cpp` — parses `alias` and `aliascache` commands from `.scr` files.
+- [x] **Task 45.3:** Tokeniser handles whitespace-delimited tokens, quoted strings, and `//` comments.
+- [x] **Task 45.4:** Optional parameters parsed: `soundparms`, `volume`, `mindist`, `maxdist`, `pitch`, `channel`, `subtitle`/`dialog`.
+- [x] **Task 45.5:** Random variant selection: when multiple entries share an alias name, `Godot_Ubersound_Resolve` picks one at random.
+- [x] **Task 45.6:** Scans `ubersound/` directory for `.scr` files, plus `sound/ubersound.scr` and `sound/uberdialog.scr`.
+
+### Key technical details (Phase 45):
+- Uses `std::unordered_map<std::string, UbersoundAlias>` for O(1) alias lookup
+- Each `UbersoundAlias` contains a `std::vector<UbersoundEntry>` for multi-variant aliases
+- Simple LCG PRNG for deterministic random selection (avoids `<random>` dependency)
+- VFS file listing via `Godot_VFS_ListFiles("ubersound", ".scr", &count)`
+- No engine header includes — all VFS access via extern "C" accessors
+
+### Files created (Phase 45):
+- `code/godot/godot_ubersound.h` — C-linkage header
+- `code/godot/godot_ubersound.cpp` — Implementation (~300 lines)
+
+### MoHAARunner Integration Required (Phase 45):
+**New `#include` lines:**
+```cpp
+#include "godot_ubersound.h"
+```
+
+**New calls needed:**
+- In `check_world_load()` after map loads: `Godot_Ubersound_Init();`
+- In shutdown or map unload: `Godot_Ubersound_Shutdown();`
+- In sound loading (before `load_wav_from_vfs`): check `Godot_Ubersound_Resolve(name, ...)` to resolve alias to real filename
+- Optional: `Godot_Ubersound_HasAlias(name)` to check before resolving
+
+## Phase 46: MP3-in-WAV Decoding Support ✅
+Added detection function for MOHAA's MP3-in-WAV files (WAVE format tag `0x0055`).
+
+- [x] **Task 46.1:** Added `Godot_Sound_DetectMP3InWav()` function to `godot_sound.c`.
+- [x] **Task 46.2:** Walks RIFF/WAV chunks to find `fmt ` and `data` sections.
+- [x] **Task 46.3:** Checks format tag for `0x0055` (MPEG audio) vs `0x0001` (PCM).
+- [x] **Task 46.4:** Returns MP3 payload offset and length for extraction.
+
+### Key technical details (Phase 46):
+- WAVE format tag `0x0055` indicates MPEG audio stored inside a WAV container
+- Function walks chunk headers (word-aligned) to locate both `fmt ` and `data` chunks
+- Returns 1 (MP3 found), 0 (standard PCM), or -1 (parse error)
+- Caller extracts the MP3 payload bytes and creates `AudioStreamMP3` instead of `AudioStreamWAV`
+
+### Files modified (Phase 46):
+- `code/godot/godot_sound.c` — `Godot_Sound_DetectMP3InWav()` function
+
+### MoHAARunner Integration Required (Phase 46):
+**New accessor available:**
+```c
+extern "C" int Godot_Sound_DetectMP3InWav(const unsigned char *data, int dataLen,
+                                           int *out_mp3_offset, int *out_mp3_length);
+```
+In `load_wav_from_vfs()`, after reading the file, call this function before parsing WAV headers. If it returns 1, extract `[out_mp3_offset .. out_mp3_offset+out_mp3_length]` bytes and create `AudioStreamMP3` instead of `AudioStreamWAV`.
+
+## Phase 47: Speaker Entity Sounds ✅
+Speaker entity support — parses BSP entity strings for sound-emitting entities and creates persistent AudioStreamPlayer3D nodes.
+
+- [x] **Task 47.1:** Created `godot_speaker_entities.h` with C-linkage API: `Godot_Speakers_Init`, `Godot_Speakers_Shutdown`, `Godot_Speakers_LoadFromEntities`, `Godot_Speakers_Update`, `Godot_Speakers_GetCount`, `Godot_Speakers_TriggerByIndex`.
+- [x] **Task 47.2:** Created `godot_speaker_entities.cpp` — BSP entity string parser.
+- [x] **Task 47.3:** Parses entities with `noise` key for sound file, `wait`/`random` for timing.
+- [x] **Task 47.4:** Creates AudioStreamPlayer3D at entity origin (id-space → Godot coordinate conversion).
+- [x] **Task 47.5:** Handles WAV, MP3, and MP3-in-WAV loading via `Godot_Sound_DetectMP3InWav`.
+- [x] **Task 47.6:** Repeating speakers: `wait_time` controls replay interval with optional `random_time` offset.
+- [x] **Task 47.7:** Triggered speakers (`spawnflags & 1`): start inactive, activate via `Godot_Speakers_TriggerByIndex`.
+
+### Key technical details (Phase 47):
+- Up to `MAX_SPEAKER_ENTITIES` (64) speakers per map
+- Coordinate conversion: id(X,Y,Z) → Godot(Y, Z, -X) × `MOHAA_UNIT_SCALE`
+- Attenuation model: `ATTENUATION_INVERSE_DISTANCE`, max_distance=100m, unit_size=10
+- On map change, all existing speaker nodes are cleaned up before new ones are created
+
+### Files created (Phase 47):
+- `code/godot/godot_speaker_entities.h` — C-linkage header + `godot_speaker_t` struct
+- `code/godot/godot_speaker_entities.cpp` — Implementation (~340 lines)
+
+### MoHAARunner Integration Required (Phase 47):
+**New `#include` lines:**
+```cpp
+#include "godot_speaker_entities.h"
+```
+
+**New calls needed:**
+- In `setup_3d_scene()` or `_ready()`: `Godot_Speakers_Init((void*)scene_root);`
+- In `check_world_load()` after BSP entity parsing: `Godot_Speakers_LoadFromEntities(entity_string);`
+- In `update_audio(delta)`: `Godot_Speakers_Update((float)delta);`
+- In shutdown: `Godot_Speakers_Shutdown();`
+
+## Phase 48: Sound Occlusion (Basic) ✅
+Basic line-of-sight sound occlusion using the engine's collision model (CM_BoxTrace).
+
+- [x] **Task 48.1:** Created `godot_sound_occlusion.h` with C-linkage API: `Godot_SoundOcclusion_Check`, `Godot_SoundOcclusion_SetEnabled`, `Godot_SoundOcclusion_IsEnabled`.
+- [x] **Task 48.2:** Created `godot_sound_occlusion.c` — point trace via `CM_BoxTrace`.
+- [x] **Task 48.3:** Binary occlusion model: trace fraction < 1.0 → `OCCLUSION_FACTOR` (0.3), otherwise 1.0.
+- [x] **Task 48.4:** Disabled by default — must be explicitly enabled via `Godot_SoundOcclusion_SetEnabled(1)`.
+
+### Key technical details (Phase 48):
+- Uses `CM_BoxTrace` with zero-size box (point trace) through world model (handle 0)
+- Brush mask: `CONTENTS_SOLID` from `surfaceflags.h`
+- Attenuation factor: 0.3× for fully occluded sounds (single fixed value)
+- No multi-ray sampling or material-based attenuation — deliberately simple
+- Disabled by default to avoid performance impact; enable when needed
+
+### Limitations (Phase 48):
+- Binary occlusion only (no partial/frequency-dependent attenuation)
+- Single ray from listener to sound origin (no multi-sample)
+- Does not account for sound propagation through openings
+- May false-positive through thin walls or windows
+
+### Files created (Phase 48):
+- `code/godot/godot_sound_occlusion.h` — C-linkage header
+- `code/godot/godot_sound_occlusion.c` — Implementation (~50 lines)
+
+### MoHAARunner Integration Required (Phase 48):
+**New `#include` lines:**
+```cpp
+#include "godot_sound_occlusion.h"
+```
+
+**New calls needed:**
+- Optionally in `_ready()` or via cvar: `Godot_SoundOcclusion_SetEnabled(1);`
+- In `update_audio()` when setting volume for 3D sounds:
+  ```cpp
+  float occl = Godot_SoundOcclusion_Check(
+      listener_origin[0], listener_origin[1], listener_origin[2],
+      sound_origin[0], sound_origin[1], sound_origin[2]);
+  effective_volume *= occl;
+  ```
