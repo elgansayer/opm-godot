@@ -1568,3 +1568,154 @@ Basic line-of-sight sound occlusion using the engine's collision model (CM_BoxTr
 ### Files modified (Phase 78):
 - `code/godot/godot_bsp_mesh.h` — BSPFogVolume struct, accessor declarations
 - `code/godot/godot_bsp_mesh.cpp` — fog lump parsing, accessor implementations, fog volume cache cleanup in Unload()
+
+## Phase 59: Entity LOD System ✅
+Distance-based LOD selection using skelHeaderGame_t::lodIndex[] and progressive mesh vertex collapse.
+
+- [x] **Task 59.1:** Added LOD data accessor functions to `godot_skel_model_accessors.cpp`: `Godot_Skel_GetLodIndexCount()`, `Godot_Skel_GetLodIndex()`, `Godot_Skel_GetCollapseData()`.
+- [x] **Task 59.2:** Implemented `Godot_Skel_SelectLodLevel()` — distance-based LOD level selection using 10 distance thresholds (256–8192 inches).
+- [x] **Task 59.3:** Implemented `Godot_Skel_GetLodVertexLimit()` — returns the maximum vertex count for a given LOD level from lodIndex[].
+- [x] **Task 59.4:** Implemented `Godot_Skel_BuildLodMesh()` — progressive mesh vertex collapse using pCollapse/pCollapseIndex to reduce triangle count for distant entities.
+
+### Key technical details (Phase 59):
+- `skelHeaderGame_t.lodIndex[10]` maps LOD levels to maximum vertex counts
+- `skelSurfaceGame_t.pCollapse[]` defines collapse chain (vertex v → vertex collapse[v])
+- `skelSurfaceGame_t.pCollapseIndex[]` provides remapped indices for collapsed mesh
+- Collapse walks the chain until vertex index < maxVerts; degenerate triangles are discarded
+- Falls back to full detail (LOD 0) if collapse data is missing
+
+### MoHAARunner Integration Required (Phase 59):
+- In `update_entities()`: compute distance from camera to entity, call `Godot_Skel_SelectLodLevel()` to get LOD level
+- Pass LOD level to mesh building pipeline to reduce vertex/triangle count for distant entities
+- Include LOD level in EntityMeshCacheKey for proper cache keying
+
+### Files modified (Phase 59):
+- `code/godot/godot_skel_model_accessors.cpp` — LOD data accessor functions
+- `code/godot/godot_skel_model.cpp` — LOD selection + collapse implementation
+- `code/godot/godot_skel_model.h` — LOD function declarations
+
+## Phase 60: Per-Entity Mesh Caching ✅
+Mesh cache to eliminate redundant ArrayMesh rebuilds for animated entities.
+
+- [x] **Task 60.1:** Created `godot_mesh_cache.h` with `EntityMeshCacheKey` struct (hModel, 4 frame info slots, LOD level) and `EntityMeshCacheHash` for std::unordered_map.
+- [x] **Task 60.2:** Implemented `Godot_MeshCache` singleton with `lookup()`, `store()`, `evict_stale()`, `clear()` methods.
+- [x] **Task 60.3:** Time-based eviction: entries unused for 120 frames (default) are removed during `evict_stale()`.
+- [x] **Task 60.4:** FNV-1a hash over raw bytes of the cache key for efficient lookups.
+
+### Key technical details (Phase 60):
+- Cache key captures: hModel + 4 animation frame slots (index, weight, time) + LOD level
+- `EntityMeshCacheEntry` stores Ref<ArrayMesh> + per-surface shader names + last-used frame
+- Eviction runs once per frame; configurable stale threshold (default 120 frames ≈ 2s at 60fps)
+- Stats: hit/miss counters for performance audit
+
+### MoHAARunner Integration Required (Phase 60):
+1. In `update_entities()`: build `EntityMeshCacheKey` from entity animation state
+2. Call `Godot_MeshCache::get().lookup()` — returns cached mesh or nullptr
+3. If nullptr, build mesh normally, then call `Godot_MeshCache::get().store()`
+4. In `_process()`: call `Godot_MeshCache::get().evict_stale(frame_number)` once per frame
+
+### Files created (Phase 60):
+- `code/godot/godot_mesh_cache.h` — cache key structs, Godot_MeshCache class
+- `code/godot/godot_mesh_cache.cpp` — cache implementation
+
+## Phase 61: Material Cache System ✅
+Material caching to share materials across entities with identical appearance.
+
+- [x] **Task 61.1:** Created `MaterialCacheKey` struct keyed on (shader_handle, rgba[4], blend_mode).
+- [x] **Task 61.2:** Implemented `Godot_MaterialCache` singleton with `lookup()`, `store()`, `evict_stale()`, `clear()`.
+- [x] **Task 61.3:** Cache stores `Ref<Material>` base class — works with both StandardMaterial3D and ShaderMaterial.
+- [x] **Task 61.4:** LRU-style eviction with configurable stale frame threshold (default 300 frames ≈ 5s at 60fps).
+
+### MoHAARunner Integration Required (Phase 61):
+1. In `update_entities()`: build `MaterialCacheKey` from (shader_handle, shaderRGBA, blend_mode)
+2. Call `Godot_MaterialCache::get().lookup()` — returns cached material or empty Ref
+3. If empty, create material normally, then call `Godot_MaterialCache::get().store()`
+4. In `_process()`: call `Godot_MaterialCache::get().evict_stale(frame_number)` once per frame
+
+### Files created (Phase 61):
+- `code/godot/godot_mesh_cache.h` — MaterialCacheKey, Godot_MaterialCache class (same header as Phase 60)
+- `code/godot/godot_mesh_cache.cpp` — material cache implementation
+
+## Phase 62: Weapon Rendering via SubViewport ✅
+SubViewport weapon rendering for first-person weapons (RF_FIRST_PERSON + RF_DEPTHHACK).
+
+- [x] **Task 62.1:** Created `Godot_WeaponViewport` singleton managing SubViewport + Camera3D + Node3D + CanvasLayer + TextureRect.
+- [x] **Task 62.2:** `create()` builds the full node hierarchy: weapon_viewport → weapon_camera + weapon_root, weapon_overlay → weapon_rect.
+- [x] **Task 62.3:** `sync_camera()` copies main camera transform/FOV/near/far to weapon camera each frame.
+- [x] **Task 62.4:** `resize()` handles viewport resize. `destroy()` cleanly frees all nodes.
+- [x] **Task 62.5:** Transparent background + CanvasLayer compositing for weapon over main view.
+
+### Scene tree layout (Phase 62):
+```
+MoHAARunner (Node)
+  game_world (Node3D)
+    camera (Camera3D)           ← main camera
+    entity_root (Node3D)        ← world entities
+  weapon_viewport (SubViewport) ← weapon rendering
+    weapon_camera (Camera3D)    ← copies main camera transform
+    weapon_root (Node3D)        ← RF_FIRST_PERSON entities go here
+  weapon_overlay (CanvasLayer)  ← composites weapon_viewport
+    weapon_rect (TextureRect)   ← ViewportTexture from weapon_viewport
+```
+
+### MoHAARunner Integration Required (Phase 62):
+1. In `setup_3d_scene()`: call `Godot_WeaponViewport::get().create(this, camera, width, height)`
+2. In `update_entities()`: for entities with RF_FIRST_PERSON (0x04) or RF_DEPTHHACK (0x08), parent their MeshInstance3D to `Godot_WeaponViewport::get().get_weapon_root()` instead of entity_root
+3. In `_process()`: call `Godot_WeaponViewport::get().sync_camera()` each frame
+4. On shutdown: call `Godot_WeaponViewport::get().destroy()`
+
+### Files created (Phase 62):
+- `code/godot/godot_weapon_viewport.h` — Godot_WeaponViewport class
+- `code/godot/godot_weapon_viewport.cpp` — SubViewport setup + camera sync
+
+## Phase 63: Lightgrid Entity Lighting ✅
+BSP lightgrid sampling for per-entity light modulation.
+
+- [x] **Task 63.1:** Implemented `Godot_EntityLight_Sample()` — samples lightgrid at entity position via `Godot_BSP_LightForPoint()`.
+- [x] **Task 63.2:** Combines ambient + directed light into a single colour: `ambient + directed * 0.5` for material modulation.
+- [x] **Task 63.3:** Falls back to (0.5, 0.5, 0.5) mid-grey if lightgrid data is unavailable.
+- [x] **Task 63.4:** All positions in id Tech 3 coordinates — caller converts from Godot space if needed.
+
+### MoHAARunner Integration Required (Phase 63):
+1. In `update_entities()`: call `Godot_EntityLight_Sample()` with entity origin (id-space)
+2. Apply returned RGB as material modulation: `material.albedo_color *= Color(r, g, b)`
+3. Handle RF_LIGHTING_ORIGIN (0x0080): sample at lightingOrigin instead of render origin
+
+### Files created (Phase 63):
+- `code/godot/godot_entity_lighting.h` — lighting API declarations
+- `code/godot/godot_entity_lighting.cpp` — lightgrid sampling implementation
+
+## Phase 64: Dynamic Lights on Entities ✅
+Dynamic light accumulation from muzzle flashes, explosions, etc.
+
+- [x] **Task 64.1:** Implemented `Godot_EntityLight_Dlights()` — reads gr_dlights[] via accessor, sorts by distance, accumulates contribution.
+- [x] **Task 64.2:** Linear attenuation model: `1 - (distance / intensity)`, clamped to 0.
+- [x] **Task 64.3:** Configurable max lights per entity (default 4 for performance).
+- [x] **Task 64.4:** Insertion sort for ≤64 candidates — efficient for small N.
+- [x] **Task 64.5:** `Godot_EntityLight_Combined()` convenience function: lightgrid + dlights, clamped to [0,1].
+
+### MoHAARunner Integration Required (Phase 64):
+1. In `update_entities()`: call `Godot_EntityLight_Combined()` or separate Sample + Dlights
+2. Apply as material modulation: `material.albedo_color *= Color(r, g, b)`
+
+### Files created (Phase 64):
+- `code/godot/godot_entity_lighting.h` — dlight API declarations
+- `code/godot/godot_entity_lighting.cpp` — dlight accumulation implementation
+
+## Phase 85: Render Performance Audit ✅
+Performance statistics infrastructure for entity rendering profiling.
+
+- [x] **Task 85.1:** Created `Godot_RenderStats` struct with per-frame counters: frame time, entities rendered/skeletal/static, cache hits/misses, draw calls.
+- [x] **Task 85.2:** `Godot_RenderStats_BeginFrame()` / `Godot_RenderStats_EndFrame()` bracket frame timing via `Time::get_ticks_usec()`.
+- [x] **Task 85.3:** `Godot_RenderStats_Log()` prints a single-line summary with all counters + cache sizes.
+- [x] **Task 85.4:** Per-cache statistics: `stat_hits()`, `stat_misses()`, `stat_size()`, `stat_reset()` on both mesh and material caches.
+
+### MoHAARunner Integration Required (Phase 85):
+1. In `_process()`: call `Godot_RenderStats_BeginFrame()` before `Com_Frame()`
+2. In `_process()`: call `Godot_RenderStats_EndFrame()` after all rendering
+3. Optionally call `Godot_RenderStats_Log()` every N frames or on cvar toggle
+4. Increment `g_render_stats.entities_rendered` / `entities_skeletal` / `entities_static` / `draw_calls` in `update_entities()`
+
+### Files created (Phase 85):
+- `code/godot/godot_mesh_cache.h` — Godot_RenderStats struct + C API
+- `code/godot/godot_mesh_cache.cpp` — stats implementation
