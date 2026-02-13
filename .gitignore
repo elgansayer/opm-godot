@@ -1,0 +1,42 @@
+# Build artifacts
+*.o
+*.os
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+
+# SCons
+.sconsign.dblite
+.sconf_temp/
+*.pyc
+__pycache__/
+
+# Build output directories
+openmohaa/build/
+godot-cpp/CMakeFiles/
+godot-cpp/bin/
+godot-cpp/cmake_install.cmake
+godot-cpp/CMakeCache.txt
+godot-cpp/Makefile
+godot-cpp/gen/
+
+# Binary output
+openmohaa/bin/libopenmohaa.so
+openmohaa/bin/libcgame.so
+project/bin/
+
+# Godot editor files
+.godot/
+*.import
+godot_log.txt
+
+# IDE
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
