@@ -36,6 +36,7 @@ struct GodotShaderProps {
     GodotShaderCull cull;
     bool is_portal;          /* surfaceparm portal — skip rendering */
     bool is_sky;             /* surfaceparm sky */
+    bool no_lightmap;        /* surfaceparm nolightmap — render fullbright */
     char sky_env[64];        /* skyParms env basename (e.g. "env/m5l2") */
 
     /* Phase 36: tcMod scroll/rotate/scale animation parameters */

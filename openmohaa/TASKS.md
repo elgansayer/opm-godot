@@ -967,3 +967,19 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 ### Files modified (Phase 61):
 - `code/godot/MoHAARunner.h` — added `tinted_mat_cache` member, added `standard_material3d.hpp` include
 - `code/godot/MoHAARunner.cpp` — cache lookup/store in entity tinting code, cache clear on map change
+
+## Phase 65: Fullbright/Nolightmap Surface Rendering ✅
+- [x] **Task 65.1:** Added `no_lightmap` field to `GodotShaderProps` struct.
+- [x] **Task 65.2:** Parse `surfaceparm nolightmap` in the shader parser alongside existing surfaceparm handling.
+- [x] **Task 65.3:** In `apply_shader_props_to_material`, set `SHADING_MODE_UNSHADED` for nolightmap surfaces, rendering them fullbright without Godot's lighting calculations.
+
+### Key technical details (Phase 65):
+- Surfaces with `surfaceparm nolightmap` in their .shader definition have no lightmap stage
+- In the original engine, these surfaces are rendered using vertex colours alone (fullbright)
+- In Godot, `SHADING_MODE_UNSHADED` achieves the same effect — the albedo texture renders at full intensity without directional/ambient lighting influence
+- This fixes surfaces like skybox fragments, decal overlays, and certain UI-in-world surfaces that were previously too dark
+
+### Files modified (Phase 65):
+- `code/godot/godot_shader_props.h` — added `bool no_lightmap` to `GodotShaderProps`
+- `code/godot/godot_shader_props.cpp` — parse `surfaceparm nolightmap`
+- `code/godot/MoHAARunner.cpp` — set `SHADING_MODE_UNSHADED` for nolightmap materials

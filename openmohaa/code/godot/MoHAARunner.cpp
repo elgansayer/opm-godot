@@ -678,6 +678,11 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
             mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
         }
     }
+
+    // Phase 65: Fullbright rendering for nolightmap surfaces
+    if (sp->no_lightmap) {
+        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+    }
 }
 
 /// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
