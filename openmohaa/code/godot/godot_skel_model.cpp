@@ -46,6 +46,12 @@ extern "C" {
     int         Godot_Skel_GetBoneCount(void *tikiPtr, int meshIndex);
     int         Godot_Skel_GetBoneParent(void *tikiPtr, int meshIndex, int boneIndex);
     const char *Godot_Skel_GetName(void *tikiPtr);
+
+    /* Phase 59: LOD data accessors */
+    int  Godot_Skel_GetLodIndexCount(void);
+    int  Godot_Skel_GetLodIndex(void *tikiPtr, int meshIndex, int *outLodIndex);
+    int  Godot_Skel_GetCollapseData(void *tikiPtr, int meshIndex, int surfIndex,
+                                     int *outCollapse, int *outCollapseIndex);
 }
 
 /* ── Coordinate conversion (id → Godot) ── */
@@ -252,4 +258,150 @@ GodotSkelModelCache::CachedModel *GodotSkelModelCache::build_model(int hModel)
     }
 
     return &model;
+}
+
+/* ===================================================================
+ *  Phase 59: Entity LOD System
+ *
+ *  Distance-based LOD selection using skelHeaderGame_t::lodIndex[]
+ *  and progressive mesh vertex collapse via pCollapse/pCollapseIndex.
+ * ================================================================ */
+
+/*
+ * LOD distance thresholds (in id Tech 3 inches).
+ * lodIndex[i] gives the maximum vertex count at LOD level i.
+ * The engine uses these approximate distance bands:
+ *   LOD 0: 0–256 inches (closest, full detail)
+ *   LOD 1: 256–512
+ *   LOD 2: 512–1024
+ *   LOD 3: 1024–2048
+ *   LOD 4–9: progressively farther
+ */
+static const float LOD_DISTANCE_THRESHOLDS[10] = {
+    256.0f, 512.0f, 1024.0f, 2048.0f, 3072.0f,
+    4096.0f, 5120.0f, 6144.0f, 7168.0f, 8192.0f
+};
+
+int Godot_Skel_SelectLodLevel(void *tikiPtr, int meshIndex, float distance)
+{
+    if (!tikiPtr || distance < 0.0f) return 0;
+
+    int lodIndex[10];
+    if (!Godot_Skel_GetLodIndex(tikiPtr, meshIndex, lodIndex)) {
+        return 0;  /* No LOD data — use full detail */
+    }
+
+    /* If all lodIndex entries are 0 or identical, LOD is not meaningful */
+    if (lodIndex[0] <= 0) return 0;
+
+    /* Find the first LOD level whose distance threshold exceeds `distance` */
+    int lodCount = Godot_Skel_GetLodIndexCount();
+    for (int i = 0; i < lodCount; i++) {
+        if (distance < LOD_DISTANCE_THRESHOLDS[i]) {
+            return i;
+        }
+    }
+    return lodCount - 1;  /* Maximum LOD (lowest detail) */
+}
+
+int Godot_Skel_GetLodVertexLimit(void *tikiPtr, int meshIndex, int lodLevel)
+{
+    if (!tikiPtr) return -1;
+
+    int lodIndex[10];
+    if (!Godot_Skel_GetLodIndex(tikiPtr, meshIndex, lodIndex)) {
+        return -1;  /* No LOD data */
+    }
+
+    int lodCount = Godot_Skel_GetLodIndexCount();
+    if (lodLevel < 0) lodLevel = 0;
+    if (lodLevel >= lodCount) lodLevel = lodCount - 1;
+
+    int limit = lodIndex[lodLevel];
+    return (limit > 0) ? limit : -1;
+}
+
+int Godot_Skel_BuildLodMesh(void *tikiPtr, int meshIndex, int surfIndex,
+                             int maxVerts,
+                             const float * /*positions*/, const float * /*normals*/,
+                             const float * /*texcoords*/, int numVerts,
+                             const int *indices, int numTris,
+                             float /*tikiScale*/,
+                             int *outIndices, int *outNumTris)
+{
+    if (!tikiPtr || !indices || !outIndices || !outNumTris)
+        return 0;
+
+    /* If maxVerts >= numVerts, no collapse needed */
+    if (maxVerts < 0 || maxVerts >= numVerts) {
+        return 0;
+    }
+
+    /* Get collapse data */
+    int *collapse      = (int *)malloc(numVerts * sizeof(int));
+    int *collapseIndex = (int *)malloc(numVerts * sizeof(int));
+
+    if (!collapse || !collapseIndex) {
+        free(collapse);
+        free(collapseIndex);
+        return 0;
+    }
+
+    if (!Godot_Skel_GetCollapseData(tikiPtr, meshIndex, surfIndex,
+                                     collapse, collapseIndex)) {
+        free(collapse);
+        free(collapseIndex);
+        return 0;  /* No collapse data — use full detail */
+    }
+
+    /*
+     * Progressive mesh collapse:
+     *
+     * For each triangle, remap each vertex index through the collapse
+     * chain until the vertex index is < maxVerts.  If any two vertices
+     * of a triangle collapse to the same vertex, the triangle is
+     * degenerate and should be skipped.
+     */
+    int outTris = 0;
+
+    for (int t = 0; t < numTris; t++) {
+        int i0 = indices[t * 3 + 0];
+        int i1 = indices[t * 3 + 1];
+        int i2 = indices[t * 3 + 2];
+
+        /* Walk collapse chain for each vertex */
+        while (i0 >= maxVerts && i0 < numVerts) {
+            int next = collapse[i0];
+            if (next == i0 || next < 0) break;  /* root vertex */
+            i0 = next;
+        }
+        while (i1 >= maxVerts && i1 < numVerts) {
+            int next = collapse[i1];
+            if (next == i1 || next < 0) break;
+            i1 = next;
+        }
+        while (i2 >= maxVerts && i2 < numVerts) {
+            int next = collapse[i2];
+            if (next == i2 || next < 0) break;
+            i2 = next;
+        }
+
+        /* Skip degenerate triangles */
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+
+        /* Skip if any vertex is still out of range */
+        if (i0 >= maxVerts || i1 >= maxVerts || i2 >= maxVerts) continue;
+
+        outIndices[outTris * 3 + 0] = i0;
+        outIndices[outTris * 3 + 1] = i1;
+        outIndices[outTris * 3 + 2] = i2;
+        outTris++;
+    }
+
+    *outNumTris = outTris;
+
+    free(collapse);
+    free(collapseIndex);
+
+    return 1;
 }

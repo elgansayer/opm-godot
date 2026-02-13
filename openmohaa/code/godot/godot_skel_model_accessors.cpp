@@ -471,4 +471,77 @@ int Godot_Skel_SkinSurface(void *tikiPtr, int meshIndex, int surfIndex,
     return 1;
 }
 
+/* ===================================================================
+ *  LOD data accessors (Phase 59)
+ *
+ *  Expose skelHeaderGame_t.lodIndex[], skelSurfaceGame_t.pCollapse[],
+ *  and pCollapseIndex[] to the Godot-side LOD system.
+ * ================================================================ */
+
+/*
+ * Godot_Skel_GetLodIndexCount — return the number of LOD index entries.
+ * Always TIKI_SKEL_LOD_INDEXES (10).
+ */
+int Godot_Skel_GetLodIndexCount(void)
+{
+    return TIKI_SKEL_LOD_INDEXES;
+}
+
+/*
+ * Godot_Skel_GetLodIndex — copy the lodIndex[10] array for a mesh.
+ *
+ * lodIndex[i] stores the maximum vertex count for LOD level i.
+ * The engine uses this to select LOD based on camera distance.
+ * Returns 1 on success, 0 on failure.
+ */
+int Godot_Skel_GetLodIndex(void *tikiPtr, int meshIndex, int *outLodIndex)
+{
+    dtiki_t *tiki = (dtiki_t *)tikiPtr;
+    if (!tiki || meshIndex < 0 || meshIndex >= tiki->numMeshes || !outLodIndex)
+        return 0;
+
+    skelHeaderGame_t *skelmodel = TIKI_GetSkel(tiki->mesh[meshIndex]);
+    if (!skelmodel) return 0;
+
+    for (int i = 0; i < TIKI_SKEL_LOD_INDEXES; i++) {
+        outLodIndex[i] = skelmodel->lodIndex[i];
+    }
+    return 1;
+}
+
+/*
+ * Godot_Skel_GetCollapseData — get progressive mesh collapse data.
+ *
+ * pCollapse[v] = the vertex that vertex v collapses to at the next
+ *                LOD level (-1 or self means it's a root vertex).
+ * pCollapseIndex[v] = remapped triangle index for collapsed mesh.
+ *
+ * outCollapse and outCollapseIndex must each have numVerts entries.
+ * Returns 1 on success, 0 on failure (or if collapse data is missing).
+ */
+int Godot_Skel_GetCollapseData(void *tikiPtr, int meshIndex, int surfIndex,
+                                int *outCollapse, int *outCollapseIndex)
+{
+    dtiki_t *tiki = (dtiki_t *)tikiPtr;
+    if (!tiki || meshIndex < 0 || meshIndex >= tiki->numMeshes)
+        return 0;
+
+    skelHeaderGame_t *skelmodel = TIKI_GetSkel(tiki->mesh[meshIndex]);
+    if (!skelmodel) return 0;
+
+    skelSurfaceGame_t *surf = GetSkelSurface(skelmodel, surfIndex);
+    if (!surf) return 0;
+
+    /* Collapse data may not exist for all models */
+    if (!surf->pCollapse || !surf->pCollapseIndex)
+        return 0;
+
+    int nv = surf->numVerts;
+    for (int i = 0; i < nv; i++) {
+        if (outCollapse)      outCollapse[i]      = (int)surf->pCollapse[i];
+        if (outCollapseIndex) outCollapseIndex[i]  = (int)surf->pCollapseIndex[i];
+    }
+    return 1;
+}
+
 } /* extern "C" */
