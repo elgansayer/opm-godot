@@ -232,10 +232,13 @@ sources = [s for s in sources if not should_exclude(s)]
 
 # Allow multiple definitions to handle legacy code conflicts
 # (fgame + cgame compile overlapping shared sources; platform linker resolves)
-if env["platform"] in ["linux", "macos"]:
+if env["platform"] == "linux":
     env.Append(LINKFLAGS=["-z", "muldefs"])
     # Bind template symbols locally within each .so to prevent ELF interposition
     env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+elif env["platform"] == "macos":
+    # macOS Mach-O linker uses -undefined dynamic_lookup instead of -z muldefs
+    env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])
 elif env["platform"] == "windows":
     # MSVC linker allows multiple definitions by default (/FORCE:MULTIPLE)
     env.Append(LINKFLAGS=["/FORCE:MULTIPLE"])
@@ -313,8 +316,7 @@ elif env["platform"] == "macos":
         "-fvisibility=hidden",
     ])
     cgame_env.Append(CXXFLAGS=["-std=c++17"])
-    cgame_env.Append(LINKFLAGS=["-z", "muldefs"])
-    cgame_env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+    cgame_env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])
 elif env["platform"] == "windows":
     cgame_env.Append(CPPDEFINES=["_WIN32", "WIN32", "_WINDOWS"])
     cgame_env.Append(CCFLAGS=["/EHsc", "/O2"])
