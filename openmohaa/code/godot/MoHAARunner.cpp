@@ -24,6 +24,7 @@
 #include <godot_cpp/classes/cubemap.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/display_server.hpp>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -386,6 +387,37 @@ void MoHAARunner::_bind_methods() {
     godot::ClassDB::bind_method(godot::D_METHOD("set_hud_visible", "visible"), &MoHAARunner::set_hud_visible);
     godot::ClassDB::bind_method(godot::D_METHOD("is_hud_visible"), &MoHAARunner::is_hud_visible);
 
+    // Game flow state (Phase 261)
+    godot::ClassDB::bind_method(godot::D_METHOD("get_game_flow_state"), &MoHAARunner::get_game_flow_state);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_game_flow_state_string"), &MoHAARunner::get_game_flow_state_string);
+
+    // New game flow (Phase 262)
+    godot::ClassDB::bind_method(godot::D_METHOD("start_new_game", "difficulty"), &MoHAARunner::start_new_game);
+    godot::ClassDB::bind_method(godot::D_METHOD("set_difficulty", "difficulty"), &MoHAARunner::set_difficulty);
+
+    // Save / load game (Phase 264)
+    godot::ClassDB::bind_method(godot::D_METHOD("quick_save"), &MoHAARunner::quick_save);
+    godot::ClassDB::bind_method(godot::D_METHOD("quick_load"), &MoHAARunner::quick_load);
+    godot::ClassDB::bind_method(godot::D_METHOD("save_game", "slot_name"), &MoHAARunner::save_game);
+    godot::ClassDB::bind_method(godot::D_METHOD("load_game", "slot_name"), &MoHAARunner::load_game);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_save_list"), &MoHAARunner::get_save_list);
+
+    // Multiplayer helpers (Phases 265-266)
+    godot::ClassDB::bind_method(godot::D_METHOD("list_available_maps"), &MoHAARunner::list_available_maps);
+    godot::ClassDB::bind_method(godot::D_METHOD("start_server", "map", "gametype", "max_clients"), &MoHAARunner::start_server);
+    godot::ClassDB::bind_method(godot::D_METHOD("connect_to_server", "address"), &MoHAARunner::connect_to_server);
+    godot::ClassDB::bind_method(godot::D_METHOD("disconnect_from_server"), &MoHAARunner::disconnect_from_server);
+
+    // Settings helpers (Phases 267-270)
+    godot::ClassDB::bind_method(godot::D_METHOD("set_audio_volume", "master", "music", "dialog"), &MoHAARunner::set_audio_volume);
+    godot::ClassDB::bind_method(godot::D_METHOD("set_video_fullscreen", "fullscreen"), &MoHAARunner::set_video_fullscreen);
+    godot::ClassDB::bind_method(godot::D_METHOD("set_video_resolution", "width", "height"), &MoHAARunner::set_video_resolution);
+    godot::ClassDB::bind_method(godot::D_METHOD("set_network_rate", "preset"), &MoHAARunner::set_network_rate);
+
+    // Menu control (Phase 261)
+    godot::ClassDB::bind_method(godot::D_METHOD("open_main_menu"), &MoHAARunner::open_main_menu);
+    godot::ClassDB::bind_method(godot::D_METHOD("close_menu"), &MoHAARunner::close_menu);
+
     // Properties
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::STRING, "basepath"), "set_basepath", "get_basepath");
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::STRING, "startup_args"), "set_startup_args", "get_startup_args");
@@ -396,6 +428,7 @@ void MoHAARunner::_bind_methods() {
     ADD_SIGNAL(godot::MethodInfo("map_loaded", godot::PropertyInfo(godot::Variant::STRING, "map_name")));
     ADD_SIGNAL(godot::MethodInfo("map_unloaded"));
     ADD_SIGNAL(godot::MethodInfo("engine_shutdown_requested"));
+    ADD_SIGNAL(godot::MethodInfo("game_flow_state_changed", godot::PropertyInfo(godot::Variant::INT, "new_state")));
 }
 
 bool MoHAARunner::is_engine_initialized() const {
@@ -597,6 +630,11 @@ void MoHAARunner::check_world_load() {
         // Load skybox cubemap from sky shader (Phase 12)
         load_skybox();
         UtilityFunctions::print(String("[MoHAA] Loading load_skybox: ") + new_bsp);
+
+        // ── Module hooks for world load (defensive) ──
+#ifdef HAS_WEATHER_MODULE
+        Godot_Weather_Init();
+#endif
 
     } else {
         UtilityFunctions::printerr("[MoHAA] Failed to load BSP world.");
@@ -3090,6 +3128,17 @@ void MoHAARunner::_ready() {
     // Create cinematic video display (Phase 11 — cinematic bridge)
     setup_cinematic();
 
+    // Initialise game flow state (Phase 261)
+    game_flow_state = GameFlowState::BOOT;
+
+    // ── Module init hooks (defensive — only called if module exists) ──
+#ifdef HAS_MUSIC_MODULE
+    Godot_Music_Init();
+#endif
+#ifdef HAS_VFX_MODULE
+    Godot_VFX_Init(game_world);
+#endif
+
     UtilityFunctions::print("[MoHAA] Engine initialised.");
 }
 
@@ -3146,6 +3195,23 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update cinematic video display (Phase 11) ──
     update_cinematic();
+
+    // ── Module update hooks (defensive — only called if module exists) ──
+#ifdef HAS_MUSIC_MODULE
+    Godot_Music_Update(delta);
+#endif
+#ifdef HAS_WEATHER_MODULE
+    Godot_Weather_Update(delta);
+#endif
+#ifdef HAS_VFX_MODULE
+    Godot_VFX_Update(delta);
+#endif
+#ifdef HAS_DEBUG_RENDER_MODULE
+    Godot_DebugRender_Update(delta);
+#endif
+
+    // ── Update game flow state machine (Phase 261) ──
+    update_game_flow_state();
 
     // ── Enforce gameplay input mode each frame ──
     // The engine's UI system can re-enable in_guimouse or set keyCatchers
@@ -3370,6 +3436,302 @@ void MoHAARunner::set_hud_visible(bool p_visible) {
 
 bool MoHAARunner::is_hud_visible() const {
     return hud_visible;
+}
+
+// ──────────────────────────────────────────────
+//  Game flow state machine (Phase 261)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::update_game_flow_state() {
+    if (!initialized) return;
+
+    int sv_state = Godot_GetServerState();
+    int catchers = Godot_Client_GetKeyCatchers();
+    GameFlowState new_state = game_flow_state;
+
+    switch (game_flow_state) {
+        case GameFlowState::BOOT:
+            // After engine init, transition to TITLE_SCREEN
+            // The engine opens the main menu UI automatically on boot
+            if (catchers & 0x2) {  // KEYCATCH_UI active
+                new_state = GameFlowState::MAIN_MENU;
+            } else {
+                new_state = GameFlowState::TITLE_SCREEN;
+            }
+            break;
+
+        case GameFlowState::TITLE_SCREEN:
+            // Any key press or UI activation moves to main menu
+            if (catchers & 0x2) {  // KEYCATCH_UI
+                new_state = GameFlowState::MAIN_MENU;
+            } else if (sv_state == 1 || sv_state == 2) {  // SS_LOADING / SS_LOADING2
+                new_state = GameFlowState::LOADING;
+            }
+            break;
+
+        case GameFlowState::MAIN_MENU:
+            if (sv_state == 1 || sv_state == 2) {  // SS_LOADING / SS_LOADING2
+                new_state = GameFlowState::LOADING;
+            } else if (sv_state == 3 && !(catchers & 0x2)) {  // SS_GAME, no UI
+                new_state = GameFlowState::IN_GAME;
+            }
+            break;
+
+        case GameFlowState::LOADING:
+            if (sv_state == 3) {  // SS_GAME
+                new_state = GameFlowState::IN_GAME;
+            } else if (sv_state == 0) {  // SS_DEAD — load failed or disconnected
+                new_state = GameFlowState::DISCONNECTED;
+            }
+            break;
+
+        case GameFlowState::IN_GAME:
+            if (sv_state != 3) {  // No longer in game
+                if (sv_state == 1 || sv_state == 2) {
+                    new_state = GameFlowState::LOADING;  // Map change
+                } else {
+                    new_state = GameFlowState::DISCONNECTED;
+                }
+            } else if (Godot_Client_GetPaused()) {
+                new_state = GameFlowState::PAUSED;
+            }
+            break;
+
+        case GameFlowState::PAUSED:
+            if (!Godot_Client_GetPaused()) {
+                new_state = GameFlowState::IN_GAME;
+            }
+            if (sv_state != 3) {
+                new_state = GameFlowState::DISCONNECTED;
+            }
+            break;
+
+        case GameFlowState::MISSION_COMPLETE:
+            // Stay until a new map loads or menu opens
+            if (sv_state == 1 || sv_state == 2) {
+                new_state = GameFlowState::LOADING;
+            } else if (catchers & 0x2) {
+                new_state = GameFlowState::MAIN_MENU;
+            }
+            break;
+
+        case GameFlowState::DISCONNECTED:
+            if (catchers & 0x2) {  // KEYCATCH_UI
+                new_state = GameFlowState::MAIN_MENU;
+            } else if (sv_state == 1 || sv_state == 2) {
+                new_state = GameFlowState::LOADING;
+            } else if (sv_state == 3) {
+                new_state = GameFlowState::IN_GAME;
+            }
+            break;
+    }
+
+    if (new_state != game_flow_state) {
+        game_flow_state = new_state;
+        emit_signal("game_flow_state_changed", (int)new_state);
+    }
+}
+
+int MoHAARunner::get_game_flow_state() const {
+    return (int)game_flow_state;
+}
+
+godot::String MoHAARunner::get_game_flow_state_string() const {
+    switch (game_flow_state) {
+        case GameFlowState::BOOT:             return "boot";
+        case GameFlowState::TITLE_SCREEN:     return "title_screen";
+        case GameFlowState::MAIN_MENU:        return "main_menu";
+        case GameFlowState::LOADING:          return "loading";
+        case GameFlowState::IN_GAME:          return "in_game";
+        case GameFlowState::PAUSED:           return "paused";
+        case GameFlowState::MISSION_COMPLETE: return "mission_complete";
+        case GameFlowState::DISCONNECTED:     return "disconnected";
+        default:                              return "unknown";
+    }
+}
+
+// ──────────────────────────────────────────────
+//  New game flow (Phase 262)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::start_new_game(int difficulty) {
+    if (!initialized) {
+        UtilityFunctions::printerr("[MoHAA] Engine not initialised, cannot start new game.");
+        return;
+    }
+    // Set difficulty cvar: 0 = easy, 1 = medium, 2 = hard
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "set skill %d\n", difficulty);
+    Cbuf_AddText(cmd);
+    // Load the first Allied Assault mission
+    Cbuf_AddText("map m1l1\n");
+}
+
+void MoHAARunner::set_difficulty(int difficulty) {
+    if (!initialized) return;
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "set skill %d\n", difficulty);
+    Cbuf_AddText(cmd);
+}
+
+// ──────────────────────────────────────────────
+//  Save / load game (Phase 264)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::quick_save() {
+    if (!initialized) return;
+    Cbuf_AddText("savegame quick\n");
+}
+
+void MoHAARunner::quick_load() {
+    if (!initialized) return;
+    Cbuf_AddText("loadgame quick\n");
+}
+
+void MoHAARunner::save_game(const godot::String &p_slot_name) {
+    if (!initialized) return;
+    godot::CharString slot = p_slot_name.utf8();
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "savegame %s\n", slot.get_data());
+    Cbuf_AddText(cmd);
+}
+
+void MoHAARunner::load_game(const godot::String &p_slot_name) {
+    if (!initialized) return;
+    godot::CharString slot = p_slot_name.utf8();
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "loadgame %s\n", slot.get_data());
+    Cbuf_AddText(cmd);
+}
+
+godot::PackedStringArray MoHAARunner::get_save_list() const {
+    godot::PackedStringArray result;
+    if (!initialized) return result;
+
+    // Save files are in fs_homepath/save/ — list .sav files via VFS
+    int count = 0;
+    char **list = Godot_VFS_ListFiles("save", ".sav", &count);
+    if (!list) return result;
+
+    for (int i = 0; i < count; i++) {
+        if (list[i]) {
+            result.push_back(godot::String(list[i]));
+        }
+    }
+    Godot_VFS_FreeFileList(list);
+    return result;
+}
+
+// ──────────────────────────────────────────────
+//  Multiplayer helpers (Phases 265-266)
+// ──────────────────────────────────────────────
+
+godot::PackedStringArray MoHAARunner::list_available_maps() const {
+    godot::PackedStringArray result;
+    if (!initialized) return result;
+
+    // BSP maps are in maps/ directory
+    int count = 0;
+    char **list = Godot_VFS_ListFiles("maps", ".bsp", &count);
+    if (!list) return result;
+
+    for (int i = 0; i < count; i++) {
+        if (list[i]) {
+            // Strip .bsp extension for cleaner display
+            godot::String name(list[i]);
+            if (name.ends_with(".bsp")) {
+                name = name.substr(0, name.length() - 4);
+            }
+            result.push_back(name);
+        }
+    }
+    Godot_VFS_FreeFileList(list);
+    return result;
+}
+
+void MoHAARunner::start_server(const godot::String &p_map, const godot::String &p_gametype, int max_clients) {
+    if (!initialized) return;
+    godot::CharString map = p_map.utf8();
+    godot::CharString gt = p_gametype.utf8();
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "set g_gametype %s\nset sv_maxclients %d\nmap %s\n",
+             gt.get_data(), max_clients, map.get_data());
+    Cbuf_AddText(cmd);
+}
+
+void MoHAARunner::connect_to_server(const godot::String &p_address) {
+    if (!initialized) return;
+    godot::CharString addr = p_address.utf8();
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "connect %s\n", addr.get_data());
+    Cbuf_AddText(cmd);
+}
+
+void MoHAARunner::disconnect_from_server() {
+    if (!initialized) return;
+    Cbuf_AddText("disconnect\n");
+}
+
+// ──────────────────────────────────────────────
+//  Settings helpers (Phases 267-270)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::set_audio_volume(float master, float music, float dialog) {
+    if (!initialized) return;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "set s_volume %f\nset s_musicvolume %f\nset s_dialogvolume %f\n",
+             master, music, dialog);
+    Cbuf_AddText(cmd);
+}
+
+void MoHAARunner::set_video_fullscreen(bool fullscreen) {
+    // This is a Godot-side setting, not an engine cvar
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (!ds) return;
+    if (fullscreen) {
+        ds->window_set_mode(DisplayServer::WINDOW_MODE_FULLSCREEN);
+    } else {
+        ds->window_set_mode(DisplayServer::WINDOW_MODE_WINDOWED);
+    }
+}
+
+void MoHAARunner::set_video_resolution(int width, int height) {
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (!ds) return;
+    ds->window_set_size(Vector2i(width, height));
+}
+
+void MoHAARunner::set_network_rate(const godot::String &p_preset) {
+    if (!initialized) return;
+    godot::CharString preset = p_preset.utf8();
+    const char *p = preset.get_data();
+
+    // Standard MOHAA rate presets
+    if (strcmp(p, "modem") == 0) {
+        Cbuf_AddText("set rate 4000\nset snaps 20\nset cl_maxpackets 30\n");
+    } else if (strcmp(p, "isdn") == 0) {
+        Cbuf_AddText("set rate 8000\nset snaps 30\nset cl_maxpackets 30\n");
+    } else if (strcmp(p, "cable") == 0) {
+        Cbuf_AddText("set rate 15000\nset snaps 40\nset cl_maxpackets 42\n");
+    } else if (strcmp(p, "lan") == 0) {
+        Cbuf_AddText("set rate 25000\nset snaps 40\nset cl_maxpackets 42\n");
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Menu control (Phase 261)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::open_main_menu() {
+    if (!initialized) return;
+    Cbuf_AddText("togglemenu 1\n");
+}
+
+void MoHAARunner::close_menu() {
+    if (!initialized) return;
+    Cbuf_AddText("togglemenu 0\n");
 }
 
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {

@@ -135,8 +135,18 @@ if env["platform"] == "linux":
     sys_sources.append("code/sys/win_localization.cpp")
     sys_sources.append("code/sys/win_bounds.cpp")
 elif env["platform"] == "windows":
+    env.Append(CPPDEFINES=["_WIN32", "WIN32", "_WINDOWS"])
+    env.Append(CCFLAGS=["/EHsc"])  # C++ exceptions
     sys_sources.append("code/sys/sys_win32.c")
     sys_sources.append("code/sys/con_win32.c")
+    sys_sources.append("code/sys/win_localization.cpp")
+    sys_sources.append("code/sys/win_bounds.cpp")
+elif env["platform"] == "macos":
+    env.Append(CPPDEFINES=["__APPLE__", "MACOS_X"])
+    env.Append(CCFLAGS=["-Wno-incompatible-pointer-types", "-fexceptions", "-frtti"])
+    sys_sources.append("code/sys/sys_unix.c")   # macOS uses POSIX sys layer
+    sys_sources.append("code/sys/con_tty.c")
+    sys_sources.append("code/sys/sys_curl.c")
     sys_sources.append("code/sys/win_localization.cpp")
     sys_sources.append("code/sys/win_bounds.cpp")
 
@@ -221,18 +231,22 @@ def should_exclude(filepath):
 sources = [s for s in sources if not should_exclude(s)]
 
 # Allow multiple definitions to handle legacy code conflicts
-# (fgame + cgame compile overlapping shared sources; -z muldefs resolves)
-env.Append(LINKFLAGS=["-z", "muldefs"])
-
-# Bind template symbols (con_arrayset, con_set, MEM_BlockAlloc, etc.)
-# locally within each .so.  Without this, the dynamic linker may resolve
-# template instantiations in the main .so to the cgame.so versions (which
-# use cgi.Free / cgi.Malloc function pointers).  After cgame is dlclose'd,
-# those code pages are unmapped → SIGSEGV during exit() destructor teardown.
-env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+# (fgame + cgame compile overlapping shared sources; platform linker resolves)
+if env["platform"] in ["linux", "macos"]:
+    env.Append(LINKFLAGS=["-z", "muldefs"])
+    # Bind template symbols locally within each .so to prevent ELF interposition
+    env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+elif env["platform"] == "windows":
+    # MSVC linker allows multiple definitions by default (/FORCE:MULTIPLE)
+    env.Append(LINKFLAGS=["/FORCE:MULTIPLE"])
 
 # ── Link system libraries ──
-env.Append(LIBS=["z", "dl"])  # zlib, dlopen
+if env["platform"] == "linux":
+    env.Append(LIBS=["z", "dl"])  # zlib, dlopen
+elif env["platform"] == "macos":
+    env.Append(LIBS=["z", "dl"])  # zlib, dlopen (macOS POSIX)
+elif env["platform"] == "windows":
+    env.Append(LIBS=["zlib", "ws2_32", "winmm"])  # zlib, winsock, multimedia
 
 # ── Build the shared library ──
 library = env.SharedLibrary(
@@ -290,6 +304,21 @@ if env["platform"] == "linux":
     cgame_env.Append(CXXFLAGS=["-std=c++17"])
     cgame_env.Append(LINKFLAGS=["-z", "muldefs"])
     cgame_env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+elif env["platform"] == "macos":
+    cgame_env.Append(CPPDEFINES=["__APPLE__", "MACOS_X"])
+    cgame_env.Append(CCFLAGS=[
+        "-fPIC", "-g", "-O2",
+        "-Wno-incompatible-pointer-types",
+        "-fexceptions", "-frtti",
+        "-fvisibility=hidden",
+    ])
+    cgame_env.Append(CXXFLAGS=["-std=c++17"])
+    cgame_env.Append(LINKFLAGS=["-z", "muldefs"])
+    cgame_env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
+elif env["platform"] == "windows":
+    cgame_env.Append(CPPDEFINES=["_WIN32", "WIN32", "_WINDOWS"])
+    cgame_env.Append(CCFLAGS=["/EHsc", "/O2"])
+    cgame_env.Append(LINKFLAGS=["/FORCE:MULTIPLE"])
 
 # Remap sources to build/cgame/ variant directory
 def cgame_path(src):
