@@ -334,8 +334,6 @@ extern "C" void Godot_Music_Update(float delta)
 
         /* Fade in the active player, fade out the old one */
         float active_vol = s_target_volume * t;
-        float old_vol    = s_current_volume * (1.0f - t);
-        (void)old_vol; /* Used below if old player exists */
 
         if (s_players[s_active_idx]) {
             s_players[s_active_idx]->set_volume_db(
@@ -343,9 +341,9 @@ extern "C" void Godot_Music_Update(float delta)
         }
         int old_idx = 1 - s_active_idx;
         if (s_players[old_idx] && s_players[old_idx]->is_playing()) {
-            float ov = s_current_volume * (1.0f - t);
+            float old_vol = s_current_volume * (1.0f - t);
             s_players[old_idx]->set_volume_db(
-                linear_to_db(ov * s_master_volume));
+                linear_to_db(old_vol * s_master_volume));
         }
 
         if (!s_fading) {
