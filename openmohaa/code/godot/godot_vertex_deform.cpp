@@ -35,11 +35,10 @@ static String generate_wave_vertex(float div, float base, float amplitude,
                                    float frequency, float phase) {
     String code;
     code += "    float _dv = " + String::num(div, 6) + ";\n";
-    code += "    float _off = (VERTEX.x + VERTEX.y + VERTEX.z)";
     if (div > 0.001f) {
-        code += " / _dv;\n";
+        code += "    float _off = (VERTEX.x + VERTEX.y + VERTEX.z) / _dv;\n";
     } else {
-        code += ";\n";
+        code += "    float _off = 0.0;\n";
     }
     code += "    float _t = TIME * " + String::num(frequency, 6) +
             " + " + String::num(phase, 6) + " + _off;\n";

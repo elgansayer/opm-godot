@@ -1349,10 +1349,12 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     // LUMP_FOGS was at slot 13 in BSP versions ≤ 18 and was removed in
     // version 19+.  Each fog entry references a brush and a shader that
     // defines the fog colour and density.
+    static constexpr int BSP_LAST_VERSION_WITH_FOGS = 18;
+    static constexpr int LUMP_FOGS_SLOT = 13;  /* raw lump slot for fog in BSP ≤ 18 */
+
     s_fog_volumes.clear();
-    if (hdr->version <= 18) {
-        /* In BSP ≤ 18, LUMP_FOGS is at raw slot 13 (before the version shift) */
-        const bsp_lump_t *l_fogs = &hdr->lumps[13];
+    if (hdr->version <= BSP_LAST_VERSION_WITH_FOGS) {
+        const bsp_lump_t *l_fogs = &hdr->lumps[LUMP_FOGS_SLOT];
         if (l_fogs->fileofs >= 0 && l_fogs->filelen >= (int)sizeof(bsp_fog_t) &&
             (l_fogs->fileofs + l_fogs->filelen) <= file_len) {
             const bsp_fog_t *fog_data =
@@ -1362,8 +1364,8 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             for (int fi = 0; fi < num_fogs; fi++) {
                 BSPFogVolume fv;
                 memset(&fv, 0, sizeof(fv));
-                memcpy(fv.shader, fog_data[fi].shader, 64);
-                fv.shader[63] = '\0';
+                memcpy(fv.shader, fog_data[fi].shader, sizeof(fv.shader));
+                fv.shader[sizeof(fv.shader) - 1] = '\0';
                 fv.brushNum = fog_data[fi].brushNum;
                 fv.visibleSide = fog_data[fi].visibleSide;
 
@@ -1430,8 +1432,8 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 flare.color[0] = fv->color[0] / 255.0f;
                 flare.color[1] = fv->color[1] / 255.0f;
                 flare.color[2] = fv->color[2] / 255.0f;
-                memcpy(flare.shader, shaders[surf->shaderNum].shader, 64);
-                flare.shader[63] = '\0';
+                memcpy(flare.shader, shaders[surf->shaderNum].shader, sizeof(flare.shader));
+                flare.shader[sizeof(flare.shader) - 1] = '\0';
                 s_flares.push_back(flare);
             }
             skipped_type++;

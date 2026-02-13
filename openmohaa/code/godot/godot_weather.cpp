@@ -45,8 +45,8 @@ static GPUParticles3D *create_rain_emitter(Node3D *parent) {
     rain->set_lifetime(1.0);
     rain->set_one_shot(false);
     rain->set_visibility_aabb(AABB(
-        Vector3(-WEATHER_VOLUME_WIDTH, -WEATHER_VOLUME_HEIGHT, -WEATHER_VOLUME_WIDTH),
-        Vector3(WEATHER_VOLUME_WIDTH * 2, WEATHER_VOLUME_HEIGHT * 2, WEATHER_VOLUME_WIDTH * 2)));
+        Vector3(-WEATHER_VOLUME_WIDTH * 0.5f, 0.0f, -WEATHER_VOLUME_WIDTH * 0.5f),
+        Vector3(WEATHER_VOLUME_WIDTH, WEATHER_VOLUME_HEIGHT, WEATHER_VOLUME_WIDTH)));
 
     /* Process material — gravity-driven downward particles */
     Ref<ParticleProcessMaterial> mat;
@@ -96,8 +96,8 @@ static GPUParticles3D *create_snow_emitter(Node3D *parent) {
     snow->set_lifetime(3.0);
     snow->set_one_shot(false);
     snow->set_visibility_aabb(AABB(
-        Vector3(-WEATHER_VOLUME_WIDTH, -WEATHER_VOLUME_HEIGHT, -WEATHER_VOLUME_WIDTH),
-        Vector3(WEATHER_VOLUME_WIDTH * 2, WEATHER_VOLUME_HEIGHT * 2, WEATHER_VOLUME_WIDTH * 2)));
+        Vector3(-WEATHER_VOLUME_WIDTH * 0.5f, 0.0f, -WEATHER_VOLUME_WIDTH * 0.5f),
+        Vector3(WEATHER_VOLUME_WIDTH, WEATHER_VOLUME_HEIGHT, WEATHER_VOLUME_WIDTH)));
 
     /* Process material — slow drifting downward */
     Ref<ParticleProcessMaterial> mat;

@@ -21,13 +21,6 @@
 /* ── Engine cvar access (from qcommon) ── */
 extern void *Cvar_Get(const char *var_name, const char *var_value, int flags);
 
-/* Minimal cvar struct — only need the float value */
-typedef struct {
-    char pad[68];   /* fields before 'value' in cvar_t */
-    float value;
-} cvar_value_t;
-
-static void *s_cg_rain_cvar = (void *)0;
 static int   s_weather_state = 0;  /* 0=none, 1=rain, 2=snow */
 static float s_weather_density = 0.0f;
 
