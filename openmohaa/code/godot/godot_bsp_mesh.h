@@ -9,6 +9,10 @@
  * Also parses:
  *   - LUMP_STATICMODELDEF (25) — static TIKI model placements
  *   - LUMP_MODELS (13) — inline brush sub-models for doors/movers
+ *   - LUMP_FOGS (13 in BSP ≤18) — per-surface fog volumes
+ *   - Fullbright/nolightmap surfaces (SURF_NOLIGHTMAP flag)
+ *   - Portal surfaces (surfaceparm portal)
+ *   - Flare surfaces (MST_FLARE type)
  *
  * Coordinate conversion from id Tech 3 (X=Forward, Y=Left, Z=Up) to
  * Godot (X=Right, Y=Up, -Z=Forward) and unit scaling from inches to
@@ -55,9 +59,42 @@ int Godot_BSP_GetBrushModelCount();
 /// Returns an empty Ref if the index is out of range or the mesh is empty.
 godot::Ref<godot::ArrayMesh> Godot_BSP_GetBrushModelMesh(int submodelIndex);
 
+/* ── Phase 78: BSP fog volume definition ── */
+struct BSPFogVolume {
+    char  shader[64];       /* Fog shader name */
+    int   brushNum;         /* BSP brush defining the fog region */
+    int   visibleSide;      /* Brush side for ray tests (-1 = none) */
+    float color[3];         /* Fog colour (RGB, 0–1) — from shader props */
+    float depthForOpaque;   /* Distance for full opacity — from shader props */
+};
+
+/// Get the number of fog volumes parsed from the BSP.
+int Godot_BSP_GetFogVolumeCount();
+
+/// Get a fog volume definition by index (0-based).
+/// Returns nullptr if index is out of range.
+const BSPFogVolume *Godot_BSP_GetFogVolume(int index);
+
+/* ── Phase 74: Flare surface definition ── */
+struct BSPFlare {
+    float origin[3];        /* Flare position in Godot coordinates */
+    float color[3];         /* Flare colour (RGB, 0–1) */
+    char  shader[64];       /* Shader name for flare texture */
+};
+
+/// Get the number of flare surfaces parsed from the BSP.
+int Godot_BSP_GetFlareCount();
+
+/// Get a flare definition by index (0-based).
+/// Returns nullptr if index is out of range.
+const BSPFlare *Godot_BSP_GetFlare(int index);
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Phase 65: Check if a BSP surface has a lightmap (nolightmap flag check) */
+int Godot_BSP_SurfaceHasLightmap(int surface_index);
 
 /* Phase 18: Entity token parser */
 int Godot_BSP_GetEntityToken(char *buffer, int bufferSize);

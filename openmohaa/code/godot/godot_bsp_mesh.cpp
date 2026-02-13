@@ -98,6 +98,7 @@ static constexpr int MST_TERRAIN        = 5;
 // Surface flags (from surfaceflags.h)
 static constexpr int SURF_NODRAW        = 0x80;
 static constexpr int SURF_SKY           = 0x4;
+static constexpr int SURF_NOLIGHTMAP    = 0x100;
 static constexpr int SURF_HINT          = 0x40000000;
 
 struct bsp_lump_t {
@@ -255,6 +256,21 @@ static_assert(sizeof(bsp_leaf_t_v17) == 56, "dleaf_t_ver17 must be 56 bytes");
 static std::vector<BSPStaticModelDef> s_static_models;
 static std::vector<Ref<ArrayMesh>>    s_brush_models;  /* 1-based: s_brush_models[0] = submodel *1 */
 
+/* ── Phase 78: Fog volume cache ── */
+
+/* On-disc fog definition (dfog_t from qfiles.h, 72 bytes) */
+struct bsp_fog_t {
+    char    shader[64];
+    int32_t brushNum;
+    int32_t visibleSide;
+};
+static_assert(sizeof(bsp_fog_t) == 72, "bsp_fog_t must be 72 bytes");
+
+static std::vector<BSPFogVolume> s_fog_volumes;
+
+/* ── Phase 74: Flare cache ── */
+static std::vector<BSPFlare> s_flares;
+
 /* ===================================================================
  *  Retained BSP data for mark fragment (decal) queries
  *
@@ -398,6 +414,8 @@ struct ShaderBatch {
     int32_t              vertex_offset = 0;
     const char          *shader_name   = nullptr;
     int                  lightmap_num  = -1;  // first surface's lightmap (for batch)
+    bool                 nolightmap    = false; // Phase 65: surface has SURF_NOLIGHTMAP
+    int32_t              surface_flags = 0;    // BSP surface flags for this batch
 };
 
 /* ===================================================================
@@ -901,8 +919,15 @@ static Ref<ArrayMesh> batches_to_array_mesh(
             mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
         }
 
-        // Lightmap as detail texture
-        if (batch.lightmap_num >= 0 &&
+        /* Phase 65: Fullbright / nolightmap surfaces — skip lightmap,
+         * use vertex colours directly or render at full brightness. */
+        if (batch.nolightmap) {
+            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+        }
+
+        // Lightmap as detail texture — skip for nolightmap surfaces (Phase 65)
+        if (!batch.nolightmap &&
+            batch.lightmap_num >= 0 &&
             batch.lightmap_num < (int)s_lightmaps.size() &&
             s_lightmaps[batch.lightmap_num].is_valid()) {
 
@@ -966,6 +991,11 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
     ShaderBatch &batch = batches[surf->shaderNum];
     if (!batch.shader_name && surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
         batch.shader_name = shaders[surf->shaderNum].shader;
+        batch.surface_flags = shaders[surf->shaderNum].surfaceFlags;
+        /* Phase 65: detect nolightmap surfaces */
+        if (shaders[surf->shaderNum].surfaceFlags & SURF_NOLIGHTMAP) {
+            batch.nolightmap = true;
+        }
     }
     if (batch.lightmap_num < 0 && surf->lightmapNum >= 0) {
         batch.lightmap_num = surf->lightmapNum;
@@ -1314,6 +1344,55 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         s_world_data.loaded = true;
     }
 
+    // ── 4f. Phase 78: Parse fog volumes (LUMP_FOGS, BSP ≤ 18 only) ──
+    //
+    // LUMP_FOGS was at slot 13 in BSP versions ≤ 18 and was removed in
+    // version 19+.  Each fog entry references a brush and a shader that
+    // defines the fog colour and density.
+    static constexpr int BSP_LAST_VERSION_WITH_FOGS = 18;
+    static constexpr int LUMP_FOGS_SLOT = 13;  /* raw lump slot for fog in BSP ≤ 18 */
+
+    s_fog_volumes.clear();
+    if (hdr->version <= BSP_LAST_VERSION_WITH_FOGS) {
+        const bsp_lump_t *l_fogs = &hdr->lumps[LUMP_FOGS_SLOT];
+        if (l_fogs->fileofs >= 0 && l_fogs->filelen >= (int)sizeof(bsp_fog_t) &&
+            (l_fogs->fileofs + l_fogs->filelen) <= file_len) {
+            const bsp_fog_t *fog_data =
+                reinterpret_cast<const bsp_fog_t *>(data + l_fogs->fileofs);
+            int num_fogs = l_fogs->filelen / (int)sizeof(bsp_fog_t);
+
+            for (int fi = 0; fi < num_fogs; fi++) {
+                BSPFogVolume fv;
+                memset(&fv, 0, sizeof(fv));
+                memcpy(fv.shader, fog_data[fi].shader, sizeof(fv.shader));
+                fv.shader[sizeof(fv.shader) - 1] = '\0';
+                fv.brushNum = fog_data[fi].brushNum;
+                fv.visibleSide = fog_data[fi].visibleSide;
+
+                /* Look up fog colour and distance from shader props */
+                const GodotShaderProps *fsp = Godot_ShaderProps_Find(fv.shader);
+                if (fsp && fsp->has_fog) {
+                    fv.color[0] = fsp->fog_color[0];
+                    fv.color[1] = fsp->fog_color[1];
+                    fv.color[2] = fsp->fog_color[2];
+                    fv.depthForOpaque = fsp->fog_distance;
+                } else {
+                    /* Default grey fog */
+                    fv.color[0] = fv.color[1] = fv.color[2] = 0.5f;
+                    fv.depthForOpaque = 500.0f;
+                }
+
+                s_fog_volumes.push_back(fv);
+            }
+
+            if (!s_fog_volumes.empty()) {
+                UtilityFunctions::print(String("[BSP] Parsed ") +
+                    String::num_int64((int64_t)s_fog_volumes.size()) +
+                    " fog volumes from LUMP_FOGS.");
+            }
+        }
+    }
+
     // ── 5. Accumulate world surfaces into per-shader batches ──
     std::unordered_map<int, ShaderBatch> batches;
 
@@ -1323,6 +1402,9 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     int skipped_bmodel = 0;
     int processed      = 0;
     int processed_patches = 0;
+
+    /* Phase 74: Collect flare surface positions */
+    s_flares.clear();
 
     for (int s = 0; s < num_surfaces; s++) {
         const bsp_surface_t *surf = &surfaces[s];
@@ -1334,6 +1416,30 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             continue;
         }
 
+        /* Phase 74: Collect MST_FLARE surfaces as flare definitions */
+        if (surf->surfaceType == MST_FLARE) {
+            if (surf->shaderNum >= 0 && surf->shaderNum < num_shaders &&
+                surf->numVerts > 0 && surf->firstVert >= 0 &&
+                surf->firstVert < num_verts) {
+                const bsp_drawvert_t *fv = &verts[surf->firstVert];
+                BSPFlare flare;
+                memset(&flare, 0, sizeof(flare));
+                /* Convert position to Godot coordinates */
+                Vector3 gpos = id_to_godot_pos(fv->xyz);
+                flare.origin[0] = gpos.x;
+                flare.origin[1] = gpos.y;
+                flare.origin[2] = gpos.z;
+                flare.color[0] = fv->color[0] / 255.0f;
+                flare.color[1] = fv->color[1] / 255.0f;
+                flare.color[2] = fv->color[2] / 255.0f;
+                memcpy(flare.shader, shaders[surf->shaderNum].shader, sizeof(flare.shader));
+                flare.shader[sizeof(flare.shader) - 1] = '\0';
+                s_flares.push_back(flare);
+            }
+            skipped_type++;
+            continue;
+        }
+
         // Skip unsupported surface types
         if (surf->surfaceType != MST_PLANAR &&
             surf->surfaceType != MST_TRIANGLE_SOUP &&
@@ -1342,12 +1448,29 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             continue;
         }
 
+        /* Phase 73: Skip portal surfaces — render distinctly elsewhere */
+        if (surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
+            const GodotShaderProps *sp = Godot_ShaderProps_Find(
+                shaders[surf->shaderNum].shader);
+            if (sp && sp->is_portal) {
+                /* Portal surfaces are skipped from world geometry;
+                 * Agent 10 renders them as flat reflective surfaces. */
+                skipped_type++;
+                continue;
+            }
+        }
+
         if (process_surface(surf, s, verts, num_verts, indices, num_indices,
                             shaders, num_shaders, batches,
                             skipped_nodraw, skipped_sky)) {
             if (surf->surfaceType == MST_PATCH) processed_patches++;
             processed++;
         }
+    }
+
+    if (!s_flares.empty()) {
+        UtilityFunctions::print(String("[BSP] Collected ") +
+            String::num_int64((int64_t)s_flares.size()) + " flare surfaces.");
     }
 
     // ── 5b. Load and process terrain patches (LUMP_TERRAIN) ──
@@ -1598,6 +1721,8 @@ void Godot_BSP_Unload() {
     s_lightmaps.clear();
     s_static_models.clear();
     s_brush_models.clear();
+    s_fog_volumes.clear();
+    s_flares.clear();
     s_mark_data = BSPMarkData();  // release all retained mark fragment data
     s_world_data = BSPWorldData();  // release entity string, model bounds, lightgrid, PVS
     Godot_ShaderProps_Unload();
@@ -1629,6 +1754,32 @@ Ref<ArrayMesh> Godot_BSP_GetBrushModelMesh(int submodelIndex) {
     int arrIdx = submodelIndex - 1;
     if (arrIdx < 0 || arrIdx >= (int)s_brush_models.size()) return Ref<ArrayMesh>();
     return s_brush_models[arrIdx];
+}
+
+/* ===================================================================
+ *  Phase 78: Fog volume accessors
+ * ================================================================ */
+
+int Godot_BSP_GetFogVolumeCount() {
+    return (int)s_fog_volumes.size();
+}
+
+const BSPFogVolume *Godot_BSP_GetFogVolume(int index) {
+    if (index < 0 || index >= (int)s_fog_volumes.size()) return nullptr;
+    return &s_fog_volumes[index];
+}
+
+/* ===================================================================
+ *  Phase 74: Flare accessors
+ * ================================================================ */
+
+int Godot_BSP_GetFlareCount() {
+    return (int)s_flares.size();
+}
+
+const BSPFlare *Godot_BSP_GetFlare(int index) {
+    if (index < 0 || index >= (int)s_flares.size()) return nullptr;
+    return &s_flares[index];
 }
 
 /* ===================================================================
@@ -1938,6 +2089,18 @@ static void mark_TessellateAndClip(
  * ================================================================ */
 
 extern "C" {
+
+/* Phase 65: Check if a BSP surface shader has a lightmap */
+int Godot_BSP_SurfaceHasLightmap(int surface_index) {
+    if (!s_mark_data.loaded) return 1;  /* assume lightmapped if no data */
+    if (surface_index < 0 || surface_index >= (int)s_mark_data.surfaces.size()) return 1;
+
+    int shaderNum = s_mark_data.surfaces[surface_index].shaderNum;
+    if (shaderNum < 0 || shaderNum >= (int)s_mark_data.shaderSurfFlags.size()) return 1;
+
+    /* SURF_NOLIGHTMAP (0x100) — surface does not need a lightmap */
+    return (s_mark_data.shaderSurfFlags[shaderNum] & SURF_NOLIGHTMAP) ? 0 : 1;
+}
 
 int Godot_BSP_MarkFragments(
     int numPoints, const float points[][3], const float projection[3],
