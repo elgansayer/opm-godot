@@ -916,3 +916,154 @@ Fixed incorrect static TIKI placement/rotation that produced random prop meshes 
 - [x] Generated `yyParser.cpp`, `yyParser.hpp`, `yyLexer.cpp`, `yyLexer.h` from bison/flex sources
 - [x] Removed `/code/parser/generated` from `.gitignore` so generated files are tracked (SCons has no generation step)
 - [x] Added `#ifndef __BOTLIB_H` / `#define __BOTLIB_H` / `#endif` include guards to `code/fgame/botlib.h` to fix redefinition errors
+
+## Phase 46: Menu Background Rendering ✅
+- [x] **Task 46.1:** `GR_DrawBackground` in `godot_renderer.c` already captures raw background image data into `gr_bgData[]` (RGB, up to 1024×1024×4 bytes).
+- [x] **Task 46.2:** Created `godot_ui_system.cpp/.h` with `Godot_UI_HasBackground()` and `Godot_UI_GetBackgroundData()` — delegates to `Godot_Renderer_GetBackground()`.
+- [x] **Task 46.3:** Background visibility toggled automatically: `gr_bgActive` set by `GR_DrawBackground`, cleared by `GR_ClearScene` and `GR_Shutdown`.
+
+### Key technical details (Phase 46):
+- Background image data flows: engine `re.DrawBackground()` → `GR_DrawBackground()` → `gr_bgData[]` → `Godot_UI_GetBackgroundData()` → MoHAARunner (via integration layer)
+- MoHAARunner integration point: call `Godot_UI_HasBackground()` / `Godot_UI_GetBackgroundData()` to render a fullscreen `TextureRect` on a dedicated `CanvasLayer`
+
+### Files created/modified (Phase 46):
+- `code/godot/godot_ui_system.h` — UI system API header
+- `code/godot/godot_ui_system.cpp` — UI rendering manager
+
+## Phase 47: Main Menu Display ✅
+- [x] **Task 47.1:** Engine's UI system (`code/uilib/`) calls `GR_DrawStretchPic`, `GR_DrawBox`, `GR_DrawString` for menu rendering — these already flow into `gr_2d_cmds[]` buffer.
+- [x] **Task 47.2:** Created UI state machine in `godot_ui_system.cpp` that tracks `GODOT_UI_MAIN_MENU` state via `KEYCATCH_UI` flag from `Godot_Client_GetKeyCatchers()`.
+- [x] **Task 47.3:** `.urc` file loading is handled entirely by engine VFS — no Godot-side changes needed.
+- [x] **Task 47.4:** Menu transitions (fade in/out) rendered through existing 2D command buffer with alpha blending.
+
+### Key technical details (Phase 47):
+- UI state enum: `GODOT_UI_NONE`, `GODOT_UI_MAIN_MENU`, `GODOT_UI_CONSOLE`, `GODOT_UI_LOADING`, `GODOT_UI_SCOREBOARD`, `GODOT_UI_MESSAGE`
+- `Godot_UI_Update()` polls `Godot_Client_GetKeyCatchers()` each frame and returns the current state
+- MoHAARunner integration point: call `Godot_UI_Update()` once per frame in `_process()` to track UI state changes
+
+## Phase 48: Menu Input Routing ✅
+- [x] **Task 48.1:** Created `godot_ui_input.cpp/.h` with `Godot_UI_HandleKeyEvent()`, `Godot_UI_HandleCharEvent()`, `Godot_UI_HandleMouseButton()`, `Godot_UI_HandleMouseMotion()`.
+- [x] **Task 48.2:** Input routing: when `Godot_UI_IsActive()` returns true, all input forwarded to engine via existing `Godot_Inject*()` functions — engine's `cl_keys.c` dispatches to `UI_KeyEvent()` / `Console_Key()` / `Message_Key()` based on `keyCatchers`.
+- [x] **Task 48.3:** Added `Godot_InjectMousePosition()` to `godot_input_bridge.c` for absolute mouse position injection in UI mode (computes delta from previous position).
+- [x] **Task 48.4:** Added `Godot_ResetMousePosition()` to reset tracking state when switching between UI and game modes.
+- [x] **Task 48.5:** Cursor visibility: `Godot_UI_ShouldShowCursor()` returns 1 when any of `KEYCATCH_UI | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE` is set.
+- [x] **Task 48.6:** Cursor position: `Godot_UI_GetCursorPos()` reads `cl.mousex`/`cl.mousey` via `Godot_Client_GetMousePos()`.
+
+### Key technical details (Phase 48):
+- Input flow (UI active): Godot `_unhandled_input()` → `Godot_UI_Handle*()` → `Godot_Inject*()` → `Com_QueueEvent()` → engine key dispatch → `UI_KeyEvent()` / `Console_Key()`
+- Input flow (game active): Godot `_unhandled_input()` → `Godot_Inject*()` directly → `Com_QueueEvent()` → game input
+- `Godot_UI_ShouldCaptureInput()` is a convenience alias for `Godot_UI_IsActive()`
+- MoHAARunner integration points:
+  1. In `_unhandled_input()`: check `Godot_UI_ShouldCaptureInput()` — if true, use `Godot_UI_Handle*()` instead of direct `Godot_Inject*()`
+  2. In `_process()`: check `Godot_UI_ShouldShowCursor()` — if true, set `MOUSE_MODE_VISIBLE`; if false, set `MOUSE_MODE_CAPTURED`
+  3. On mode switch: call `Godot_ResetMousePosition()` to avoid cursor jumps
+
+### Files created/modified (Phase 48):
+- `code/godot/godot_ui_input.h` — UI input routing API
+- `code/godot/godot_ui_input.cpp` — UI input routing implementation
+- `code/godot/godot_input_bridge.c` — added `Godot_InjectMousePosition()` and `Godot_ResetMousePosition()`
+
+## Phase 49: Console Overlay ✅
+- [x] **Task 49.1:** MOHAA drop-down console activated by `~` / backtick key — handled by engine's `KEYCATCH_CONSOLE` flag.
+- [x] **Task 49.2:** Created `godot_console_accessors.cpp` with `Godot_Console_IsOpen()` (wraps `UI_ConsoleIsOpen()`), `Godot_Console_GetKeyCatchers()`, `Godot_Console_IsConsoleKeyActive()`.
+- [x] **Task 49.3:** Console state tracked in `godot_ui_system.cpp` — `GODOT_UI_CONSOLE` state set when `KEYCATCH_CONSOLE` detected.
+- [x] **Task 49.4:** Console rendering: engine calls `GR_DrawStretchPic` (background) + `GR_DrawSmallStringExt` (text) → 2D command buffer → existing `update_2d_overlay()` in MoHAARunner.
+- [x] **Task 49.5:** Console scrolling (Page Up/Down) and command history (Up/Down arrows) handled by engine's console code — input routed via `Godot_UI_HandleKeyEvent()`.
+- [x] **Task 49.6:** Console text input via `SE_CHAR` events from `Godot_UI_HandleCharEvent()`.
+
+### Key technical details (Phase 49):
+- Console rendering is entirely engine-driven via the 2D command buffer — no separate Godot console rendering needed
+- `Godot_Console_IsOpen()` calls `UI_ConsoleIsOpen()` from `cl_ui.h` — file is `.cpp` because `cl_ui.h` includes C++ headers
+- Console background renders as semi-transparent via alpha in the 2D command's colour values
+
+### Files created (Phase 49):
+- `code/godot/godot_console_accessors.cpp` — console state accessors
+
+## Phase 50: Server Browser UI ✅
+- [x] **Task 50.1:** GameSpy master server query handled by engine code (`code/gamespy/`) — no Godot-side changes needed.
+- [x] **Task 50.2:** Server list renders as UI text/list widgets via 2D command buffer — flows through existing `update_2d_overlay()`.
+- [x] **Task 50.3:** "Connect" action sends `connect <ip>` command through engine's UI command system.
+
+### Key technical details (Phase 50):
+- Server browser is entirely engine-driven via uilib `.urc` files
+- All rendering goes through the existing 2D command buffer pipeline
+- No new Godot-side code needed — the UI state machine in `godot_ui_system.cpp` correctly detects `KEYCATCH_UI` when the server browser is open
+
+## Phase 51: Options Menu ✅
+- [x] **Task 51.1:** Video, audio, controls, game options submenus — all handled by engine's uilib.
+- [x] **Task 51.2:** Cvar binding to UI sliders/checkboxes handled by engine uilib internally.
+- [x] **Task 51.3:** Key binding UI captures next keypress via engine's `KEYCATCH_UI` input routing.
+- [x] **Task 51.4:** Apply/Cancel/Default button handling — engine uilib manages cvar writes.
+- [x] **Task 51.5:** UI elements (sliders, checkboxes, text fields) render through 2D command buffer.
+
+### Key technical details (Phase 51):
+- Options menus are `.urc`-driven — engine handles all widget state and cvar binding
+- Input routing through `Godot_UI_HandleKeyEvent()` / `Godot_UI_HandleMouseButton()` ensures correct interaction
+
+## Phase 52: Loading Screen ✅
+- [x] **Task 52.1:** Created `Godot_UI_OnMapLoad()` to notify the UI system that a map load has started — sets `GODOT_UI_LOADING` state.
+- [x] **Task 52.2:** Loading state detected via `CA_LOADING` connection state from `Godot_Client_GetState()`.
+- [x] **Task 52.3:** Loading screen rendering: engine calls `SCR_UpdateScreen()` repeatedly during load, producing 2D commands for background, text, and progress bar.
+- [x] **Task 52.4:** `Godot_UI_IsLoading()` returns 1 during map load for MoHAARunner to manage loading screen display.
+
+### Key technical details (Phase 52):
+- Loading state priority: `GODOT_UI_LOADING` takes precedence over other UI states in `Godot_UI_Update()`
+- Loading flag cleared automatically when connection state advances past `CA_LOADING`
+- MoHAARunner integration point: call `Godot_UI_OnMapLoad()` from `check_world_load()` when a new map load is detected
+
+## Phase 53: Scoreboard ✅
+- [x] **Task 53.1:** In-game scoreboard (Tab key) — renders through 2D command buffer when active.
+- [x] **Task 53.2:** Player names, kills, deaths, ping columns — all rendered by engine's cgame code via `GR_DrawStretchPic` / `GR_DrawBox`.
+- [x] **Task 53.3:** Team colours applied via colour values in 2D commands.
+
+### Key technical details (Phase 53):
+- Scoreboard rendering is cgame-driven — flows through existing 2D command buffer
+- No separate Godot scoreboard rendering needed — `update_2d_overlay()` handles it
+
+## Phase 54: Team Selection / Weapon Selection ✅
+- [x] **Task 54.1:** Team selection (Allies/Axis/Auto/Spectator) and weapon selection — engine UI dialogs rendered via uilib.
+- [x] **Task 54.2:** Input routing via `Godot_UI_HandleKeyEvent()` / `Godot_UI_HandleMouseButton()` ensures correct keyboard/mouse navigation.
+
+### Key technical details (Phase 54):
+- Team/weapon selection dialogs are `.urc`-driven uilib menus
+- Render through existing 2D command buffer pipeline
+
+## Phase 55: Chat & Message Display ✅
+- [x] **Task 55.1:** Chat messages (`messagemode` / `messagemode2`) — `KEYCATCH_MESSAGE` flag detected by `Godot_UI_IsMessageActive()`.
+- [x] **Task 55.2:** Added `Godot_Client_IsMessageActive()` accessor to `godot_client_accessors.cpp`.
+- [x] **Task 55.3:** Kill feed, centre-print messages — rendered through 2D command buffer by engine's cgame code.
+- [x] **Task 55.4:** Chat text input routed via `Godot_UI_HandleCharEvent()` when `KEYCATCH_MESSAGE` is set.
+
+### Key technical details (Phase 55):
+- `GODOT_UI_MESSAGE` state in the UI state machine handles the chat input mode
+- Centre-print messages (`CG_CenterPrint`) render as 2D text commands — flow through existing HUD overlay
+
+### Files modified (Phase 55):
+- `code/godot/godot_client_accessors.cpp` — added `Godot_Client_IsMessageActive()`
+
+## Phases 57–58: UI Polish & Edge Cases ✅
+- [x] **Task 57.1:** Modal dialog boxes (quit/disconnect confirmation) — rendered by engine uilib, displayed via 2D command buffer.
+- [x] **Task 57.2:** Mouse cursor management: `Godot_UI_ShouldShowCursor()` returns cursor visibility state — MoHAARunner sets `MOUSE_MODE_VISIBLE` or `MOUSE_MODE_CAPTURED` accordingly.
+- [x] **Task 57.3:** UI sound effects routed through engine's sound system → `godot_sound.c` capture → MoHAARunner audio pipeline.
+- [x] **Task 57.4:** Graceful handling of missing UI assets: engine's `GR_RegisterShaderNoMip` returns valid handles for all assets; if texture loading fails in Godot, existing fallback to coloured rectangles applies.
+- [x] **Task 58.1:** Added comprehensive client state accessors: `Godot_Client_IsUIActive()`, `Godot_Client_IsConsoleVisible()`, `Godot_Client_GetUIMousePos()`, `Godot_Client_IsAnyOverlayActive()`.
+- [x] **Task 58.2:** `Godot_UI_ShouldCaptureInput()` convenience wrapper for input suppression in game mode.
+
+### Key technical details (Phases 57–58):
+- All modal dialogs are engine-driven uilib menus — render through 2D command buffer
+- Cursor clamping to window bounds handled by Godot's `MOUSE_MODE_VISIBLE` — engine tracks cursor position internally
+- UI sound effects: engine UI code calls `S_StartLocalSound()` → captured by `godot_sound.c` → played by MoHAARunner's audio pipeline
+
+### Files modified (Phases 57–58):
+- `code/godot/godot_client_accessors.cpp` — added 5 new accessor functions
+
+## MoHAARunner Integration Required (Phases 46–58)
+
+The following integration points document how `MoHAARunner.cpp` (owned by Agent 10) should wire in the UI system:
+
+1. **In `_process()`:** Call `Godot_UI_Update()` to poll keyCatchers and update UI state. Check `Godot_UI_ShouldShowCursor()` to toggle mouse mode (`MOUSE_MODE_VISIBLE` vs `MOUSE_MODE_CAPTURED`).
+2. **In `_unhandled_input()`:** Check `Godot_UI_ShouldCaptureInput()` — if true, forward events via `Godot_UI_HandleKeyEvent()` / `Godot_UI_HandleCharEvent()` / `Godot_UI_HandleMouseButton()` / `Godot_UI_HandleMouseMotion()` instead of direct `Godot_Inject*()` calls.
+3. **In `update_2d_overlay()`:** Call `Godot_UI_HasBackground()` / `Godot_UI_GetBackgroundData()` before processing 2D commands — render background as fullscreen `TextureRect` on a dedicated `CanvasLayer`.
+4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
+5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
+6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.

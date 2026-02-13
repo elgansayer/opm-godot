@@ -29,7 +29,6 @@ extern "C" {
 extern int  Godot_Client_GetKeyCatchers(void);
 extern int  Godot_Client_GetState(void);
 extern void Godot_Client_GetMousePos(int *mx, int *my);
-extern int  Godot_Client_GetGuiMouse(void);
 
 /* ── Accessors from godot_renderer.c ── */
 extern int Godot_Renderer_GetBackground(int *cols, int *rows, int *bgr,
