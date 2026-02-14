@@ -1051,6 +1051,10 @@ static constexpr int RT_MODEL   = 0;
 static constexpr int RT_SPRITE  = 3;
 static constexpr int RT_BEAM    = 4;
 
+// Render flags from q_shared.h (Phase 63)
+// RF_LIGHTING_ORIGIN = (1<<19) — use lightingOrigin for multi-part model lighting
+static constexpr int RF_LIGHTING_ORIGIN = 0x80000;
+
 void MoHAARunner::update_entities() {
     if (!game_world) return;
 
@@ -1637,9 +1641,6 @@ void MoHAARunner::update_entities() {
         // ── Phase 63+64: Entity lighting — lightgrid + dynamic lights ──
         // Sample lighting at the appropriate position (handle RF_LIGHTING_ORIGIN)
         float light_sample_pos[3];
-        // RF_LIGHTING_ORIGIN = (1<<19) = 0x80000 from q_shared.h
-        // Use lightingOrigin instead of render origin for multi-part model lighting
-        const int RF_LIGHTING_ORIGIN = 0x80000;
         if (renderfx & RF_LIGHTING_ORIGIN) {
             // Use lightingOrigin instead of render origin for lighting
             Godot_Renderer_GetEntityLightingOrigin(i, light_sample_pos);
@@ -1654,13 +1655,13 @@ void MoHAARunner::update_entities() {
         // Initialize to full brightness as safe fallback
         float lr = 1.0f, lg = 1.0f, lb = 1.0f;
         Godot_EntityLight_Combined(light_sample_pos, 4, &lr, &lg, &lb);
-        
+
         Color light_mul(lr, lg, lb, 1.0f);
-        
+
         bool has_light_tint = fabsf(light_mul.r - 1.0f) > 0.02f ||
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;
-        
+
         // ── Phase 21+22: Entity colour tinting + alpha ──
         // Apply shaderRGBA modulation when it's not opaque white.
         // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
