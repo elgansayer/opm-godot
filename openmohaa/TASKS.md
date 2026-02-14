@@ -1871,3 +1871,16 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 268: Entity Lighting Integration ✅
+
+Wired `godot_entity_lighting.cpp` into `MoHAARunner::update_entities()` so entities are properly lit by the BSP lightgrid **and** dynamic lights (muzzle flashes, explosions).
+
+### Changes
+- **`godot_renderer.c`:** Added `lightingOrigin[3]` field to `gr_entity_t`, captured from `refEntity_t::lightingOrigin` in `GR_AddRefEntityToScene()`. Added `Godot_Renderer_GetEntityLightingOrigin()` accessor.
+- **`MoHAARunner.cpp`:** Replaced direct `Godot_BSP_LightForPoint()` call with `Godot_EntityLight_Combined()` (guarded by `HAS_ENTITY_LIGHTING_MODULE`). Handles `RF_LIGHTING_ORIGIN` (0x0080) — when set, samples lightgrid at `lightingOrigin` instead of render origin. Fallback to old `Godot_BSP_LightForPoint()` path when module is absent.
+
+### Technical Details
+- `Godot_EntityLight_Combined(pos, 4, &r, &g, &b)` samples lightgrid ambient+directed and accumulates up to 4 closest dynamic lights with linear attenuation.
+- Dynamic lights already rendered as `OmniLight3D` nodes in `update_dlights()`; this adds per-entity material modulation for more accurate lighting.
+- Existing tinted material cache (Phase 61) works unchanged — the quantised light key captures the combined lighting colour.
