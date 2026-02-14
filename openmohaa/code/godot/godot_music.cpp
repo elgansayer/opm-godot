@@ -18,6 +18,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 
 /* ------------------------------------------------------------------ */
@@ -103,19 +104,175 @@ static float linear_to_db(float linear)
 }
 
 /*
+ * Try to load an MP3 file directly from the VFS given a resolved path.
+ * Returns a valid Ref or null on failure.
+ */
+static Ref<AudioStreamMP3> load_mp3_from_path(const char *path)
+{
+    if (!path || !path[0]) return Ref<AudioStreamMP3>();
+
+    void *buf = nullptr;
+    long  len = Godot_VFS_ReadFile(path, &buf);
+    if (len <= 0 || !buf) return Ref<AudioStreamMP3>();
+
+    PackedByteArray pba;
+    pba.resize(len);
+    memcpy(pba.ptrw(), buf, (size_t)len);
+    Godot_VFS_FreeFile(buf);
+
+    Ref<AudioStreamMP3> stream;
+    stream.instantiate();
+    stream->set_data(pba);
+
+    UtilityFunctions::print(
+        String("[GodotMusic] Loaded music: ") + String(path) +
+        String(" (") + String::num_int64(len) + String(" bytes)"));
+    return stream;
+}
+
+/*
+ * Parse a MOHAA .mus file to extract the track path, loop flag, and volume
+ * for the "normal" mood.  Returns true if a track path was resolved.
+ *
+ * .mus format (simplified):
+ *   path <base_dir>
+ *   normal <filename>
+ *   !normal loop
+ *   !normal volume <float>
+ */
+static bool parse_mus_file(const char *mus_path, char *out_track,
+                           int track_size, bool *out_loop, float *out_volume)
+{
+    void *buf = nullptr;
+    long  len = Godot_VFS_ReadFile(mus_path, &buf);
+    if (len <= 0 || !buf) return false;
+
+    char base_dir[MUSIC_MAX_PATH] = {0};
+    char track_file[MUSIC_MAX_PATH] = {0};
+    *out_loop   = false;
+    *out_volume = 1.0f;
+
+    /* Simple line-by-line parse */
+    const char *src = (const char *)buf;
+    const char *end = src + len;
+
+    while (src < end) {
+        /* Skip leading whitespace */
+        while (src < end && (*src == ' ' || *src == '\t' || *src == '\r')) src++;
+        if (src >= end) break;
+
+        /* Find end of line */
+        const char *eol = src;
+        while (eol < end && *eol != '\n') eol++;
+
+        int line_len = (int)(eol - src);
+        /* Strip trailing whitespace */
+        while (line_len > 0 && (src[line_len - 1] == ' ' || src[line_len - 1] == '\t' || src[line_len - 1] == '\r'))
+            line_len--;
+
+        if (line_len > 5 && strncmp(src, "path ", 5) == 0) {
+            int val_len = line_len - 5;
+            if (val_len >= MUSIC_MAX_PATH) val_len = MUSIC_MAX_PATH - 1;
+            strncpy(base_dir, src + 5, (size_t)val_len);
+            base_dir[val_len] = '\0';
+        } else if (line_len > 7 && strncmp(src, "normal ", 7) == 0
+                   && strncmp(src, "!normal", 7) != 0) {
+            int val_len = line_len - 7;
+            if (val_len >= MUSIC_MAX_PATH) val_len = MUSIC_MAX_PATH - 1;
+            strncpy(track_file, src + 7, (size_t)val_len);
+            track_file[val_len] = '\0';
+        } else if (line_len >= 12 && strncmp(src, "!normal loop", 12) == 0) {
+            *out_loop = true;
+        } else if (line_len > 16 && strncmp(src, "!normal volume ", 15) == 0) {
+            *out_volume = (float)atof(src + 15);
+        }
+
+        src = (eol < end) ? eol + 1 : end;
+    }
+
+    Godot_VFS_FreeFile(buf);
+
+    if (track_file[0] == '\0') return false;
+
+    /* Build the full track path */
+    if (base_dir[0]) {
+        snprintf(out_track, track_size, "%s/%s", base_dir, track_file);
+    } else {
+        snprintf(out_track, track_size, "sound/music/%s", track_file);
+    }
+    return true;
+}
+
+/*
  * Try to load a music file from the VFS.
- * Tries several path variants:
+ * First checks if the name refers to a .mus script (MOHAA soundtrack
+ * descriptor) and parses it.  Otherwise tries several path variants:
  *   1. The name as-is
  *   2. "sound/music/<name>.mp3"
  *   3. "sound/music/<name>"
+ *   4. "<name>.mp3"
+ *
+ * When loaded via .mus, the loop and volume settings from the script are
+ * applied.  The out_loop and out_volume pointers (if non-null) receive
+ * the parsed values; callers that don't need them may pass nullptr.
  *
  * Returns a Ref<AudioStreamMP3> or null on failure.
  */
-static Ref<AudioStreamMP3> load_music_from_vfs(const char *name)
+static Ref<AudioStreamMP3> load_music_from_vfs(const char *name,
+                                               bool *out_loop = nullptr,
+                                               float *out_volume = nullptr)
 {
     if (!name || !name[0]) return Ref<AudioStreamMP3>();
 
-    /* Build candidate paths */
+    bool  mus_loop   = false;
+    float mus_volume = 1.0f;
+
+    /* ── Try .mus soundtrack descriptor first ── */
+    {
+        /* Build the .mus path: strip leading "sound/", ensure "music/" prefix */
+        char mus_base[MUSIC_MAX_PATH];
+        strncpy(mus_base, name, MUSIC_MAX_PATH - 1);
+        mus_base[MUSIC_MAX_PATH - 1] = '\0';
+
+        /* Strip "sound/" prefix if present */
+        const char *base = mus_base;
+        if (strncmp(base, "sound/", 6) == 0) base += 6;
+
+        char mus_path[MUSIC_MAX_PATH];
+        if (strncmp(base, "music/", 6) != 0) {
+            snprintf(mus_path, MUSIC_MAX_PATH, "music/%s", base);
+        } else {
+            strncpy(mus_path, base, MUSIC_MAX_PATH - 1);
+            mus_path[MUSIC_MAX_PATH - 1] = '\0';
+        }
+
+        /* Replace or append .mus extension */
+        char *dot = strrchr(mus_path, '.');
+        if (dot && (strcmp(dot, ".mus") == 0 || strcmp(dot, ".mp3") == 0)) {
+            strcpy(dot, ".mus");
+        } else {
+            size_t plen = strlen(mus_path);
+            if (plen + 4 < MUSIC_MAX_PATH) {
+                strcat(mus_path, ".mus");
+            }
+        }
+
+        char track_path[MUSIC_MAX_PATH] = {0};
+        if (parse_mus_file(mus_path, track_path, MUSIC_MAX_PATH,
+                           &mus_loop, &mus_volume)) {
+            Ref<AudioStreamMP3> stream = load_mp3_from_path(track_path);
+            if (stream.is_valid()) {
+                if (out_loop)   *out_loop   = mus_loop;
+                if (out_volume) *out_volume = mus_volume;
+                UtilityFunctions::print(
+                    String("[GodotMusic] Resolved .mus '") + String(mus_path) +
+                    String("' → '") + String(track_path) + String("'"));
+                return stream;
+            }
+        }
+    }
+
+    /* ── Fallback: try direct path variants ── */
     char paths[4][MUSIC_MAX_PATH];
     int  path_count = 0;
 
@@ -143,25 +300,12 @@ static Ref<AudioStreamMP3> load_music_from_vfs(const char *name)
     }
 
     for (int i = 0; i < path_count; i++) {
-        void *buf = nullptr;
-        long  len = Godot_VFS_ReadFile(paths[i], &buf);
-        if (len <= 0 || !buf) continue;
-
-        /* Wrap the raw bytes into a PackedByteArray */
-        PackedByteArray pba;
-        pba.resize(len);
-        memcpy(pba.ptrw(), buf, (size_t)len);
-        Godot_VFS_FreeFile(buf);
-
-        /* Create AudioStreamMP3 */
-        Ref<AudioStreamMP3> stream;
-        stream.instantiate();
-        stream->set_data(pba);
-
-        UtilityFunctions::print(
-            String("[GodotMusic] Loaded music: ") + String(paths[i]) +
-            String(" (") + String::num_int64(len) + String(" bytes)"));
-        return stream;
+        Ref<AudioStreamMP3> stream = load_mp3_from_path(paths[i]);
+        if (stream.is_valid()) {
+            if (out_loop)   *out_loop   = false;
+            if (out_volume) *out_volume = 1.0f;
+            return stream;
+        }
     }
 
     UtilityFunctions::print(
@@ -177,12 +321,15 @@ static void play_track(AudioStreamPlayer *player, const char *name)
 {
     if (!player || !name || !name[0]) return;
 
-    Ref<AudioStreamMP3> stream = load_music_from_vfs(name);
+    bool  mus_loop   = true;
+    float mus_volume = 1.0f;
+    Ref<AudioStreamMP3> stream = load_music_from_vfs(name, &mus_loop, &mus_volume);
     if (stream.is_null()) return;
 
-    stream->set_loop(true);
+    stream->set_loop(mus_loop);
     player->set_stream(stream);
-    player->set_volume_db(linear_to_db(s_current_volume * s_master_volume));
+    /* Apply both the .mus per-track volume and the current fade/master volume */
+    player->set_volume_db(linear_to_db(mus_volume * s_current_volume * s_master_volume));
     player->play();
 }
 
