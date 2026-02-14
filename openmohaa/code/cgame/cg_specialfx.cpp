@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "cg_commands.h"
 #include "surfaceflags.h"
 #include "cg_specialfx.h"
+#include "../godot/godot_surface_effects.h"
 
 extern refEntity_t *current_entity;
 extern dtiki_t     *current_tiki;
@@ -596,72 +597,9 @@ static void CG_FootstepMain(trace_t *trace, int iRunning, int iEquipment)
         }
     } else {
         surftype = trace->surfaceFlags & MASK_SURF_TYPE;
-        switch (surftype) {
-        case SURF_FOLIAGE:
-            sSoundName += "foliage";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_SNOW:
-            sSoundName += "snow";
-            iEffectNum = SFX_FOOT_SNOW;
-            break;
-        case SURF_CARPET:
-            sSoundName += "carpet";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_SAND:
-            sSoundName += "sand";
-            iEffectNum = SFX_FOOT_SAND;
-            break;
-        case SURF_PUDDLE:
-            sSoundName += "puddle";
-            iEffectNum = SFX_FOOT_PUDDLE;
-            break;
-        case SURF_GLASS:
-            sSoundName += "glass";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_GRAVEL:
-            sSoundName += "gravel";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        case SURF_MUD:
-            sSoundName += "mud";
-            iEffectNum = SFX_FOOT_MUD;
-            break;
-        case SURF_DIRT:
-            sSoundName += "dirt";
-            iEffectNum = SFX_FOOT_DIRT;
-            break;
-        case SURF_GRILL:
-            sSoundName += "grill";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_GRASS:
-            sSoundName += "grass";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_ROCK:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        case SURF_PAPER:
-            sSoundName += "paper";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_WOOD:
-            sSoundName += "wood";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_METAL:
-            sSoundName += "metal";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        default:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        }
+        // Use centralised surface effect table
+        sSoundName += SurfaceEffects_GetFootstepSound(surftype);
+        iEffectNum = SurfaceEffects_GetFootstepEffect(surftype);
     }
 
     if (cg_debugFootsteps->integer) {
@@ -859,66 +797,9 @@ void CG_LandingSound(centity_t *ent, refEntity_t *pREnt, float volume, int iEqui
         }
     } else {
         surftype = trace.surfaceFlags & MASK_SURF_TYPE;
-        switch (surftype) {
-        case SURF_FOLIAGE:
-            sSoundName += "foliage";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_SNOW:
-            sSoundName += "snow";
-            iEffectNum = SFX_FOOT_SNOW;
-            break;
-        case SURF_CARPET:
-            sSoundName += "carpet";
-            break;
-        case SURF_SAND:
-            sSoundName += "sand";
-            iEffectNum = SFX_FOOT_SAND;
-            break;
-        case SURF_PUDDLE:
-            sSoundName += "puddle";
-            iEffectNum = SFX_FOOT_PUDDLE;
-            break;
-        case SURF_GLASS:
-            sSoundName += "glass";
-            break;
-        case SURF_GRAVEL:
-            sSoundName += "gravel";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        case SURF_MUD:
-            sSoundName += "mud";
-            iEffectNum = SFX_FOOT_MUD;
-            break;
-        case SURF_DIRT:
-            sSoundName += "dirt";
-            iEffectNum = SFX_FOOT_DIRT;
-            break;
-        case SURF_GRILL:
-            sSoundName += "grill";
-            break;
-        case SURF_GRASS:
-            sSoundName += "grass";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_ROCK:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_PAPER:
-            sSoundName += "paper";
-            break;
-        case SURF_WOOD:
-            sSoundName += "wood";
-            break;
-        case SURF_METAL:
-            sSoundName += "metal";
-            break;
-        default:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        }
+        // Use centralised surface effect table
+        sSoundName += SurfaceEffects_GetLandingSound(surftype);
+        iEffectNum = SurfaceEffects_GetLandingEffect(surftype);
     }
 
     if (cg_debugFootsteps->integer) {
@@ -999,72 +880,9 @@ void CG_BodyFallSound(centity_t *ent, refEntity_t *pREnt, float volume)
         }
     } else {
         surftype = trace.surfaceFlags & MASK_SURF_TYPE;
-        switch (surftype) {
-        case SURF_FOLIAGE:
-            sSoundName += "foliage";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_SNOW:
-            sSoundName += "snow";
-            iEffectNum = SFX_FOOT_SNOW;
-            break;
-        case SURF_CARPET:
-            sSoundName += "carpet";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_SAND:
-            sSoundName += "sand";
-            iEffectNum = SFX_FOOT_SAND;
-            break;
-        case SURF_PUDDLE:
-            sSoundName += "puddle";
-            iEffectNum = SFX_FOOT_PUDDLE;
-            break;
-        case SURF_GLASS:
-            sSoundName += "glass";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_GRAVEL:
-            sSoundName += "gravel";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        case SURF_MUD:
-            sSoundName += "mud";
-            iEffectNum = SFX_FOOT_MUD;
-            break;
-        case SURF_DIRT:
-            sSoundName += "dirt";
-            iEffectNum = SFX_FOOT_DIRT;
-            break;
-        case SURF_GRILL:
-            sSoundName += "grill";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_GRASS:
-            sSoundName += "grass";
-            iEffectNum = SFX_FOOT_GRASS;
-            break;
-        case SURF_ROCK:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        case SURF_PAPER:
-            sSoundName += "paper";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_WOOD:
-            sSoundName += "wood";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        case SURF_METAL:
-            sSoundName += "metal";
-            iEffectNum = SFX_FOOT_LIGHT_DUST;
-            break;
-        default:
-            sSoundName += "stone";
-            iEffectNum = SFX_FOOT_HEAVY_DUST;
-            break;
-        }
+        // Use centralised surface effect table
+        sSoundName += SurfaceEffects_GetBodyFallSound(surftype);
+        iEffectNum = SurfaceEffects_GetBodyFallEffect(surftype);
     }
 
     if (cg_debugFootsteps->integer) {
