@@ -55,6 +55,18 @@ static dtikisurface_t *GetTikiSurfaceShader(dtiki_t *tiki, int meshIndex, int su
 
 extern "C" {
 
+/* ri wrapper forward declarations (implemented in godot_renderer.c).
+ * Needed by Godot_Skel_GetSurfaceVertices for bind-pose computation
+ * when pStaticXyz is NULL. */
+void *Godot_RI_GetSkeletor(void *tiki, int entityNumber);
+void  Godot_RI_SetPoseInternal(void *skeletor, const frameInfo_t *frameInfo,
+                                const int *bone_tag, const vec4_t *bone_quat,
+                                float actionWeight);
+void  Godot_RI_GetFrameInternal(void *tiki, int entityNumber, void *newFrame);
+int   Godot_RI_GetNumChannels(void *tiki);
+int   Godot_RI_GetLocalChannel(void *tiki, int globalChannel);
+int   Godot_RI_GetSkelAnimFrame(void *tiki, void *bonesOut, float *radiusOut);
+
 /* Model type: 0=bad, 1=brush, 2=tiki, 3=sprite
  * Returns -1 if handle is out of range.
  * NOTE: gr_models[] is defined in godot_renderer.c. We access the
@@ -137,6 +149,12 @@ int Godot_Skel_GetSurfaceInfo(void *tikiPtr, int meshIndex, int surfIndex,
  * positions: [numVerts * 3]  (x,y,z per vertex)
  * normals:   [numVerts * 3]  (nx,ny,nz per vertex)
  * texcoords: [numVerts * 2]  (u,v per vertex) — uses UV set 0
+ *
+ * When pStaticXyz is NULL (the GL renderer's R_InitStaticModels never
+ * ran), we compute bind-pose vertices on-the-fly from the bone-weight
+ * data (pVerts) plus the skeleton's default animation frame — this
+ * mirrors R_InitStaticModels in tr_staticmodels.cpp.
+ *
  * Returns 1 on success, 0 on failure. */
 int Godot_Skel_GetSurfaceVertices(void *tikiPtr, int meshIndex, int surfIndex,
                                    float *positions, float *normals, float *texcoords)
@@ -153,30 +171,115 @@ int Godot_Skel_GetSurfaceVertices(void *tikiPtr, int meshIndex, int surfIndex,
 
     int nv = surf->numVerts;
 
-    /* pStaticXyz: vec4_t* — float[4] per vertex (x,y,z,w) */
-    if (positions && surf->pStaticXyz) {
-        for (int i = 0; i < nv; i++) {
-            positions[i * 3 + 0] = surf->pStaticXyz[i][0];
-            positions[i * 3 + 1] = surf->pStaticXyz[i][1];
-            positions[i * 3 + 2] = surf->pStaticXyz[i][2];
+    /* Fast path: pre-computed static data exists (or GL renderer ran). */
+    if (surf->pStaticXyz) {
+        if (positions) {
+            for (int i = 0; i < nv; i++) {
+                positions[i * 3 + 0] = surf->pStaticXyz[i][0];
+                positions[i * 3 + 1] = surf->pStaticXyz[i][1];
+                positions[i * 3 + 2] = surf->pStaticXyz[i][2];
+            }
         }
+        if (normals && surf->pStaticNormal) {
+            for (int i = 0; i < nv; i++) {
+                normals[i * 3 + 0] = surf->pStaticNormal[i][0];
+                normals[i * 3 + 1] = surf->pStaticNormal[i][1];
+                normals[i * 3 + 2] = surf->pStaticNormal[i][2];
+            }
+        }
+        if (texcoords && surf->pStaticTexCoords) {
+            for (int i = 0; i < nv; i++) {
+                texcoords[i * 2 + 0] = surf->pStaticTexCoords[i][0][0];
+                texcoords[i * 2 + 1] = surf->pStaticTexCoords[i][0][1];
+            }
+        }
+        return 1;
     }
 
-    /* pStaticNormal: vec4_t* — float[4] per vertex */
-    if (normals && surf->pStaticNormal) {
-        for (int i = 0; i < nv; i++) {
-            normals[i * 3 + 0] = surf->pStaticNormal[i][0];
-            normals[i * 3 + 1] = surf->pStaticNormal[i][1];
-            normals[i * 3 + 2] = surf->pStaticNormal[i][2];
-        }
+    /* Slow path: compute bind-pose from bone weights (pVerts).
+     * This mirrors the inner loop of R_InitStaticModels in
+     * renderergl1/tr_staticmodels.cpp. */
+    if (!surf->pVerts) {
+        return 0;  /* No vertex data at all — genuine failure. */
     }
 
-    /* pStaticTexCoords: vec2_t(*)[2] — two UV sets per vertex, use set 0 */
-    if (texcoords && surf->pStaticTexCoords) {
-        for (int i = 0; i < nv; i++) {
-            texcoords[i * 2 + 0] = surf->pStaticTexCoords[i][0][0];
-            texcoords[i * 2 + 1] = surf->pStaticTexCoords[i][0][1];
+    /* Get bind-pose bone transforms via TIKI_GetSkelAnimFrame. */
+    skelBoneCache_t bones[128];
+    memset(bones, 0, sizeof(bones));
+    if (!Godot_RI_GetSkelAnimFrame(tikiPtr, bones, NULL)) {
+        return 0;  /* Skeleton not ready. */
+    }
+
+    /* Walk the variable-stride pVerts and skin each vertex. */
+    skeletorVertex_t *vert = surf->pVerts;
+    for (int v = 0; v < nv; v++) {
+        skelWeight_t *weight = (skelWeight_t *)((byte *)vert
+            + sizeof(skeletorVertex_t)
+            + sizeof(skeletorMorph_t) * vert->numMorphs);
+
+        /* Resolve bone channel for this vertex's first weight. */
+        int channel;
+        if (meshIndex > 0) {
+            channel = Godot_RI_GetLocalChannel(tikiPtr,
+                          skelmodel->pBones[weight->boneIndex].channel);
+        } else {
+            channel = weight->boneIndex;
         }
+
+        /* Compute position: single-weight only (matches R_InitStaticModels
+         * which uses only the first weight for each vertex). */
+        if (positions && channel >= 0 && channel < 128) {
+            skelBoneCache_t *bone = &bones[channel];
+            positions[v * 3 + 0] =
+                ((weight->offset[0] * bone->matrix[0][0]
+                + weight->offset[1] * bone->matrix[1][0]
+                + weight->offset[2] * bone->matrix[2][0])
+                + bone->offset[0]) * weight->boneWeight;
+            positions[v * 3 + 1] =
+                ((weight->offset[0] * bone->matrix[0][1]
+                + weight->offset[1] * bone->matrix[1][1]
+                + weight->offset[2] * bone->matrix[2][1])
+                + bone->offset[1]) * weight->boneWeight;
+            positions[v * 3 + 2] =
+                ((weight->offset[0] * bone->matrix[0][2]
+                + weight->offset[1] * bone->matrix[1][2]
+                + weight->offset[2] * bone->matrix[2][2])
+                + bone->offset[2]) * weight->boneWeight;
+        } else if (positions) {
+            positions[v * 3 + 0] = 0.0f;
+            positions[v * 3 + 1] = 0.0f;
+            positions[v * 3 + 2] = 0.0f;
+        }
+
+        /* Compute normal: rotate by the bone matrix. */
+        if (normals && channel >= 0 && channel < 128) {
+            skelBoneCache_t *bone = &bones[channel];
+            normals[v * 3 + 0] = vert->normal[0] * bone->matrix[0][0]
+                               + vert->normal[1] * bone->matrix[1][0]
+                               + vert->normal[2] * bone->matrix[2][0];
+            normals[v * 3 + 1] = vert->normal[0] * bone->matrix[0][1]
+                               + vert->normal[1] * bone->matrix[1][1]
+                               + vert->normal[2] * bone->matrix[2][1];
+            normals[v * 3 + 2] = vert->normal[0] * bone->matrix[0][2]
+                               + vert->normal[1] * bone->matrix[1][2]
+                               + vert->normal[2] * bone->matrix[2][2];
+        } else if (normals) {
+            normals[v * 3 + 0] = vert->normal[0];
+            normals[v * 3 + 1] = vert->normal[1];
+            normals[v * 3 + 2] = vert->normal[2];
+        }
+
+        /* Texcoords come from the vertex directly. */
+        if (texcoords) {
+            texcoords[v * 2 + 0] = vert->texCoords[0];
+            texcoords[v * 2 + 1] = vert->texCoords[1];
+        }
+
+        /* Advance to next variable-stride vertex. */
+        vert = (skeletorVertex_t *)((byte *)vert
+            + sizeof(skeletorVertex_t)
+            + sizeof(skeletorMorph_t) * vert->numMorphs
+            + sizeof(skelWeight_t) * vert->numWeights);
     }
 
     return 1;
@@ -258,15 +361,6 @@ const char *Godot_Skel_GetName(void *tikiPtr)
  *  called here to set pose / get bone matrices without including
  *  engine renderer headers.
  * ================================================================ */
-
-/* ri wrapper declarations (implemented in godot_renderer.c) */
-void *Godot_RI_GetSkeletor(void *tiki, int entityNumber);
-void  Godot_RI_SetPoseInternal(void *skeletor, const frameInfo_t *frameInfo,
-                                const int *bone_tag, const vec4_t *bone_quat,
-                                float actionWeight);
-void  Godot_RI_GetFrameInternal(void *tiki, int entityNumber, void *newFrame);
-int   Godot_RI_GetNumChannels(void *tiki);
-int   Godot_RI_GetLocalChannel(void *tiki, int globalChannel);
 
 /* Lightweight POD structs matching SkelMat4 / skelAnimFrame_t layout.
  * Using local definitions avoids pulling in the full skeletor header

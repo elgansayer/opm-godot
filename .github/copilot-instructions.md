@@ -91,6 +91,11 @@ See `openmohaa/TASKS.md` for the full phase-by-phase implementation log with tec
 - **No raw `malloc`/`free` in new C++ code.** Prefer `std::unique_ptr`, `std::vector`, or Godot's `memnew`/`memdelete`.
 - **Coordinate system:** id Tech 3 (X=Forward, Y=Left, Z=Up, inches) → Godot (X=Right, Y=Up, -Z=Forward, metres). Scale: `MOHAA_UNIT_SCALE = 1/39.37`.
 
+### Implementation standards — no shortcuts, no fallbacks
+1. **No fallbacks.** Always aim for 1:1 parity with MOHAA/OpenMoHAA. If the original engine does something a particular way, replicate that behaviour exactly. Never substitute a "good enough" approximation when the correct implementation is achievable.
+2. **No shortcuts.** Implement everything fully. If a function, accessor, or subsystem is missing (e.g. `Godot_Renderer_RegisterShader`), implement it properly rather than working around its absence. The codebase must grow correctly, not accumulate workarounds.
+3. **Put the effort in.** Do what is necessary, not what is easy. Study the original engine code (`renderergl1/`, `client/`, `fgame/`, `skeletor/`, etc.) to understand the correct behaviour, then replicate it faithfully on the Godot side. One-off hacks that bypass the established architecture (shader table, model table, VFS, accessor layer) are not acceptable.
+
 ## Critical Patterns
 
 ### Engine patch pattern — `#ifdef GODOT_GDEXTENSION`

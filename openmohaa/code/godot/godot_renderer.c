@@ -2570,6 +2570,21 @@ int Godot_RI_GetLocalChannel( void *tiki, int globalChannel )
     return ri.TIKI_GetLocalChannel( (dtiki_t *)tiki, globalChannel );
 }
 
+/* ── Bind-pose bone computation for static models ──
+ * Wraps ri.TIKI_GetSkelAnimFrame so the skel model accessor can
+ * compute pStaticXyz on-the-fly when the GL renderer hasn't done it. */
+int Godot_RI_GetSkelAnimFrame( void *tiki, void *bonesOut, float *radiusOut )
+{
+    if ( !tiki || !bonesOut ) return 0;
+    if ( !ri.TIKI_GetSkelAnimFrame ) return 0;
+    vec3_t mins, maxs;
+    float  radius = 0.0f;
+    ri.TIKI_GetSkelAnimFrame( (dtiki_t *)tiki, (skelBoneCache_t *)bonesOut,
+                               &radius, &mins, &maxs );
+    if ( radiusOut ) *radiusOut = radius;
+    return 1;
+}
+
 /* ── Entity animation data accessor ── */
 int Godot_Renderer_GetEntityAnim( int index,
                                    void **outTiki,

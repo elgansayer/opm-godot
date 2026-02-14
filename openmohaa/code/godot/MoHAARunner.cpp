@@ -634,7 +634,7 @@ void MoHAARunner::check_world_load() {
 
         // Instantiate static TIKI models from BSP data
         load_static_models();
-        UtilityFunctions::print(String("[MoHAA] Loading load_static_models: ") + new_bsp);
+        UtilityFunctions::print(String("[MoHAA] Static models loaded for: ") + new_bsp);
 
         // Load skybox cubemap from sky shader (Phase 12)
         load_skybox();
@@ -642,7 +642,7 @@ void MoHAARunner::check_world_load() {
 
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
-        Godot_Weather_Init();
+        Godot_Weather_Init(game_world);
 #endif
 
     } else {
@@ -837,6 +837,8 @@ void MoHAARunner::load_static_models() {
             bool found_tex = false;
 
             if (!shader_name.is_empty()) {
+                // First try the renderer's shader table (shader may already
+                // be registered from other engine paths).
                 int shaderCount = Godot_Renderer_GetShaderCount();
                 for (int sh = 1; sh < shaderCount; sh++) {
                     const char *sn = Godot_Renderer_GetShaderName(sh);
@@ -847,6 +849,50 @@ void MoHAARunner::load_static_models() {
                             found_tex = true;
                         }
                         break;
+                    }
+                }
+
+                // If not found in shader table, load texture directly from
+                // VFS by name.  Static model shaders are registered by the
+                // GL renderer's R_InitStaticModels via R_FindShader, which
+                // our stub renderer doesn't call — so we load them here.
+                if (!found_tex) {
+                    CharString cs = shader_name.ascii();
+                    const char *name = cs.get_data();
+                    const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
+                    for (int ext_i = 0; !found_tex && extensions[ext_i]; ext_i++) {
+                        char path[256];
+                        snprintf(path, sizeof(path), "%s%s", name, extensions[ext_i]);
+                        void *buf = NULL;
+                        long len = Godot_VFS_ReadFile(path, &buf);
+                        if (len > 0 && buf) {
+                            PackedByteArray pba;
+                            pba.resize(len);
+                            memcpy(pba.ptrw(), buf, len);
+                            Godot_VFS_FreeFile(buf);
+                            buf = NULL;
+
+                            Ref<Image> img;
+                            img.instantiate();
+                            Error err;
+                            const uint8_t *data = pba.ptr();
+                            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
+                                err = img->load_jpg_from_buffer(pba);
+                            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
+                                err = img->load_png_from_buffer(pba);
+                            } else {
+                                err = img->load_tga_from_buffer(pba);
+                                if (err != OK) err = img->load_jpg_from_buffer(pba);
+                            }
+                            if (err == OK && !img->is_empty()) {
+                                Ref<ImageTexture> tex;
+                                tex.instantiate();
+                                tex->set_image(img);
+                                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                                found_tex = true;
+                            }
+                        }
+                        if (buf) Godot_VFS_FreeFile(buf);
                     }
                 }
             }
@@ -3254,7 +3300,7 @@ void MoHAARunner::_ready() {
 
     // ── Module init hooks (defensive — only called if module exists) ──
 #ifdef HAS_MUSIC_MODULE
-    Godot_Music_Init();
+    Godot_Music_Init(static_cast<void*>(this));
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Init(game_world);
@@ -3322,7 +3368,7 @@ void MoHAARunner::_process(double delta) {
     Godot_Music_Update(delta);
 #endif
 #ifdef HAS_WEATHER_MODULE
-    Godot_Weather_Update(delta);
+    Godot_Weather_Update(camera ? camera->get_global_position() : Vector3(), static_cast<float>(delta));
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Update(delta);
