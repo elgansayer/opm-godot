@@ -100,6 +100,9 @@ int Godot_BSP_SurfaceHasLightmap(int surface_index);
 int Godot_BSP_GetEntityToken(char *buffer, int bufferSize);
 void Godot_BSP_ResetEntityTokenParse(void);
 
+/* Phase 47: Raw entity string accessor (for speaker entity parsing) */
+const char *Godot_BSP_GetEntityString(void);
+
 /* Phase 19: Inline model bounds */
 void Godot_BSP_GetInlineModelBounds(int index, float *mins, float *maxs);
 

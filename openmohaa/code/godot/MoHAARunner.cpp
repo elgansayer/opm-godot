@@ -358,6 +358,25 @@ MoHAARunner::~MoHAARunner() {
         /* Even if not initialized, mark shutdown as safety net */
         Z_MarkShutdown();
     }
+
+    // ── Module shutdown hooks (defensive) ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    Godot_WeaponViewport::get().destroy();
+#endif
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+    Godot_Speakers_Shutdown();
+#endif
+#ifdef HAS_UBERSOUND_MODULE
+    Godot_Ubersound_Shutdown();
+#endif
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_MeshCache::get().clear();
+    Godot_MaterialCache::get().clear();
+#endif
+#ifdef HAS_SHADER_MATERIAL_MODULE
+    Godot_Shader_ClearCache();
+#endif
+
     g_godot_ready = false;
 }
 
@@ -516,6 +535,15 @@ void MoHAARunner::setup_3d_scene() {
     game_world->add_child(world_env);
 
     UtilityFunctions::print("[MoHAA] 3D scene created (Camera3D + light + environment).");
+
+    // ── Phase 62: Create weapon SubViewport for first-person weapon rendering ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    {
+        int vp_w = 1280, vp_h = 720;  // Default; will be resized when window size is known
+        Godot_WeaponViewport::get().create(this, camera, vp_w, vp_h);
+        UtilityFunctions::print("[MoHAA] Weapon SubViewport created.");
+    }
+#endif
 }
 
 // ──────────────────────────────────────────────
@@ -627,6 +655,16 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+#ifdef HAS_MESH_CACHE_MODULE
+            Godot_MeshCache::get().clear();
+            Godot_MaterialCache::get().clear();
+#endif
+#ifdef HAS_SHADER_MATERIAL_MODULE
+            Godot_Shader_ClearCache();
+#endif
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+            Godot_Speakers_Shutdown();
+#endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -666,1028 +704,10 @@ void MoHAARunner::check_world_load() {
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
         Godot_Weather_Init(game_world);
-#endif
-
-    } else {
-        UtilityFunctions::printerr("[MoHAA] Failed to load BSP world.");
-    }
-}
-
-// ──────────────────────────────────────────────
-//  Static BSP model loading (Phase 10)
-// ──────────────────────────────────────────────
-
-/// Apply shader transparency / cull properties to a StandardMaterial3D.
-/// Call after setting the albedo texture.  shader_name is the C-string
-/// name used for the Godot_ShaderProps_Find lookup (e.g. "textures/foo/bar").
-static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
-                                            const char *shader_name)
-{
-    if (!shader_name || !shader_name[0]) return;
-
-    const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
-    if (!sp) return;
-
-    switch (sp->transparency) {
-        case SHADER_ALPHA_TEST:
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
-            mat->set_alpha_scissor_threshold(sp->alpha_threshold);
-            break;
-        case SHADER_ALPHA_BLEND:
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            break;
-        case SHADER_ADDITIVE:
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
-            break;
-        case SHADER_MULTIPLICATIVE:
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-            break;
-        default:
-            break;
-    }
-    switch (sp->cull) {
-        case SHADER_CULL_BACK:
-            mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-            break;
-        case SHADER_CULL_FRONT:
-            mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
-            break;
-        case SHADER_CULL_NONE:
-            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            break;
-    }
-
-    // Phase 36: tcMod scale — apply UV scale if non-default
-    if (sp->has_tcmod) {
-        if (sp->tcmod_scale_s != 1.0f || sp->tcmod_scale_t != 1.0f) {
-            mat->set_uv1_scale(Vector3(sp->tcmod_scale_s, sp->tcmod_scale_t, 1.0f));
-        }
-        // tcMod scroll — UV offset is animated per-frame by update_shader_animations()
-    }
-
-    // Phase 56/57: rgbGen/alphaGen baseline material state
-    if (sp->rgbgen_type == 4) { // const
-        Color a = mat->get_albedo();
-        mat->set_albedo(Color(clamp01(sp->rgbgen_const[0]),
-                              clamp01(sp->rgbgen_const[1]),
-                              clamp01(sp->rgbgen_const[2]), a.a));
-    } else if (sp->rgbgen_type == 0) { // identity
-        Color a = mat->get_albedo();
-        mat->set_albedo(Color(1.0f, 1.0f, 1.0f, a.a));
-    }
-
-    if (sp->alphagen_type == 4) { // const
-        Color a = mat->get_albedo();
-        float alpha = clamp01(sp->alphagen_const);
-        mat->set_albedo(Color(a.r, a.g, a.b, alpha));
-        if (alpha < 0.999f) {
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-        }
-    }
-
-    // Phase 65: Fullbright rendering for nolightmap surfaces
-    if (sp->no_lightmap) {
-        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-    }
-}
-
-/// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
-/// Euler angles [pitch, yaw, roll] in degrees.  Uses MOHAA convention:
-/// PITCH=0, YAW=1, ROLL=2.
-static void id_angle_vectors_left(const float *angles,
-                                  float *forward, float *left, float *up)
-{
-    float sp, cp, sy, cy, sr, cr;
-    float ang;
-
-    ang = angles[1] * (3.14159265358979f / 180.0f);  // YAW
-    sy = sinf(ang); cy = cosf(ang);
-    ang = angles[0] * (3.14159265358979f / 180.0f);  // PITCH
-    sp = sinf(ang); cp = cosf(ang);
-    ang = angles[2] * (3.14159265358979f / 180.0f);  // ROLL
-    sr = sinf(ang); cr = cosf(ang);
-
-    if (forward) {
-        forward[0] = cp * cy;
-        forward[1] = cp * sy;
-        forward[2] = -sp;
-    }
-    if (left) {
-        // Matches AngleVectorsLeft() in q_math.c
-        left[0] = (sr * sp * cy + cr * -sy);
-        left[1] = (sr * sp * sy + cr * cy);
-        left[2] = sr * cp;
-    }
-    if (up) {
-        up[0] = (cr * sp * cy + -sr * -sy);
-        up[1] = (cr * sp * sy + -sr * cy);
-        up[2] = cr * cp;
-    }
-}
-
-void MoHAARunner::load_static_models() {
-    int count = Godot_BSP_GetStaticModelCount();
-    if (count <= 0) return;
-
-    // Clean up any previous static models
-    if (static_model_root) {
-        static_model_root->queue_free();
-        static_model_root = nullptr;
-    }
-
-    static_model_root = memnew(Node3D);
-    static_model_root->set_name("StaticModels");
-    if (bsp_map_node) {
-        bsp_map_node->add_child(static_model_root);
-    } else {
-        game_world->add_child(static_model_root);
-    }
-
-    int placed = 0, failed = 0;
-
-    for (int i = 0; i < count; i++) {
-        const BSPStaticModelDef *def = Godot_BSP_GetStaticModelDef(i);
-        if (!def || !def->model[0]) continue;
-
-        // Build full model path — BSP stores paths relative to models/
-        // (mirrors R_InitStaticModels in tr_staticmodels.cpp)
-        char full_path[256];
-        if (strncasecmp(def->model, "models", 6) != 0) {
-            snprintf(full_path, sizeof(full_path), "models/%s", def->model);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%s", def->model);
-        }
-        // Canonicalise: collapse double slashes
-        {
-            char *r = full_path, *w = full_path;
-            while (*r) {
-                if (*r == '/' && *(r + 1) == '/') { r++; continue; }
-                *w++ = *r++;
-            }
-            *w = '\0';
-        }
-
-        // Register the TIKI model with the renderer
-        int hModel = Godot_Model_Register(full_path);
-        if (hModel <= 0) {
-            failed++;
-            continue;
-        }
-
-        // Build or retrieve the cached mesh
-        const GodotSkelModelCache::CachedModel *cached =
-            GodotSkelModelCache::get().get_model(hModel);
-
-        if (!cached || !cached->mesh.is_valid()) {
-            failed++;
-            continue;
-        }
-
-        // Create MeshInstance3D
-        MeshInstance3D *mi = memnew(MeshInstance3D);
-        mi->set_name(String("SM_") + String::num_int64(i));
-        mi->set_mesh(cached->mesh);
-
-        // Apply shader textures to each surface.
-        // Mirrors R_InitStaticModels: register each surface shader via
-        // RegisterShader, then use the returned handle for texture lookup
-        // through the standard get_shader_texture pipeline.
-        for (int s = 0; s < (int)cached->surfaces.size(); s++) {
-            Ref<StandardMaterial3D> mat;
-            mat.instantiate();
-            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-
-            /* Static models use lightgrid (CGEN_LIGHTING_GRID) in the
-             * real renderer, not dynamic lights.  Set UNSHADED to prevent
-             * Godot's sun + ambient from double-lighting them. */
-            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-
-            const String &shader_name = cached->surfaces[s].shader_name;
-            bool found_tex = false;
-
-            if (!shader_name.is_empty()) {
-                // Register the shader into the renderer's shader table
-                // (same as R_FindShader in R_InitStaticModels), then use the
-                // handle with get_shader_texture() for the standard texture
-                // loading path.
-                CharString cs = shader_name.ascii();
-                int shaderHandle = Godot_Renderer_RegisterShader(cs.get_data());
-                if (shaderHandle > 0) {
-                    Ref<ImageTexture> tex = get_shader_texture(shaderHandle);
-                    if (tex.is_valid()) {
-                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                        found_tex = true;
-                    }
-                }
-            }
-
-            if (!found_tex) {
-                mat->set_albedo(Color(0.5, 0.6, 0.4, 1.0));
-            }
-
-            // Apply shader transparency / cull properties (Phase 11)
-            if (!shader_name.is_empty()) {
-                CharString cs = shader_name.ascii();
-                apply_shader_props_to_material(mat, cs.get_data());
-            }
-
-            mi->set_surface_override_material(s, mat);
-        }
-
-        // ── Compute transform from origin + angles + scale ──
-        // Mirrors renderergl1/tr_main.c:R_RotateForStaticModel +
-        // renderergl1/tr_staticmodels.cpp:R_AddStaticModelSurfaces.
-        float fwd[3], left[3], up[3];
-        id_angle_vectors_left(def->angles, fwd, left, up);
-
-        // Static-model origin is offset by tiki->load_origin * (load_scale * def.scale)
-        // in model space, then rotated by the static-model axis.
-        float scaled_local[3] = {0.0f, 0.0f, 0.0f};
-        {
-            float s = (def->scale > 0.001f) ? def->scale : 1.0f;
-            float tiki_scale = cached->tiki_scale * s;
-
-            void *tiki_ptr = Godot_Model_GetTikiPtr(hModel);
-            if (tiki_ptr) {
-                float load_origin[3] = {0.0f, 0.0f, 0.0f};
-                Godot_Skel_GetOrigin(tiki_ptr, load_origin);
-                scaled_local[0] = load_origin[0] * tiki_scale;
-                scaled_local[1] = load_origin[1] * tiki_scale;
-                scaled_local[2] = load_origin[2] * tiki_scale;
-            }
-        }
-
-        // World offset in id-space: fwd*x + left*y + up*z
-        float world_off_id[3] = {
-            fwd[0] * scaled_local[0] + left[0] * scaled_local[1] + up[0] * scaled_local[2],
-            fwd[1] * scaled_local[0] + left[1] * scaled_local[1] + up[1] * scaled_local[2],
-            fwd[2] * scaled_local[0] + left[2] * scaled_local[1] + up[2] * scaled_local[2],
-        };
-
-        Vector3 pos = id_to_godot_position(def->origin[0] + world_off_id[0],
-                                            def->origin[1] + world_off_id[1],
-                                            def->origin[2] + world_off_id[2]);
-
-        // Convert id axis to Godot basis
-        Vector3 forward_g = id_to_godot_point(fwd[0],  fwd[1],  fwd[2]);
-        Vector3 left_g    = id_to_godot_point(left[0], left[1], left[2]);
-        Vector3 up_g      = id_to_godot_point(up[0],   up[1],   up[2]);
-
-        // Godot basis: X=right, Y=up, Z=back
-        Vector3 godot_right = -left_g;
-        Vector3 godot_up    = up_g;
-        Vector3 godot_back  = -forward_g;
-
-        float s = (def->scale > 0.001f) ? def->scale : 1.0f;
-        Basis basis(godot_right * s, godot_up * s, godot_back * s);
-        mi->set_global_transform(Transform3D(basis, pos));
-
-        static_model_root->add_child(mi);
-        placed++;
-    }
-
-    UtilityFunctions::print(String("[MoHAA] Static models: ") +
-                            String::num_int64(placed) + " placed, " +
-                            String::num_int64(failed) + " failed.");
-}
-
-// ──────────────────────────────────────────────
-//  Skybox loading (Phase 12)
-// ──────────────────────────────────────────────
-
-void MoHAARunner::load_skybox() {
-    if (!world_env) return;
-
-    const char *sky_env = Godot_ShaderProps_GetSkyEnv();
-    if (!sky_env || !sky_env[0]) {
-        UtilityFunctions::print("[MoHAA] No sky shader found — keeping default background.");
-        return;
-    }
-
-    UtilityFunctions::print(String("[MoHAA] Loading skybox: ") + sky_env);
-
-    // id Tech 3 / OpenGL cubemap face suffixes in Godot cubemap layer order:
-    //   Layer 0 = +X (right),  Layer 1 = -X (left),
-    //   Layer 2 = +Y (up),     Layer 3 = -Y (down),
-    //   Layer 4 = +Z (back),   Layer 5 = -Z (front)
-    static const char *suffixes[6] = { "_rt", "_lf", "_up", "_dn", "_bk", "_ft" };
-    static const char *extensions[] = { ".jpg", ".tga", nullptr };
-
-    TypedArray<Image> face_images;
-    face_images.resize(6);
-    int loaded = 0;
-
-    for (int i = 0; i < 6; i++) {
-        Ref<Image> img;
-        bool found = false;
-
-        for (int e = 0; extensions[e]; e++) {
-            char path[256];
-            snprintf(path, sizeof(path), "%s%s%s", sky_env, suffixes[i], extensions[e]);
-
-            void *raw = nullptr;
-            long len = Godot_VFS_ReadFile(path, &raw);
-            if (len <= 0 || !raw) continue;
-
-            PackedByteArray buf;
-            buf.resize(len);
-            memcpy(buf.ptrw(), raw, len);
-            Godot_VFS_FreeFile(raw);
-
-            img.instantiate();
-            Error err;
-            if (extensions[e][1] == 'j') {
-                err = img->load_jpg_from_buffer(buf);
-            } else {
-                err = img->load_tga_from_buffer(buf);
-            }
-
-            if (err == OK && img->get_width() > 0) {
-                found = true;
-                break;
-            }
-            img.unref();
-        }
-
-        if (!found) {
-            UtilityFunctions::printerr(
-                String("[MoHAA] Sky face missing: ") + sky_env + suffixes[i]);
-            return;
-        }
-
-        // Ensure consistent format for cubemap creation
-        if (img->get_format() != Image::FORMAT_RGBA8) {
-            img->convert(Image::FORMAT_RGBA8);
-        }
-
-        face_images[i] = img;
-        loaded++;
-    }
-
-    if (loaded != 6) return;
-
-    // Create Cubemap from the 6 face images
-    Ref<Cubemap> cubemap;
-    cubemap.instantiate();
-    Error err = cubemap->create_from_images(face_images);
-    if (err != OK) {
-        UtilityFunctions::printerr("[MoHAA] Failed to create sky cubemap.");
-        return;
-    }
-
-    // Create a sky shader that samples the cubemap
-    Ref<Shader> sky_shader;
-    sky_shader.instantiate();
-    sky_shader->set_code(
-        "shader_type sky;\n"
-        "uniform samplerCube sky_cubemap : source_color;\n"
-        "void sky() {\n"
-        "    COLOR = texture(sky_cubemap, EYEDIR).rgb;\n"
-        "}\n"
-    );
-
-    // Create ShaderMaterial and assign cubemap
-    Ref<ShaderMaterial> sky_mat;
-    sky_mat.instantiate();
-    sky_mat->set_shader(sky_shader);
-    sky_mat->set_shader_parameter("sky_cubemap", cubemap);
-
-    // Create Sky resource
-    Ref<Sky> sky;
-    sky.instantiate();
-    sky->set_material(sky_mat);
-    sky->set_radiance_size(Sky::RADIANCE_SIZE_256);
-
-    // Update environment to use the skybox
-    Ref<Environment> env = world_env->get_environment();
-    if (env.is_valid()) {
-        env->set_background(Environment::BG_SKY);
-        env->set_sky(sky);
-        UtilityFunctions::print(
-            String("[MoHAA] Skybox loaded: ") + sky_env + " (6 faces).");
-    }
-}
-
-// ──────────────────────────────────────────────
-//  Entity rendering (Phase 7e)
-// ──────────────────────────────────────────────
-
-// Entity type constants matching refEntityType_t
-static constexpr int RT_MODEL   = 0;
-static constexpr int RT_SPRITE  = 3;
-static constexpr int RT_BEAM    = 4;
-
-void MoHAARunner::update_entities() {
-    if (!game_world) return;
-
-    int ent_count = Godot_Renderer_GetEntityCount();
-
-    // Log entity count once when first entities appear
-    static bool logged_entity_count = false;
-    if (!logged_entity_count && ent_count > 0) {
-        UtilityFunctions::print(String("[MoHAA] Entities in frame: ") +
-                                String::num_int64(ent_count));
-        logged_entity_count = true;
-    }
-
-    // Create entity container node on first use
-    if (!entity_root) {
-        entity_root = memnew(Node3D);
-        entity_root->set_name("Entities");
-        game_world->add_child(entity_root);
-    }
-
-    // Grow the mesh pool if needed
-    while ((int)entity_meshes.size() < ent_count) {
-        MeshInstance3D *mi = memnew(MeshInstance3D);
-        mi->set_name(String("Entity_") + String::num_int64((int64_t)entity_meshes.size()));
-        mi->set_visible(false);
-        entity_root->add_child(mi);
-        entity_meshes.push_back(mi);
-    }
-
-    if ((int)entity_cache_keys.size() < ent_count) {
-        entity_cache_keys.resize(ent_count);
-    }
-
-    // Update positions for active entities this frame
-    for (int i = 0; i < ent_count; i++) {
-        float origin[3], axis[9], scale = 1.0f;
-        int hModel = 0, entityNumber = 0, renderfx = 0;
-        unsigned char rgba[4] = {255, 255, 255, 255};
-
-        int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
-                                               &hModel, &entityNumber,
-                                               rgba, &renderfx);
-
-        MeshInstance3D *mi = entity_meshes[i];
-
-        // Skip non-renderable entities (portals, etc.)
-        if (reType != RT_MODEL && reType != RT_SPRITE && reType != RT_BEAM) {
-            mi->set_visible(false);
-            continue;
-        }
-        // RT_MODEL needs a valid model handle
-        if (reType == RT_MODEL && hModel <= 0) {
-            mi->set_visible(false);
-            continue;
-        }
-
-        // RF_THIRD_PERSON (1<<0 = 0x01): player body — not visible in first-person
-        // RF_FIRST_PERSON (1<<1 = 0x02): view weapon — only visible in first-person
-        // RF_DEPTHHACK     (1<<2 = 0x04): compress depth so weapon doesn't clip into walls
-        // RF_DONTDRAW      (1<<7 = 0x80): don't draw this entity
-        if (renderfx & 0x01) {  // RF_THIRD_PERSON — skip player body
-            mi->set_visible(false);
-            continue;
-        }
-
-        // RT_SPRITE: billboard quad at entity origin (Phase 16)
-        if (reType == RT_SPRITE) {
-            float radius = 0.0f, rotation = 0.0f;
-            int customShader = 0;
-            Godot_Renderer_GetEntitySprite(i, &radius, &rotation, &customShader);
-
-            if (radius < 0.001f) {
-                mi->set_visible(false);
-                continue;
-            }
-
-            // Use customShader if set, else hModel as shader handle
-            int spriteShader = (customShader > 0) ? customShader : hModel;
-
-            float half = radius * MOHAA_UNIT_SCALE;
-
-            // Build a simple quad (2 triangles) — billboard handled by material
-            PackedVector3Array gPos;
-            PackedVector2Array gUV;
-            PackedInt32Array   gIdx;
-            gPos.resize(4);
-            gUV.resize(4);
-            gIdx.resize(6);
-
-            gPos.set(0, Vector3(-half, -half, 0.0f));
-            gPos.set(1, Vector3( half, -half, 0.0f));
-            gPos.set(2, Vector3( half,  half, 0.0f));
-            gPos.set(3, Vector3(-half,  half, 0.0f));
-            gUV.set(0, Vector2(0, 1));
-            gUV.set(1, Vector2(1, 1));
-            gUV.set(2, Vector2(1, 0));
-            gUV.set(3, Vector2(0, 0));
-            gIdx.set(0, 0); gIdx.set(1, 1); gIdx.set(2, 2);
-            gIdx.set(3, 0); gIdx.set(4, 2); gIdx.set(5, 3);
-
-            Array arrays;
-            arrays.resize(Mesh::ARRAY_MAX);
-            arrays[Mesh::ARRAY_VERTEX] = gPos;
-            arrays[Mesh::ARRAY_TEX_UV] = gUV;
-            arrays[Mesh::ARRAY_INDEX]  = gIdx;
-
-            Ref<ArrayMesh> smesh;
-            smesh.instantiate();
-            smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-            mi->set_mesh(smesh);
-
-            // Billboard material: faces camera, alpha-blended, unshaded
-            Ref<StandardMaterial3D> smat;
-            smat.instantiate();
-            smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
-            smat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            smat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            smat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            smat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-            smat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                   rgba[2] / 255.0f, rgba[3] / 255.0f));
-
-            if (spriteShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(spriteShader);
-                if (tex.is_valid()) {
-                    smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                }
-            }
-
-            mi->set_surface_override_material(0, smat);
-
-            // Position sprite at entity origin
-            Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
-            mi->set_global_transform(Transform3D(Basis(), pos));
-            mi->set_visible(true);
-            continue;
-        }
-
-        // ── Phase 23: RT_BEAM — line between two points (e.g. tracers, lasers) ──
-        if (reType == RT_BEAM) {
-            float from[3], to[3], diameter = 1.0f;
-            Godot_Renderer_GetEntityBeam(i, from, to, &diameter);
-
-            Vector3 p1 = id_to_godot_position(from[0], from[1], from[2]);
-            Vector3 p2 = id_to_godot_position(to[0], to[1], to[2]);
-            Vector3 dir = p2 - p1;
-            float len = dir.length();
-            if (len < 0.001f) {
-                mi->set_visible(false);
-                continue;
-            }
-
-            // Build a flat quad along the beam direction
-            // Width based on diameter (MOHAA diameter = frame field)
-            float halfW = (diameter > 0 ? diameter : 1.0f) * MOHAA_UNIT_SCALE * 0.5f;
-            Vector3 up = Vector3(0, 1, 0);
-            Vector3 side = dir.normalized().cross(up);
-            if (side.length_squared() < 0.001f) {
-                side = dir.normalized().cross(Vector3(1, 0, 0));
-            }
-            side = side.normalized() * halfW;
-
-            PackedVector3Array gPos;
-            PackedVector2Array gUV;
-            PackedInt32Array   gIdx;
-            gPos.resize(4);
-            gUV.resize(4);
-            gIdx.resize(6);
-            gPos.set(0, p1 - side);
-            gPos.set(1, p1 + side);
-            gPos.set(2, p2 + side);
-            gPos.set(3, p2 - side);
-            gUV.set(0, Vector2(0, 0)); gUV.set(1, Vector2(1, 0));
-            gUV.set(2, Vector2(1, 1)); gUV.set(3, Vector2(0, 1));
-            gIdx.set(0, 0); gIdx.set(1, 1); gIdx.set(2, 2);
-            gIdx.set(3, 0); gIdx.set(4, 2); gIdx.set(5, 3);
-
-            Array arrays;
-            arrays.resize(Mesh::ARRAY_MAX);
-            arrays[Mesh::ARRAY_VERTEX] = gPos;
-            arrays[Mesh::ARRAY_TEX_UV] = gUV;
-            arrays[Mesh::ARRAY_INDEX]  = gIdx;
-
-            Ref<ArrayMesh> bmesh;
-            bmesh.instantiate();
-            bmesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-            mi->set_mesh(bmesh);
-
-            // Beam material: billboard-Y, alpha-blended, unshaded
-            Ref<StandardMaterial3D> bmat;
-            bmat.instantiate();
-            bmat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
-            bmat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            bmat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            bmat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                   rgba[2] / 255.0f, rgba[3] / 255.0f));
-
-            // Try to apply beam shader texture
-            int customShader = 0;
-            Godot_Renderer_GetEntitySprite(i, nullptr, nullptr, &customShader);
-            int beamShader = (customShader > 0) ? customShader : hModel;
-            if (beamShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(beamShader);
-                if (tex.is_valid()) {
-                    bmat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                }
-            }
-
-            mi->set_surface_override_material(0, bmat);
-            // Beam vertices are already in world space — use identity transform
-            mi->set_global_transform(Transform3D());
-            mi->set_visible(true);
-            continue;
-        }
-
-        // 
-        if (renderfx & 0x80) {  // RF_DONTDRAW
-            mi->set_visible(false);
-            continue;
-        }
-
-        bool is_first_person = (renderfx & 0x02) != 0;  // RF_FIRST_PERSON
-        bool is_depthhack    = (renderfx & 0x04) != 0;  // RF_DEPTHHACK
-
-        EntityCacheKey key { hModel, reType, 0, renderfx };
-        bool same_key = (i < (int)entity_cache_keys.size() && entity_cache_keys[i] == key);
-
-        // Try to get the actual skeletal model mesh from cache
-        int modType = Godot_Model_GetType(hModel);
-
-        if (modType == 1 /* GR_MOD_BRUSH */) {
-            // ── Brush model (door, mover, platform, etc.) ──
-            // Extract submodel number from name (e.g. "*5" → 5)
-            const char *modName = Godot_Model_GetName(hModel);
-            int subIdx = 0;
-            if (modName && modName[0] == '*') {
-                subIdx = atoi(modName + 1);
-            }
-
-            Ref<ArrayMesh> bmesh = Godot_BSP_GetBrushModelMesh(subIdx);
-            if (bmesh.is_valid() && mi->get_mesh() != bmesh) {
-                mi->set_mesh(bmesh);
-                // Materials are already baked into the ArrayMesh surfaces
-                // by batches_to_array_mesh() — no override needed.
-            } else if (!bmesh.is_valid()) {
-                // Brush model mesh not available — skip display
-                static std::unordered_set<int> logged_missing_bmodels;
-                if (logged_missing_bmodels.find(subIdx) == logged_missing_bmodels.end()) {
-                    logged_missing_bmodels.insert(subIdx);
-                    UtilityFunctions::print(String("[MoHAA] Entity brush model *") +
-                        String::num_int64(subIdx) + " has no mesh — hiding entity");
-                }
-                mi->set_visible(false);
-                continue;
-            }
-        } else {
-            // ── Skeletal (TIKI) model ──
-            const GodotSkelModelCache::CachedModel *cached =
-                GodotSkelModelCache::get().get_model(hModel);
-
-            if (!cached || !cached->mesh.is_valid()) {
-                // No skeletal mesh available — use a small debug placeholder
-                if (!mi->get_mesh().is_valid() || mi->get_mesh()->get_class() != "BoxMesh") {
-                    Ref<BoxMesh> box;
-                    box.instantiate();
-                    box->set_size(Vector3(0.3, 0.3, 0.3));
-                    mi->set_mesh(box);
-
-                    Ref<StandardMaterial3D> mat;
-                    mat.instantiate();
-                    mat->set_albedo(Color(1.0, 0.3, 0.1, 0.7));
-                    mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                    mi->set_surface_override_material(0, mat);
-                }
-            } else {
-                // Build + cache materials for this model (one-time)
-                static std::unordered_map<int, std::vector<Ref<StandardMaterial3D>>> mat_cache;
-                if (!same_key && mat_cache.find(hModel) == mat_cache.end()) {
-                    auto &mats = mat_cache[hModel];
-                    for (int s = 0; s < (int)cached->surfaces.size(); s++) {
-                        Ref<StandardMaterial3D> mat;
-                        mat.instantiate();
-                        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-
-                        /* Entities use lightgrid (CGEN_LIGHTING_GRID) in the
-                         * real renderer.  Set UNSHADED to prevent Godot's
-                         * dynamic lights from double-lighting them. */
-                        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-
-                        const String &shader_name = cached->surfaces[s].shader_name;
-                        bool found_tex = false;
-
-                        if (!shader_name.is_empty()) {
-                            // Register the shader first (like static models do),
-                            // then look up the texture via the standard pipeline.
-                            // Without registration, dynamic entity shaders may not
-                            // be in the renderer's shader table yet.
-                            CharString cs = shader_name.ascii();
-                            int shaderHandle = Godot_Renderer_RegisterShader(cs.get_data());
-                            if (shaderHandle > 0) {
-                                Ref<ImageTexture> tex = get_shader_texture(shaderHandle);
-                                if (tex.is_valid()) {
-                                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                                    found_tex = true;
-                                }
-                            }
-                        }
-
-                        if (!found_tex) {
-                            mat->set_albedo(Color(0.6, 0.6, 0.6, 0.5));
-                            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                        }
-
-                        // Apply shader transparency / cull properties (Phase 11)
-                        if (!shader_name.is_empty()) {
-                            CharString cs = shader_name.ascii();
-                            apply_shader_props_to_material(mat, cs.get_data());
-                        }
-
-                        mats.push_back(mat);
-                    }
-                }
-
-                // ── Phase 13: CPU skinning (Phase 60: with anim state caching) ──
-                // Try to get animation data and compute skinned mesh
-                void *tikiPtr = nullptr;
-                int entNum = 0;
-                float actionWeight = 0, entScale = 1.0f;
-                // Opaque buffers for frameInfo_t[16] / bone_tag[5] / bone_quat[5][4]
-                alignas(8) char frameInfoBuf[256];
-                int boneTagBuf[5];
-                float boneQuatBuf[20]; /* 5 × 4 floats */
-
-                bool has_anim = Godot_Renderer_GetEntityAnim(
-                    i, &tikiPtr, &entNum,
-                    frameInfoBuf, boneTagBuf, boneQuatBuf,
-                    &actionWeight, &entScale) != 0;
-
-                Ref<ArrayMesh> skinned_mesh;
-
-                // One-time diagnostic: report first entity with anim data
-                static bool logged_anim_diag = false;
-                if (!logged_anim_diag && has_anim && tikiPtr) {
-                    UtilityFunctions::print(
-                        String("[MoHAA] First entity with anim data: entNum=") +
-                        String::num_int64(entNum) +
-                        String(" hModel=") + String::num_int64(hModel));
-                    logged_anim_diag = true;
-                }
-
-                if (has_anim && tikiPtr) {
-                    // Phase 60: Compute FNV-1a hash of animation state to
-                    // skip mesh rebuild when the pose hasn't changed.
-                    uint64_t anim_hash = 14695981039346656037ULL;
-                    auto fnv_bytes = [&anim_hash](const void *p, size_t n) {
-                        const unsigned char *b = (const unsigned char *)p;
-                        for (size_t j = 0; j < n; j++) {
-                            anim_hash ^= b[j];
-                            anim_hash *= 1099511628211ULL;
-                        }
-                    };
-                    fnv_bytes(frameInfoBuf, sizeof(frameInfoBuf));
-                    fnv_bytes(boneTagBuf, sizeof(boneTagBuf));
-                    fnv_bytes(boneQuatBuf, sizeof(boneQuatBuf));
-                    fnv_bytes(&actionWeight, sizeof(actionWeight));
-                    fnv_bytes(&hModel, sizeof(hModel));
-
-                    // Check cache: if animation state unchanged, reuse mesh
-                    auto cache_it = skel_mesh_cache.find(entNum);
-                    if (cache_it != skel_mesh_cache.end() &&
-                        cache_it->second.anim_hash == anim_hash &&
-                        cache_it->second.mesh != nullptr) {
-                        skinned_mesh = cache_it->second.mesh;
-                    } else {
-                        int boneCount = 0;
-                        void *boneCache = Godot_Skel_PrepareBones(
-                            tikiPtr, entNum,
-                            (const void *)frameInfoBuf, boneTagBuf,
-                            (const float *)boneQuatBuf,
-                            actionWeight, &boneCount);
-
-                        if (boneCache && boneCount > 0) {
-                            skinned_mesh.instantiate();
-                            int meshCount = Godot_Skel_GetMeshCount(tikiPtr);
-                            float tikiScale = Godot_Skel_GetScale(tikiPtr);
-
-                            for (int mesh = 0; mesh < meshCount; mesh++) {
-                                int surfCount = Godot_Skel_GetSurfaceCount(tikiPtr, mesh);
-                                for (int surf = 0; surf < surfCount; surf++) {
-                                    int numVerts = 0, numTris = 0;
-                                    Godot_Skel_GetSurfaceInfo(tikiPtr, mesh, surf,
-                                        &numVerts, &numTris,
-                                        nullptr, 0, nullptr, 0);
-                                    if (numVerts <= 0 || numTris <= 0) continue;
-
-                                    float *positions = (float *)malloc(numVerts * 3 * sizeof(float));
-                                    float *normals   = (float *)malloc(numVerts * 3 * sizeof(float));
-                                    float *texcoords = (float *)malloc(numVerts * 2 * sizeof(float));
-                                    int   *indices   = (int *)malloc(numTris * 3 * sizeof(int));
-
-                                    if (!positions || !normals || !texcoords || !indices) {
-                                        ::free(positions); ::free(normals);
-                                        ::free(texcoords); ::free(indices);
-                                        continue;
-                                    }
-
-                                    // Get skinned positions + normals
-                                    if (!Godot_Skel_SkinSurface(tikiPtr, mesh, surf,
-                                            boneCache, boneCount,
-                                            positions, normals)) {
-                                        ::free(positions); ::free(normals);
-                                        ::free(texcoords); ::free(indices);
-                                        continue;
-                                    }
-
-                                    // Get UVs + indices from static data
-                                    Godot_Skel_GetSurfaceVertices(tikiPtr, mesh, surf,
-                                        nullptr, nullptr, texcoords);
-                                    Godot_Skel_GetSurfaceIndices(tikiPtr, mesh, surf,
-                                        indices);
-
-                                    // Build Godot arrays with coord conversion
-                                    PackedVector3Array gPos, gNrm;
-                                    PackedVector2Array gUVs;
-                                    PackedInt32Array   gIdx;
-                                    gPos.resize(numVerts);
-                                    gNrm.resize(numVerts);
-                                    gUVs.resize(numVerts);
-                                    gIdx.resize(numTris * 3);
-
-                                    for (int v = 0; v < numVerts; v++) {
-                                        Vector3 p = id_to_godot_point(
-                                            positions[v*3+0],
-                                            positions[v*3+1],
-                                            positions[v*3+2])
-                                            * tikiScale * MOHAA_UNIT_SCALE;
-                                        Vector3 n = id_to_godot_point(
-                                            normals[v*3+0],
-                                            normals[v*3+1],
-                                            normals[v*3+2]);
-                                        if (n.length_squared() > 0.001f)
-                                            n = n.normalized();
-
-                                        gPos.set(v, p);
-                                        gNrm.set(v, n);
-                                        gUVs.set(v, Vector2(
-                                            texcoords[v*2+0],
-                                            texcoords[v*2+1]));
-                                    }
-
-                                    // Reverse winding (id CW → Godot CCW)
-                                    for (int t = 0; t < numTris; t++) {
-                                        gIdx.set(t*3+0, indices[t*3+0]);
-                                        gIdx.set(t*3+1, indices[t*3+2]);
-                                        gIdx.set(t*3+2, indices[t*3+1]);
-                                    }
-
-                                    Array arrays;
-                                    arrays.resize(Mesh::ARRAY_MAX);
-                                    arrays[Mesh::ARRAY_VERTEX] = gPos;
-                                    arrays[Mesh::ARRAY_NORMAL] = gNrm;
-                                    arrays[Mesh::ARRAY_TEX_UV] = gUVs;
-                                    arrays[Mesh::ARRAY_INDEX]  = gIdx;
-                                    skinned_mesh->add_surface_from_arrays(
-                                        Mesh::PRIMITIVE_TRIANGLES, arrays);
-
-                                    ::free(positions);
-                                    ::free(normals);
-                                    ::free(texcoords);
-                                    ::free(indices);
-                                }
-                            }
-
-                            ::free(boneCache);
-                        }
-
-                        // Phase 60: Cache the newly built skinned mesh
-                        if (skinned_mesh.is_valid() && skinned_mesh->get_surface_count() > 0) {
-                            auto &entry = skel_mesh_cache[entNum];
-                            entry.anim_hash = anim_hash;
-                            entry.mesh = skinned_mesh;
-                            entry.mesh_surfaces = skinned_mesh->get_surface_count();
-                        }
-                    }  // end else (cache miss)
-                }
-
-                // Use skinned mesh if available, else cached bind pose
-                bool mesh_changed = false;
-                if (skinned_mesh.is_valid() &&
-                    skinned_mesh->get_surface_count() > 0) {
-                    mi->set_mesh(skinned_mesh);
-                    mesh_changed = true;
-
-                    static bool logged_skin = false;
-                    if (!logged_skin) {
-                        UtilityFunctions::print(
-                            String("[MoHAA] First CPU-skinned entity rendered (") +
-                            String::num_int64(skinned_mesh->get_surface_count()) +
-                            String(" surfaces)."));
-                        logged_skin = true;
-                    }
-                } else if (mi->get_mesh() != cached->mesh) {
-                    mi->set_mesh(cached->mesh);
-                    mesh_changed = true;
-                }
-
-                // Apply cached materials (after set_mesh which clears overrides)
-                if (mesh_changed) {
-                    auto &mats = mat_cache[hModel];
-                    int sc = mi->get_mesh().is_valid()
-                           ? mi->get_mesh()->get_surface_count() : 0;
-                    for (int s = 0; s < (int)mats.size() && s < sc; s++) {
-                        mi->set_surface_override_material(s, mats[s]);
-                    }
-                }
-            }
-        }  // end else (TIKI model)
-
-        // Position: convert id→Godot
-        Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
-
-        if (modType == 1 /* GR_MOD_BRUSH */) {
-            // Brush model vertices are at absolute BSP world coordinates.
-            // The entity's origin is an offset from the default position.
-            // Use identity basis (no scale/rotation) + position offset.
-            float *fwd = &axis[0];
-            float *lft = &axis[3];
-            float *up  = &axis[6];
-
-            Vector3 forward_g = id_to_godot_point(fwd[0], fwd[1], fwd[2]);
-            Vector3 left_g    = id_to_godot_point(lft[0], lft[1], lft[2]);
-            Vector3 up_g      = id_to_godot_point(up[0],  up[1],  up[2]);
-
-            Vector3 right_g = -left_g;
-            Vector3 back_g  = -forward_g;
-
-            Basis basis(right_g, up_g, back_g);
-            mi->set_global_transform(Transform3D(basis, pos));
-        } else {
-            // Orientation: convert axis vectors
-            float *fwd = &axis[0];
-            float *lft = &axis[3];
-            float *up  = &axis[6];
-
-            Vector3 forward_g = id_to_godot_point(fwd[0], fwd[1], fwd[2]);
-            Vector3 left_g    = id_to_godot_point(lft[0], lft[1], lft[2]);
-            Vector3 up_g      = id_to_godot_point(up[0],  up[1],  up[2]);
-
-            Vector3 right_g = -left_g;
-            Vector3 back_g  = -forward_g;
-
-            // Apply entity scale (entity-level only — MOHAA_UNIT_SCALE is
-            // already baked into the mesh vertices by godot_skel_model.cpp)
-            float s = (scale > 0.001f ? scale : 1.0f);
-
-            Basis basis(right_g * s, up_g * s, back_g * s);
-            mi->set_global_transform(Transform3D(basis, pos));
-        }
-
-        // ── Phase 15: Depth hack for first-person / depthhack entities ──
-        // These entities (view weapon, damage blobs) must render on top of
-        // world geometry.  We disable depth testing on their materials and
-        // give them a high render priority so they draw last.
-        if (is_first_person || is_depthhack) {
-            Ref<Mesh> mesh = mi->get_mesh();
-            if (mesh.is_valid()) {
-                int sc = mesh->get_surface_count();
-                for (int s = 0; s < sc; s++) {
-                    Ref<Material> base_mat = mi->get_surface_override_material(s);
-                    if (base_mat.is_null())
-                        base_mat = mesh->surface_get_material(s);
-
-                    Ref<StandardMaterial3D> smat = base_mat;
-                    if (smat.is_valid()) {
-                        // Duplicate to avoid modifying the cached original
-                        Ref<StandardMaterial3D> dup = smat->duplicate();
-                        dup->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
-                        dup->set_render_priority(127);  // max priority → draw last
-                        mi->set_surface_override_material(s, dup);
-                    }
-                }
-            }
-
-            // One-time diagnostic
-            static bool logged_fp = false;
-            if (!logged_fp) {
-                UtilityFunctions::print(
-                    String("[MoHAA] First-person entity rendered: hModel=") +
-                    String::num_int64(hModel) +
-                    String(" renderfx=0x") + String::num_int64(renderfx, 16));
-                logged_fp = true;
-            }
-        }
-
-        // ── Phase 21+22+268: Entity colour tinting + alpha + entity lighting ──
-        // Apply shaderRGBA modulation when it's not opaque white.
-        // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
-        Color light_mul(1.0f, 1.0f, 1.0f, 1.0f);
-#ifdef HAS_ENTITY_LIGHTING_MODULE
-        {
-            // Determine lighting sample position in id Tech 3 coordinates
-            float light_pos[3] = { origin[0], origin[1], origin[2] };
-            // RF_LIGHTING_ORIGIN (0x0080): sample at lightingOrigin instead
-            if (renderfx & 0x0080) {
-                Godot_Renderer_GetEntityLightingOrigin(i, light_pos);
-            }
+            // Phase 63+64: Combined lightgrid + dynamic light sampling
             float lr, lg, lb;
-            Godot_EntityLight_Combined(light_pos, 4, &lr, &lg, &lb); // 4 closest dlights per entity
+            float sample_origin[3] = { origin[0], origin[1], origin[2] };
+            Godot_EntityLight_Combined(sample_origin, 4 /* max dlights per entity */, &lr, &lg, &lb);
             light_mul = Color(lr, lg, lb, 1.0f);
         }
 #else
@@ -2657,6 +1677,18 @@ void MoHAARunner::setup_audio() {
     music_player->set_bus(StringName("Master"));
     add_child(music_player);
     UtilityFunctions::print("[MoHAA] Music player initialised.");
+
+    // ── Phase 45: Initialise ubersound alias system ──
+#ifdef HAS_UBERSOUND_MODULE
+    Godot_Ubersound_Init();
+    UtilityFunctions::print(String("[MoHAA] Ubersound initialised: ") +
+                            String::num_int64(Godot_Ubersound_GetAliasCount()) + " aliases.");
+#endif
+
+    // ── Phase 48: Enable sound occlusion ──
+#ifdef HAS_SOUND_OCCLUSION_MODULE
+    Godot_SoundOcclusion_SetEnabled(1);
+#endif
 }
 
 Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
@@ -2681,6 +1713,24 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
         snprintf(prefixed, sizeof(prefixed), "sound/%s", snd_name);
         len = Godot_VFS_ReadFile(prefixed, &buf);
     }
+
+    // ── Phase 45: Try ubersound alias resolution if direct load failed ──
+#ifdef HAS_UBERSOUND_MODULE
+    if (len <= 0 && Godot_Ubersound_IsLoaded()) {
+        char resolved_path[512];
+        float vol, mindist, maxdist, pitch;
+        int channel;
+        if (Godot_Ubersound_Resolve(snd_name, resolved_path, sizeof(resolved_path),
+                                     &vol, &mindist, &maxdist, &pitch, &channel)) {
+            len = Godot_VFS_ReadFile(resolved_path, &buf);
+            if (len <= 0 && strncmp(resolved_path, "sound/", 6) != 0) {
+                char prefixed[512];
+                snprintf(prefixed, sizeof(prefixed), "sound/%s", resolved_path);
+                len = Godot_VFS_ReadFile(prefixed, &buf);
+            }
+        }
+    }
+#endif
 
     if (len <= 0 || !buf) {
         // Cache a null ref so we don't keep retrying
@@ -2901,6 +1951,18 @@ void MoHAARunner::update_audio(double delta) {
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
             float vol_db = (volume > 0.001f) ? (20.0f * log10f(volume)) : -80.0f;
+#ifdef HAS_SOUND_OCCLUSION_MODULE
+            {
+                // Phase 48: Apply sound occlusion attenuation for 3D sounds
+                float lo[3], la[9]; int lent;
+                Godot_Sound_GetListener(lo, la, &lent);
+                float occ = Godot_SoundOcclusion_Check(lo[0], lo[1], lo[2],
+                                                        origin[0], origin[1], origin[2]);
+                if (occ < 1.0f) {
+                    vol_db += 20.0f * log10f(occ > 0.001f ? occ : 0.001f);
+                }
+            }
+#endif
             p->set_volume_db(vol_db);
             p->set_pitch_scale(pitch > 0.01f ? pitch : 1.0f);
             float max_m = (maxDist > 0) ? (maxDist * MOHAA_UNIT_SCALE) : 50.0f;
@@ -3391,11 +2453,40 @@ void MoHAARunner::_process(double delta) {
     Com_Frame();
     godot_jmpbuf_valid = false;
 
+    // ── Phase 85: Begin per-frame render statistics ──
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_RenderStats_BeginFrame();
+#endif
+
+    // ── Phase 48: Poll UI state from engine keyCatchers ──
+#ifdef HAS_UI_SYSTEM_MODULE
+    Godot_UI_Update();
+    // Toggle mouse cursor visibility based on UI state
+    if (Godot_UI_ShouldShowCursor()) {
+        if (mouse_captured) {
+            Input::get_singleton()->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
+            mouse_captured = false;
+        }
+    } else {
+        if (!mouse_captured) {
+            Input::get_singleton()->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
+            mouse_captured = true;
+        }
+    }
+#endif
+
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
 
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
+
+    // ── Phase 62: Sync weapon viewport camera each frame ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    if (Godot_WeaponViewport::get().is_created()) {
+        Godot_WeaponViewport::get().sync_camera();
+    }
+#endif
 
     // ── Update entity debug meshes from captured render data (Phase 7e) ──
     update_entities();
@@ -3410,6 +2501,11 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update audio from captured sound events (Phase 8) ──
     update_audio(delta);
+
+    // ── Phase 47: Update speaker entity sounds ──
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+    Godot_Speakers_Update((float)delta);
+#endif
 
     // ── Update cinematic video display (Phase 11) ──
     update_cinematic();
@@ -3426,6 +2522,21 @@ void MoHAARunner::_process(double delta) {
 #endif
 #ifdef HAS_DEBUG_RENDER_MODULE
     Godot_DebugRender_Update(delta);
+#endif
+
+    // ── Phase 60/61: Evict stale mesh and material cache entries ──
+#ifdef HAS_MESH_CACHE_MODULE
+    {
+        static uint64_t frame_counter = 0;
+        frame_counter++;
+        Godot_MeshCache::get().evict_stale(frame_counter);
+        Godot_MaterialCache::get().evict_stale(frame_counter);
+    }
+#endif
+
+    // ── Phase 85: End per-frame render statistics ──
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_RenderStats_EndFrame();
 #endif
 
     // ── Update game flow state machine (Phase 261) ──
@@ -3996,6 +3107,15 @@ void MoHAARunner::close_menu() {
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (!initialized) return;
 
+    // ── Phase 48: UI input routing ──
+    // When the engine's UI is active (menus, console, chat), route input
+    // through the UI handlers instead of direct engine injection.
+#if defined(HAS_UI_INPUT_MODULE) && defined(HAS_UI_SYSTEM_MODULE)
+    bool ui_captures = Godot_UI_ShouldCaptureInput() != 0;
+#else
+    bool ui_captures = false;
+#endif
+
     // ── Keyboard events ──
     InputEventKey *key_event = Object::cast_to<InputEventKey>(p_event.ptr());
     if (key_event) {
@@ -4018,6 +3138,22 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         }
 
         if (godot_key != 0) {
+#ifdef HAS_UI_INPUT_MODULE
+            if (ui_captures) {
+                // Route key events through UI system (menus, console, chat)
+                if (!echo) {
+                    Godot_UI_HandleKeyEvent(godot_key, pressed ? 1 : 0);
+                }
+                // Route character events for text input (console, chat)
+                if (pressed || echo) {
+                    int64_t unicode = key_event->get_unicode();
+                    if (unicode > 0) {
+                        Godot_UI_HandleCharEvent((int)unicode);
+                    }
+                }
+                return;
+            }
+#endif
             // Send SE_KEY for initial press and release (not for echoes)
             // The engine tracks key state internally and handles its own repeat.
             if (!echo) {
@@ -4049,6 +3185,14 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     // ── Mouse motion ──
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
+#ifdef HAS_UI_INPUT_MODULE
+        if (ui_captures) {
+            // Route mouse motion to UI system for menu navigation
+            Vector2 rel = motion_event->get_relative();
+            Godot_UI_HandleMouseMotion((int)rel.x, (int)rel.y);
+            return;
+        }
+#endif
         // Only forward mouse motion when captured (in-game mode)
         if (mouse_captured) {
             Vector2 rel = motion_event->get_relative();
@@ -4062,6 +3206,14 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (button_event) {
         int godot_button = (int)button_event->get_button_index();
         bool pressed = button_event->is_pressed();
+
+#ifdef HAS_UI_INPUT_MODULE
+        if (ui_captures) {
+            // Route mouse buttons to UI system
+            Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
+            return;
+        }
+#endif
 
         // Regular buttons: send press and release
         if (godot_button >= 1 && godot_button <= 3) {
