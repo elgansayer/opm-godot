@@ -1871,3 +1871,25 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 56: Cinematic Playback Stub ✅
+- [x] **Task 56.1:** Created `godot_cinematic.cpp` / `godot_cinematic.h` — standalone cinematic skip-hint overlay module.
+- [x] **Task 56.2:** Detects cinematic playback via existing `Godot_Renderer_IsCinematicActive()` accessor (reads `gr_cin_active` flag set by `GR_DrawStretchRaw` in `godot_renderer.c`).
+- [x] **Task 56.3:** Fullscreen black `ColorRect` on `CanvasLayer` z_index 200 (above HUD and cinematic frame display).
+- [x] **Task 56.4:** "Press ESC to skip" label centred at bottom with smooth alpha pulse animation.
+- [x] **Task 56.5:** Overlay auto-shows when cinematic starts, auto-hides when cinematic ends.
+- [x] **Task 56.6:** No CIN_* stubs needed — real RoQ decoder in `cl_cin.cpp` handles all cinematic functions.
+
+### Key technical details (Phase 56):
+- Public API: `Godot_Cinematic_Init(Node*)`, `Godot_Cinematic_Update(delta)`, `Godot_Cinematic_Shutdown()`, `Godot_Cinematic_IsActive()`
+- The overlay complements MoHAARunner's Phase 11 cinematic frame display (layer 11) by adding the skip hint on layer 200
+- ESC key input is already handled by the engine's `SCR_StopCinematic()` path — no additional input injection needed
+- Label alpha oscillates between 0.3 and 1.0 at 2.5 rad/s using `sinf()`
+- Auto-discovered by SConstruct's recursive source walk of `code/godot/`
+
+### Files created (Phase 56):
+- `code/godot/godot_cinematic.cpp` — Cinematic skip-hint overlay implementation
+- `code/godot/godot_cinematic.h` — Public API header
+
+### Files modified (Phase 56):
+- `TASKS.md` — Added Phase 56 documentation
