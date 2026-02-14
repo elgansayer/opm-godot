@@ -2525,3 +2525,23 @@ Full integration of all standalone agent modules into MoHAARunner.cpp.
 - `code/godot/MoHAARunner.cpp` — integrated all module hooks (262 lines added)
 - `code/godot/godot_bsp_mesh.h` — added `Godot_BSP_GetEntityString()` declaration
 - `code/godot/godot_bsp_mesh.cpp` — added `Godot_BSP_GetEntityString()` implementation
+
+## Phase 59: MoHAARunner UI System Integration ✅
+- [x] **Task 59.1:** Added `extern "C"` declarations for all `Godot_UI_*` and `Godot_ResetMousePosition` functions in MoHAARunner.cpp (guarded with `#ifndef HAS_UI_SYSTEM_MODULE` / `HAS_UI_INPUT_MODULE` to avoid conflicts when headers are available).
+- [x] **Task 59.2:** Call `Godot_UI_Update()` each frame in `_process()` immediately after `Com_Frame()` — polls engine keyCatchers and updates the UI state machine.
+- [x] **Task 59.3:** Cursor management: `Godot_UI_ShouldShowCursor()` checked each frame — toggles between `MOUSE_MODE_VISIBLE` (UI active) and `MOUSE_MODE_CAPTURED` (game mode). Calls `Godot_ResetMousePosition()` on transitions to prevent cursor jumps.
+- [x] **Task 59.4:** `_unhandled_input()` now checks `Godot_UI_ShouldCaptureInput()` — routes keyboard, mouse button, mouse motion, and character events through `Godot_UI_Handle*()` when UI is active; falls through to direct `Godot_Inject*()` for game mode.
+- [x] **Task 59.5:** `check_world_load()` calls `Godot_UI_OnMapLoad()` when a new BSP load begins — activates `GODOT_UI_LOADING` state in the UI state machine.
+- [x] **Task 59.6:** Removed hardcoded input-fix logic in `_process()` (forcible keyCatcher clearing, ForceUnpause) — now superseded by the UI state machine's automatic cursor/input mode management.
+- [x] **Task 59.7:** Added `last_ui_cursor_shown` tracking member to MoHAARunner to detect cursor state transitions and avoid redundant mode switches.
+
+### Key technical details (Phase 59):
+- UI state machine (`godot_ui_system.cpp`) polls `Godot_Client_GetKeyCatchers()` each frame via `Godot_UI_Update()` and derives the UI state (NONE, MAIN_MENU, CONSOLE, LOADING, SCOREBOARD, MESSAGE)
+- Input routing is decided once per event in `_unhandled_input()` — the `Godot_UI_Handle*()` functions internally delegate to the same `Godot_Inject*()` calls but mark events as consumed
+- The engine's own key dispatch in `cl_keys.c` routes events to `Console_Key()`, `UI_KeyEvent()`, `Message_Key()`, or `CG_KeyEvent()` based on the keyCatchers flags — the UI input module does not bypass this
+- Mouse mode transitions use `Godot_ResetMousePosition()` to clear absolute mouse tracking state in `godot_input_bridge.c`, preventing position jumps when switching between UI (absolute) and game (relative) input modes
+- Background rendering (item 3 above) and dedicated UI CanvasLayer (item 5) remain as future work — the engine's 2D command buffer already captures background/loading screen content
+
+### Files modified (Phase 59):
+- `code/godot/MoHAARunner.cpp` — UI update, cursor management, input routing, map load notification
+- `code/godot/MoHAARunner.h` — added `last_ui_cursor_shown` member
