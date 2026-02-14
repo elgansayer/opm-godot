@@ -3,7 +3,7 @@
  * Provides a pooled system for two weapon-related visual effects:
  *
  *  1. Muzzle flashes: short-lived billboard sprites with additive blending
- *     and a warm OmniLight3D that fades over ~0.05–0.1 seconds.
+ *     and a warm OmniLight3D that fades over ~0.08 seconds.
  *
  *  2. Shell casings: small brass-coloured cylinder meshes ejected with
  *     parabolic trajectories, spin, a single bounce, and a 2-second fade.

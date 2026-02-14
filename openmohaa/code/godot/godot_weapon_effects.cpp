@@ -3,7 +3,7 @@
  * Implements two pooled visual-effect systems driven by the weapon code:
  *
  *  • Muzzle flashes — billboard quad (additive blending, bright yellow-white)
- *    plus a short-lived OmniLight3D (warm yellow, ~3 m range, 0.05 s).
+ *    plus a short-lived OmniLight3D (warm yellow, ~3 m range, 0.08 s).
  *    Pool of 8 slots recycled in ring-buffer order.
  *
  *  • Shell casings — small brass-coloured cylinder MeshInstance3D ejected
@@ -30,6 +30,7 @@
 #include <godot_cpp/variant/vector3.hpp>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 
 using namespace godot;
 
@@ -138,6 +139,9 @@ void Godot_WeaponEffects_Init(Node3D *parent) {
     if (!s_parent) {
         return;
     }
+
+    /* — seed random for spin axis variation — */
+    srand(static_cast<unsigned>(time(nullptr)));
 
     /* — shared materials — */
     s_flash_material = make_flash_material();
