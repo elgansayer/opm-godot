@@ -2101,3 +2101,25 @@ Implemented BSP lightmap style support.  MOHAA maps can have up to 4 lightmap st
 - `code/godot/godot_draw_distance_accessors.c` — C accessor layer (~90 lines)
 - `code/godot/godot_draw_distance.h` — public API header
 - `code/godot/godot_draw_distance.cpp` — draw distance manager (~140 lines)
+
+## Phase 84: Debug Rendering ✅
+
+Implements developer debug overlays controlled by engine cvars:
+
+- **r_showtris** — toggles viewport wireframe debug draw (`Viewport::DEBUG_DRAW_WIREFRAME`)
+- **r_shownormals** — draws entity orientation axes as coloured lines at entity origins using `ImmediateMesh` (blue forward axis, max 32 entities, distance-culled to 20m)
+- **r_speeds** — displays per-frame stats overlay on `CanvasLayer` (z=150): FPS, entity counts (total/skeletal/static), mesh cache hit rate, draw calls, polygon estimate. Updated every 10 frames for readability.
+- **r_lockpvs** — accessor exposed (PVS freeze logic is in the BSP culling path)
+- **r_showbbox** — draws wireframe bounding boxes around entities using `ImmediateMesh` with `PRIMITIVE_LINES` (green=static, yellow=dynamic)
+
+All cvars are read via thin C accessor functions (`godot_debug_render_accessors.c`) using `Cvar_Get()` with `CVAR_CHEAT` flag, matching upstream renderer behaviour. The C++ manager (`godot_debug_render.cpp`) creates and manages Godot scene nodes (CanvasLayer, Label, MeshInstance3D pools) without modifying MoHAARunner.
+
+### Files created:
+- `code/godot/godot_debug_render_accessors.c` — C cvar accessors for r_showtris, r_shownormals, r_speeds, r_lockpvs, r_showbbox
+- `code/godot/godot_debug_render.h` — Public API: Init/Update/Shutdown + extern "C" accessor declarations
+- `code/godot/godot_debug_render.cpp` — Debug render manager: wireframe toggle, stats overlay, normal lines, bbox wireframes
+
+### MoHAARunner Integration Required:
+1. **In `_ready()`:** Call `Godot_DebugRender_Init(this)` after 3D scene setup.
+2. **In `_process()`:** Call `Godot_DebugRender_Update(delta)` each frame.
+3. **In destructor/map unload:** Call `Godot_DebugRender_Shutdown()`.
