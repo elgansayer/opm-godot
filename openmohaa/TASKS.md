@@ -2173,3 +2173,27 @@ All cvars are read via thin C accessor functions (`godot_debug_render_accessors.
 ### Files created (Phase 241):
 - `code/godot/godot_anim_blend.h` — public API (AnimBlendInput, AnimBlendValidation, 5 exported functions)
 - `code/godot/godot_anim_blend.cpp` — implementation (extraction, validation, bone computation, debug logging)
+
+## Phase 251: Transparent Sort Order ✅
+
+- [x] **Task 251.1:** Created `godot_render_sort.h` with `SortableEntity` struct and public API (`Init`, `SortEntities`, `ApplyPriority`, `Shutdown`).
+- [x] **Task 251.2:** Implemented sort comparator: primary key = shader sort value (ascending), secondary key = camera distance (front-to-back for opaque, back-to-front for transparent/additive).
+- [x] **Task 251.3:** Implemented Godot `render_priority` mapping: opaque → 0, transparent → 1–100 (distance-based), additive → 101–127.
+- [x] **Task 251.4:** `Godot_RenderSort_ApplyPriority()` iterates surface override materials on a `MeshInstance3D` and sets `render_priority` per the distance mapping.
+
+### Key technical details (Phase 251):
+- Sort keys from `.shader` files parsed by `godot_shader_props.cpp` (`sort_key` field in `GodotShaderProps`): 0=portal, 2=opaque, 6=decal, 8=see-through, 9=banner, 12=underwater, 14–15=blend, 16=additive.
+- Transparent surfaces (sort_key > 2) are rendered back-to-front: furthest entities get the lowest `render_priority` (rendered first), nearest get the highest (rendered last).
+- Additive surfaces (sort_key ≥ 16) are placed in the 101–127 priority range, ensuring they render after all standard transparents.
+- Distance normalisation uses a max squared distance of 64 516 m² (~254 m, or ~10 000 id units) — entities beyond this all receive minimum priority.
+- `std::sort` with a custom comparator handles the two-level sort (sort_key then distance).
+
+### MoHAARunner Integration Required (Phase 251):
+1. In `update_entities()`, after building the entity list, construct a `SortableEntity` array for transparent entities.
+2. Call `Godot_RenderSort_SortEntities()` with the camera position to sort the array.
+3. For each entity, call `Godot_RenderSort_ApplyPriority(mesh, sort_key, distance_sq)` to set `render_priority` on the `MeshInstance3D`.
+4. Only entities with `TRANSPARENCY_ALPHA` or `TRANSPARENCY_ALPHA_DEPTH_PRE_PASS` materials need sorting.
+
+### Files created (Phase 251):
+- `code/godot/godot_render_sort.h` — Public API: `SortableEntity`, sort key thresholds, function declarations (~105 lines)
+- `code/godot/godot_render_sort.cpp` — Sort + priority implementation (~170 lines)
