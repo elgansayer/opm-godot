@@ -1714,7 +1714,7 @@ void MoHAARunner::update_entities() {
             // Phase 63+64: Combined lightgrid + dynamic light sampling
             float lr, lg, lb;
             float sample_origin[3] = { origin[0], origin[1], origin[2] };
-            Godot_EntityLight_Combined(sample_origin, 4, &lr, &lg, &lb);
+            Godot_EntityLight_Combined(sample_origin, 4 /* max dlights per entity */, &lr, &lg, &lb);
             light_mul = Color(lr, lg, lb, 1.0f);
         }
 #else
