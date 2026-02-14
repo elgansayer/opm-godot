@@ -1871,3 +1871,47 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 96-98: SP Features Audit ✅
+
+Audited single-player campaign features: scripted camera cutscenes, NPC AI
+pathfinding, and save/load game functionality.
+
+### Script camera (cutscenes)
+- [x] `Camera` class exists in `camera.cpp` / `camera.h` with `CameraThink`, `CameraMoveState`, BSpline interpolation.
+- [x] Letterbox mode tracked via `level.m_letterbox_fraction` / `m_letterbox_dir`; exposed to clients through `STAT_LETTERBOX`.
+- [x] `STAT_CINEMATIC` carries bit 0 (`level.cinematic`) and bit 1 (`actor_camera`).
+- [x] Script commands (`cam setpath`, `cam follow`, `cam setfov`) handled via the event/listener system.
+- [x] No `#ifdef GODOT_GDEXTENSION` guards needed — camera code compiles as-is.
+
+### NPC AI
+- [x] `Actor` class hierarchy (`Actor → SimpleActor → Sentient → Animate → Entity → Listener`) compiles.
+- [x] `Actor::Think()` / `IdleThink()` / `Think_Idle()` state machine present with 56+ actor flags.
+- [x] `PathSearch` grid-based navigation in `navigate.cpp` (MOHAA's own pathfinding, not Recast/Detour).
+- [x] Combat AI: spot enemy, take cover, shoot, flee — implemented via actor state machine.
+- [x] No header conflicts under `GODOT_GDEXTENSION`.
+
+### Recast/Detour
+- [x] Recast/Detour source in `code/thirdparty/recast-detour/` compiles.
+- [x] MOHAA primarily uses its own `PathSearch` grid; Recast/Detour is available but secondary.
+
+### Save/Load
+- [x] `SV_SaveGame()` / `SV_Loadgame_f()` in `sv_ccmds.c` serialise entity states, player inventory, script threads.
+- [x] Save files: `.ssv` (server), `.sav` (level), `.spv` (persistant), `.tga` (screenshot).
+- [x] `SV_AllowSaveGame()` guarded by `#ifndef DEDICATED` — always returns `qfalse` under Godot build (DEDICATED defined). New `Godot_SP_CanSave()` accessor reimplements checks without that guard.
+- [x] Memory safety: `gi_Malloc_Safe`/`gi_Free_Safe` already applied in allocator sites reachable from save/load paths.
+
+### Accessor files created
+- `code/godot/godot_game_sp.h` — declarations for 5 SP state accessors.
+- `code/godot/godot_game_sp.c` — implementations:
+  - `Godot_SP_IsCutsceneActive()` — reads `STAT_CINEMATIC` and `STAT_LETTERBOX` from first client.
+  - `Godot_SP_GetObjectiveCount()` — stub (objectives live in C++ entity layer).
+  - `Godot_SP_GetObjectiveComplete(i)` — stub (same reason).
+  - `Godot_SP_CanSave()` — mirrors `SV_AllowSaveGame` logic, works under `GODOT_GDEXTENSION`.
+  - `Godot_SP_CanLoad()` — checks for quick-save `.ssv` file via `FS_ReadFileEx`.
+
+### #ifdef audit
+- [x] `SV_AllowSaveGame` in `sv_ccmds.c` uses `#ifndef DEDICATED` — entire body compiled out under Godot. New accessor provides equivalent checks.
+- [x] `g_main.h` already has `gi_Malloc_Safe`/`gi_Free_Safe` guards for allocator teardown.
+- [x] Actor AI headers compile without conflicts under `GODOT_GDEXTENSION`.
+- [x] Recast/Detour compiles under `GODOT_GDEXTENSION` with no issues.
