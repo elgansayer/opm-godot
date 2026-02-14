@@ -1871,3 +1871,28 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 221: VFX Manager Foundation ✅
+
+- [x] **Task 221.1:** Created `code/godot/godot_vfx_accessors.c` — C accessor layer that filters `gr_entities[]` for `RT_SPRITE` entities via the existing `Godot_Renderer_GetEntity()` / `Godot_Renderer_GetEntitySprite()` accessors. Provides `Godot_VFX_GetSpriteCount()` (scans and caches sprite indices) and `Godot_VFX_GetSprite()` (returns origin, radius, resolved shader handle, rotation, RGBA).
+- [x] **Task 221.2:** Created `code/godot/godot_vfx.h` — public API header declaring the C++ management functions (`Godot_VFX_Init`, `Godot_VFX_Update`, `Godot_VFX_Shutdown`, `Godot_VFX_Clear`) and C-linkage accessor prototypes.
+- [x] **Task 221.3:** Created `code/godot/godot_vfx.cpp` — VFX manager with a pool of 512 `MeshInstance3D` billboard quads. Each frame: reads sprites via accessor → assigns to pool slots → applies `StandardMaterial3D` with `BILLBOARD_ENABLED`, `TRANSPARENCY_ALPHA`, unshaded, no depth write. Texture loaded from VFS (TGA/JPG/PNG) with shader remap support and caching. Unused slots hidden. `Godot_VFX_Clear()` hides all on map change.
+
+### Key technical details (Phase 221):
+- **Coordinate conversion:** id Tech 3 (X-fwd, Y-left, Z-up, inches) → Godot (X-right, Y-up, -Z-fwd, metres) via `MOHAA_UNIT_SCALE = 1/39.37`
+- **Shared unit quad mesh:** All pool slots share a single 1×1 `ArrayMesh` quad; per-sprite size is applied via node scale (`radius × 2 × MOHAA_UNIT_SCALE`)
+- **Texture cache:** `std::unordered_map<int, Ref<ImageTexture>>` keyed by shader handle, with VFS loading and magic-byte format detection (mirrors `MoHAARunner::get_shader_texture`)
+- **Shader resolve:** `customShader` takes priority over `hModel`; shader remap applied via `Godot_Renderer_GetShaderRemap()`
+- **No shadows:** Pool nodes use `SHADOW_CASTING_SETTING_OFF` — sprites are VFX, not geometry
+- **Build integration:** Files are automatically included via recursive `add_sources("code/godot")` in SConstruct — no build system changes needed
+
+### Files created (Phase 221):
+- `code/godot/godot_vfx_accessors.c` — C accessor: sprite filter + data extraction
+- `code/godot/godot_vfx.h` — public API declarations
+- `code/godot/godot_vfx.cpp` — VFX manager: sprite pool, lifecycle, update
+
+### MoHAARunner Integration Required (Phase 221):
+1. **In `_ready()` or `check_world_load()`:** Call `Godot_VFX_Init(game_world)` to create the sprite pool.
+2. **In `_process()`:** Call `Godot_VFX_Update(delta)` each frame to sync sprites.
+3. **On map change:** Call `Godot_VFX_Clear()` to hide all pool slots.
+4. **On shutdown:** Call `Godot_VFX_Shutdown()` to free pool nodes and caches.
