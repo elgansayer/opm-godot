@@ -1999,3 +1999,27 @@ each frame.  `Godot_Explosion_Shutdown()` on map unload or module teardown.
 ### Files created (Phase 224):
 - `code/godot/godot_weapon_effects.h` — public API: spawn/update/clear/init/cleanup
 - `code/godot/godot_weapon_effects.cpp` — muzzle flash pool (8 slots) + shell casing pool (32 slots) with physics simulation
+
+## Phase 227: Screen Effects ✅
+- [x] **Task 227.1:** Created `godot_screen_effects.h` — public API for damage flash, underwater tint, flash-bang, and pain flinch.
+- [x] **Task 227.2:** Created `godot_screen_effects.cpp` — screen effect manager with CanvasLayer (z_index 100) and independent ColorRect overlays.
+- [x] **Task 227.3:** Damage flash: red overlay (intensity × 0.4 alpha), additive stacking capped at 0.6, fades over 0.3s.
+- [x] **Task 227.4:** Underwater tint: persistent blue-green overlay (Color 0.0, 0.1, 0.3) with sine-wave alpha oscillation (0.25–0.35 at 0.5 Hz).
+- [x] **Task 227.5:** Flash-bang: white overlay fading over 2.0s, stacks with damage flash via separate ColorRect.
+- [x] **Task 227.6:** Pain flinch: temporary camera pitch offset with smooth interpolation back to zero over 0.2s.
+
+### Key technical details (Phase 227):
+- All overlays use a single `CanvasLayer` at z_index 100 with three independent `ColorRect` children
+- `MOUSE_FILTER_IGNORE` on all rects to avoid blocking input
+- `PRESET_FULL_RECT` anchor for automatic viewport fill
+- Pain flinch applies additive pitch rotation to camera (does not modify position)
+- Engine integration points: `v_dmg_time`/`v_dmg_pitch`/`v_dmg_roll` in cgame, `CG_PointContents()` for underwater detection
+
+### MoHAARunner Integration Required (Phase 227):
+1. Call `Godot_ScreenFX_Init()` once after scene setup
+2. Call `Godot_ScreenFX_Update(delta, camera)` each frame in `_process()`
+3. Call `Godot_ScreenFX_DamageFlash(intensity)` when damage is detected (via cgame `v_dmg_time` changes)
+4. Call `Godot_ScreenFX_UnderwaterTint(active)` based on camera position content test
+5. Call `Godot_ScreenFX_FlashBang(intensity)` when flash-bang event is detected
+6. Call `Godot_ScreenFX_PainFlinch(pitch_offset)` when `v_dmg_pitch` changes
+7. Call `Godot_ScreenFX_Shutdown()` on map unload or exit
