@@ -2238,3 +2238,64 @@ In `update_entities()`, for each entity:
 ### Files created
 - `code/godot/godot_frustum_cull.h`
 - `code/godot/godot_frustum_cull.cpp`
+
+## Phase 86: Player Movement Physics Audit ✅
+
+Audited player movement physics (`bg_pmove.cpp`, `bg_slidemove.cpp`, `bg_public.h`, `bg_local.h`, `player.cpp`, `playerbot.cpp`) for correctness under the `GODOT_GDEXTENSION` build. **No code changes required** — all movement code is architecture-agnostic.
+
+### 1. Gravity & sv_fps ✅
+- `pm->ps->gravity` correctly set from `sv_gravity` cvar in `player.cpp:4112`: `client->ps.gravity = sv_gravity->value * gravity` (entity gravity multiplier defaults to `1.0`).
+- `pml.frametime` derived from command timestamp delta (`pml.msec = pmove->cmd.serverTime - pm->ps->commandTime`), NOT hardcoded 20Hz. Frame step chopping via `pmove_fixed`/`pmove_msec` cvars (clamped 8–33ms).
+- `pm->ps->speed` set per stance in `player.cpp:4067–4099` using `sv_runspeed`, `sv_walkspeedmult`, `sv_crouchspeedmult`, weapon movement speed, zoom movement, and DM speed multiplier.
+
+### 2. Walk/Run/Sprint ✅
+- `PM_WalkMove()` (line 554): forward/backward via `PM_GetMove()` (applies `pm_backspeed` 0.80× and `pm_strafespeed` 0.85×), ground-plane projected, then `PM_Accelerate()` + `PM_StepSlideMove()`.
+- `PM_Accelerate()` (line 232): standard Quake-style model — `canPush = accel * frametime * wishspeed`.
+- `PM_Friction()` (line 166): ground friction `pm_friction=6.0`, slick `pm_slipperyfriction=0.25`, water friction scaled by `waterlevel`.
+- `BUTTON_RUN` flag distinguishes walking/running (line 572). `pm->ps->pm_time` accumulates while sprinting forward.
+
+### 3. Crouch/Prone ✅
+- `PM_CheckDuck()` (line 1014): sets `mins`/`maxs`/`viewheight` per `PMF_DUCKED`, `PMF_VIEW_PRONE`, `PMF_VIEW_DUCK_RUN`, `PMF_VIEW_JUMP_START` flags.
+- AA (protocol < MOHTA): full prone support (`PRONE_MAXS_Z=20`, `PRONE_VIEWHEIGHT=16`), crouch-run (`CROUCH_RUN_MAXS_Z=60`), crouch-prone (`CROUCH_MAXS_Z=54`, `CROUCH_VIEWHEIGHT=48`).
+- SH/BT (protocol >= MOHTA): prone removed — only crouch (`CROUCH_MAXS_Z=54`) and jump-start (`JUMP_START_VIEWHEIGHT=52`).
+- Stance flags set in `player.cpp:4039–4051` from actual `maxs.z` and `viewheight` values.
+
+### 4. Jump ✅
+- Jump initiation through player entity movement control (not in bg_pmove.cpp directly). `JUMP_VELOCITY=270` defined in `bg_local.h`.
+- `PM_AirMove()` (line 391): standard air acceleration (`pm_airaccelerate=1.0`), ground-plane clipping, step-slide.
+- `PM_CrashLand()` (line 746): fall damage from landing velocity delta — `EV_FALL_SHORT` (>20), `EV_FALL_MEDIUM` (>40), `EV_FALL_FAR` (>80), `EV_FALL_FATAL` (>100). Water reduces damage (×0.5 at level 1, ×0.25 at level 2). `SURF_NODAMAGE` surfaces skip damage.
+- `PM_CheckTerminalVelocity()` (line 295): triggers `EV_TERMINAL_VELOCITY` event when speed exceeds `TERMINAL_VELOCITY=1200`.
+- Double-jump prevention: `Pmove()` (line 1514) chops commands into ≤66ms steps; no explicit double-jump prevention in pmove — controlled by player entity movement state machine.
+
+### 5. Lean ✅
+- Lean handling in `PmoveSingle()` (lines 1349–1413): `BUTTON_LEAN_LEFT`/`BUTTON_LEAN_RIGHT` input.
+- Lean speed/recovery/max controlled by `pm->leanSpeed`, `pm->leanRecoverSpeed`, `pm->leanAdd`, `pm->leanMax` fields.
+- Lean restricted when moving (forward/right/up ≠ 0) unless `pm->alwaysAllowLean` (multiplayer DF_ALLOW_LEAN_MOVEMENT).
+- Camera offset via bone angles: `PmoveAdjustAngleSettings()` applies lean to pelvis (0.8×), torso (0.2×), arms tags.
+- Lean zeroed when dead, on ladder (`PM_CLIMBWALL`), or `PMF_NO_HUD` set.
+- No lean collision traces — lean is a camera/bone rotation effect, not a position shift.
+
+### 6. Water/Ladder ✅
+- `PM_SetWaterLevel()` (line 970): uses `pm->pointcontents()` for 3-level water detection (feet/waist/head).
+- Water movement: `PM_WalkMove()` scales `wishspeed` by 0.80 (level 1) or 0.50 (level 2+). `PM_Friction()` applies `pm_waterfriction=2.0` scaled by `waterlevel` (5× for slime).
+- `PM_WaterEvents()` (line 1153): generates `EV_WATER_TOUCH`/`LEAVE`/`UNDER`/`CLEAR` events.
+- Ladder: `PM_CLIMBWALL` pm_type (line 1323) — zeroes lean, restricts view angles via `PmoveAdjustViewAngleSettings_OnLadder()`.
+
+### 7. #ifdef / Build Configuration ✅
+- **No `#ifdef GODOT_GDEXTENSION`** guards in any `bg_*` files, `player.cpp`, or `playerbot.cpp` — none needed.
+- `GAME_DLL` defined in SConstruct (line 63) for main .so build. `bg_pmove.cpp` does not use `GAME_DLL` directly.
+- `bg_pmove.cpp` and `bg_slidemove.cpp` compiled into **both** main .so (`GAME_DLL`) and cgame.so (`CGAME_DLL`) per SConstruct lines 342–344.
+- `pm->trace` set to `gi.trace` (server game interface) in `Player::SetMoveInfo()` (line 3678). Never NULL at runtime — `gi` populated by `SV_InitGameProgs()`.
+- `pm->pointcontents` set to `gi.pointcontents` (line 3684). Never NULL at runtime.
+- Syntax-only compilation verified: both `bg_pmove.cpp` and `bg_slidemove.cpp` pass `g++ -fsyntax-only` with `GAME_DLL + GODOT_GDEXTENSION` and `CGAME_DLL` defines.
+
+### Files audited (Phase 86):
+- `code/fgame/bg_pmove.cpp` (1760 lines) — core movement physics
+- `code/fgame/bg_slidemove.cpp` (309 lines) — slide/step movement
+- `code/fgame/bg_public.h` — movement constants, pmove_t struct, PMF flags
+- `code/fgame/bg_local.h` — pml_t struct, local movement defines
+- `code/fgame/player.cpp` — Player::ClientMove(), SetMoveInfo(), GetMoveInfo()
+- `code/fgame/playerbot.cpp` — bot movement (uses same usercmd_t interface)
+
+### Files created (Phase 86):
+- None — no accessor files needed. Movement state is fully server-side and requires no Godot-side access.
