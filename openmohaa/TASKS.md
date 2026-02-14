@@ -1871,3 +1871,30 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 83: Draw Distance ✅
+- [x] **Task 83.1:** Created `godot_draw_distance_accessors.c` — C accessors for `r_znear`, `r_zfar`, `cg_farplane`, `cg_farplane_color`, `farplane_cull`.
+- [x] **Task 83.2:** Created `godot_draw_distance.h` — public API header (`Godot_DrawDistance_Init`, `Godot_DrawDistance_Update`, `Godot_DrawDistance_GetCullDistance`).
+- [x] **Task 83.3:** Created `godot_draw_distance.cpp` — draw distance manager: maps engine cvars to Camera3D near/far planes and Environment fog.
+- [x] **Task 83.4:** Near plane: `r_znear` (default 4 inches) converted to metres via `÷39.37`, applied to `camera->set_near()`.
+- [x] **Task 83.5:** Far plane: `cg_farplane` overrides `r_zfar`; converted to metres, applied to `camera->set_far()`. Default 1000m when both are 0.
+- [x] **Task 83.6:** Fog: when `cg_farplane > 0`, enables Environment fog with colour from `cg_farplane_color` and density `2.3/distance` for ~90% opacity at the far plane.
+- [x] **Task 83.7:** Far plane culling: `Godot_DrawDistance_GetCullDistance()` returns cull distance in metres when `farplane_cull=1`; MoHAARunner should check entity distance before spawning MeshInstance3D nodes.
+- [x] **Task 83.8:** Update frequency: cvars polled once per second via delta accumulator, not every frame.
+
+### Key technical details (Phase 83):
+- `r_znear` and `r_zfar` are read via `Cvar_Get()` (created with defaults if not already registered by the stub renderer)
+- `cg_farplane`, `farplane_color`, and `farplane_cull` are read from the per-frame refdef capture in `godot_renderer.c` via `Godot_Renderer_GetFarplane()`
+- Fog density formula: `exp(-density * dist) = 0.1` → `density = 2.3 / dist_metres`
+- Coordinate conversion: inches → metres via `INCHES_TO_METRES = 1/39.37`
+- Near plane clamped to minimum 0.001m to avoid rendering artefacts
+
+### MoHAARunner integration points (Phase 83):
+1. **In `_ready()`:** Call `Godot_DrawDistance_Init()` after engine initialisation.
+2. **In `_process()`:** Call `Godot_DrawDistance_Update(camera, env, delta)` each frame (internally rate-limited).
+3. **Entity culling:** Before spawning entity MeshInstance3D, call `Godot_DrawDistance_GetCullDistance()` — if > 0, skip entities beyond that distance from the camera.
+
+### Files created (Phase 83):
+- `code/godot/godot_draw_distance_accessors.c` — C accessor layer (~90 lines)
+- `code/godot/godot_draw_distance.h` — public API header
+- `code/godot/godot_draw_distance.cpp` — draw distance manager (~140 lines)
