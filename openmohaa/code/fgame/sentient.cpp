@@ -988,12 +988,13 @@ Item *Sentient::FindItemByExternalName(const char *itemname)
     num = inventory.NumObjects();
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
-        assert(item);
 #ifdef GODOT_GDEXTENSION
         // Fixed: G_GetEntity can return NULL for stale entity numbers.
         if (!item) {
             continue;
         }
+#else
+        assert(item);
 #endif
         if (!Q_stricmp(item->getName(), itemname)) {
             return item;
@@ -1018,11 +1019,12 @@ Item *Sentient::FindItemByModelname(const char *mdl)
     num = inventory.NumObjects();
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
-        assert(item);
 #ifdef GODOT_GDEXTENSION
         if (!item) {
             continue;
         }
+#else
+        assert(item);
 #endif
         if (!Q_stricmp(item->model, tmpmdl)) {
             return item;
@@ -1041,11 +1043,12 @@ Item *Sentient::FindItemByClassName(const char *classname)
     num = inventory.NumObjects();
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
-        assert(item);
 #ifdef GODOT_GDEXTENSION
         if (!item) {
             continue;
         }
+#else
+        assert(item);
 #endif
         if (!Q_stricmp(item->edict->entname, classname)) {
             return item;
