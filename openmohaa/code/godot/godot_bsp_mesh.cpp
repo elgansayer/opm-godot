@@ -877,7 +877,9 @@ static Ref<ArrayMesh> batches_to_array_mesh(
             /* ── ShaderMaterial path (multi-stage .shader) ── */
             Ref<ShaderMaterial> smat = Godot_Shader_BuildMaterial(sp);
             if (smat.is_valid()) {
-                // Bind per-stage texture uniforms
+                // Bind per-stage texture uniforms.
+                // Stage types are mutually exclusive: a stage is either an
+                // animMap sequence, a $lightmap, or a regular texture.
                 for (int si = 0; si < sp->stage_count; si++) {
                     const MohaaShaderStage *stage = &sp->stages[si];
                     String idx = String::num_int64(si);
