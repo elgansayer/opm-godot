@@ -1871,3 +1871,25 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 102: func_* Audit ✅
+- [x] **Task 102.1:** Audited all `func_*` entity types — 37 active entities registered via CLASS_DECLARATION, all fully implemented.
+- [x] **Task 102.2:** Verified door entities: `func_door` (SlidingDoor), `func_rotatingdoor` (RotatingDoor), `script_door` (ScriptDoor) — open/close/block/lock/sound all implemented.
+- [x] **Task 102.3:** Verified mover base: `Mover` class provides `MoveTo()`, `LinearInterpolate()`, `MoveDone()`, `Stop()` — core movement engine for all func_* movers.
+- [x] **Task 102.4:** Verified breakable/explodable entities: `func_explodingwall`, `func_exploder`, `func_multi_exploder`, `func_explodeobject`, `func_window`, `func_barrel`, `func_crate` — destruction, debris, and damage all implemented.
+- [x] **Task 102.5:** Verified vehicle entities: `script_vehicle` (Vehicle), `script_drivablevehicle` (DrivableVehicle) — enter/exit/physics all implemented.
+- [x] **Task 102.6:** Verified beam entity: `func_beam` (FuncBeam) — beam rendering, damage, shader configuration all implemented.
+- [x] **Task 102.7:** Verified miscellaneous func_* entities: ladders, monkey bars, push objects, spawners, cameras, emitters, rain, fulcrums, objectives — all implemented.
+- [x] **Task 102.8:** Confirmed legacy Q3 spawn table (`spawns[]`, `G_CallSpawn()`, `SP_func_*`) is disabled within `#if 0` block (g_spawn.cpp:607–1312) — no linker errors.
+- [x] **Task 102.9:** Confirmed BSP model accessors available: `Godot_BSP_GetBrushModelMesh()`, `Godot_BSP_GetInlineModelBounds()`, `Godot_BSP_MarkFragmentsForInlineModel()`.
+- [x] **Task 102.10:** Confirmed no `#ifdef GODOT_GDEXTENSION` guards needed in func_* files — pure game logic with no platform-specific behaviour.
+
+### Key technical details (Phase 102):
+- Entity spawning uses CLASS_DECLARATION macro system exclusively — `SpawnArgs::getClassDef()` resolves classID strings to C++ class definitions
+- Legacy Q3 C-style spawn table is dead code in `#if 0` block — MOHAA replaced it with object-oriented class registration
+- `func_breakable`, `func_explodable`, `func_vehicle`, `func_plat`, `func_train`, `func_rotating`, `func_pendulum` do not exist as CLASS_DECLARATION entries — MOHAA uses different classnames (see audit document for equivalents)
+- Door state machine: `STATE_CLOSED` → `STATE_OPENING` → `STATE_OPEN` → `STATE_CLOSING` → `STATE_CLOSED`
+- Movement pipeline: engine entity state → `godot_renderer.c` capture buffer → `MoHAARunner::update_entities()` → `MeshInstance3D` transform update
+
+### Files created (Phase 102):
+- `code/godot/godot_func_audit.md` — comprehensive audit of all 37 active func_* entities
