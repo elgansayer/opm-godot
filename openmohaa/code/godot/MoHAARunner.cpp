@@ -3966,6 +3966,8 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
                     Godot_UI_HandleMouseButton(godot_button, 1);
                     Godot_UI_HandleMouseButton(godot_button, 0);
                 }
+            } else if (godot_button == 8 || godot_button == 9) {
+                Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
             }
         } else {
             // Game mode: inject directly
