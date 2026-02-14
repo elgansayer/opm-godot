@@ -1871,3 +1871,21 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 39: Bullet Tracer Rendering & Debris System ✅
+Fixed critical poly rendering bug and enhanced effect rendering for tracers, beams, sprites, and debris.
+
+- [x] **Task 39.1:** Fix `GR_AddPolyToScene` — the 4th parameter is `renderfx` (render flags), not a poly count. The cgame passes `renderfx=0` for most polys, which caused zero polys to be added. Now always adds exactly one poly per call, matching the renderergl1 semantics.
+- [x] **Task 39.2:** Apply shader properties (additive blending, cull mode, etc.) to poly materials via `apply_shader_props_to_material()`. Tracers use the "tracer" shader which requires additive blending to glow.
+- [x] **Task 39.3:** Improve RT_BEAM billboard orientation — use `cross(beam_dir, camera_to_beam)` instead of `cross(beam_dir, world_up)`. This makes beams always face the camera, matching the original engine's beam rendering approach.
+- [x] **Task 39.4:** Remove `BILLBOARD_FIXED_Y` from RT_BEAM material — beam quads are now manually oriented in world space each frame, not relying on Godot's billboard mode. Added `DEPTH_DRAW_DISABLED` for proper transparency sorting.
+- [x] **Task 39.5:** Apply shader properties to RT_BEAM and RT_SPRITE materials for correct blend modes (additive for muzzle flash, tracers, etc.).
+
+### Key technical details (Phase 39):
+- **Root cause of missing tracers:** Bullet tracers flow through the poly pipeline (`CG_BulletTracerEffect` → `CG_CreateBeam` → `CG_AddBeams` → `CG_BuildRendererBeam` → `R_AddPolyToScene`), NOT through RT_BEAM entities. The `GR_AddPolyToScene` stub incorrectly treated the `renderfx` parameter as a loop count, so polys with `renderfx=0` were silently discarded.
+- **Debris rendering:** Debris entities are TIKI models (e.g. `obj_debris_metal1.tik`) spawned server-side and submitted as RT_MODEL entities through the normal entity pipeline. No specific debris code changes needed — they render through the existing skeletal model path once the poly/effect rendering is fixed.
+- **Camera-facing beams:** The beam quad perpendicular axis is now `cross(beam_direction, camera_to_beam_midpoint)`, which ensures the beam always faces the viewer regardless of viewing angle.
+
+### Files modified (Phase 39):
+- `code/godot/godot_renderer.c` — Fixed `GR_AddPolyToScene` to treat 4th param as `renderfx`, not poly count
+- `code/godot/MoHAARunner.cpp` — Applied shader properties to poly/beam/sprite materials; camera-facing beam orientation

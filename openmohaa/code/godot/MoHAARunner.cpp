@@ -1174,6 +1174,11 @@ void MoHAARunner::update_entities() {
                 if (tex.is_valid()) {
                     smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
                 }
+                // Apply shader properties (additive blending for muzzle flash, etc.)
+                const char *sn = Godot_Renderer_GetShaderName(spriteShader);
+                if (sn && sn[0]) {
+                    apply_shader_props_to_material(smat, sn);
+                }
             }
 
             mi->set_surface_override_material(0, smat);
@@ -1199,13 +1204,19 @@ void MoHAARunner::update_entities() {
                 continue;
             }
 
-            // Build a flat quad along the beam direction
-            // Width based on diameter (MOHAA diameter = frame field)
+            // Camera-facing beam quad: the side vector is computed from the
+            // cross product of beam direction and camera-to-beam vector,
+            // matching the original engine's beam rendering approach.
             float halfW = (diameter > 0 ? diameter : 1.0f) * MOHAA_UNIT_SCALE * 0.5f;
-            Vector3 up = Vector3(0, 1, 0);
-            Vector3 side = dir.normalized().cross(up);
+            Vector3 beam_mid = (p1 + p2) * 0.5f;
+            Vector3 cam_to_beam = beam_mid - camera->get_global_position();
+            Vector3 side = dir.normalized().cross(cam_to_beam.normalized());
             if (side.length_squared() < 0.001f) {
-                side = dir.normalized().cross(Vector3(1, 0, 0));
+                // Fallback when camera is aligned with beam direction
+                side = dir.normalized().cross(Vector3(0, 1, 0));
+                if (side.length_squared() < 0.001f) {
+                    side = dir.normalized().cross(Vector3(1, 0, 0));
+                }
             }
             side = side.normalized() * halfW;
 
@@ -1235,17 +1246,17 @@ void MoHAARunner::update_entities() {
             bmesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
             mi->set_mesh(bmesh);
 
-            // Beam material: billboard-Y, alpha-blended, unshaded
+            // Beam material: alpha-blended, unshaded, double-sided
             Ref<StandardMaterial3D> bmat;
             bmat.instantiate();
-            bmat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
             bmat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
             bmat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
             bmat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            bmat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
             bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
                                    rgba[2] / 255.0f, rgba[3] / 255.0f));
 
-            // Try to apply beam shader texture
+            // Try to apply beam shader texture and properties
             int customShader = 0;
             Godot_Renderer_GetEntitySprite(i, nullptr, nullptr, &customShader);
             int beamShader = (customShader > 0) ? customShader : hModel;
@@ -1253,6 +1264,10 @@ void MoHAARunner::update_entities() {
                 Ref<ImageTexture> tex = get_shader_texture(beamShader);
                 if (tex.is_valid()) {
                     bmat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+                const char *sn = Godot_Renderer_GetShaderName(beamShader);
+                if (sn && sn[0]) {
+                    apply_shader_props_to_material(bmat, sn);
                 }
             }
 
@@ -1910,11 +1925,16 @@ void MoHAARunner::update_polys() {
         mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
         mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
 
-        // Try to apply the poly's shader texture
+        // Try to apply the poly's shader texture and shader properties
         if (hShader > 0) {
             Ref<ImageTexture> tex = get_shader_texture(hShader);
             if (tex.is_valid()) {
                 mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            }
+            // Apply shader properties (additive blending for tracers, etc.)
+            const char *sn = Godot_Renderer_GetShaderName(hShader);
+            if (sn && sn[0]) {
+                apply_shader_props_to_material(mat, sn);
             }
         }
 

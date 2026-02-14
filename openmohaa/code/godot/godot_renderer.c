@@ -668,30 +668,31 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
 }
 
 static qboolean GR_AddPolyToScene( qhandle_t hShader, int numVerts,
-                                   const polyVert_t *verts, int num )
+                                   const polyVert_t *verts, int renderfx )
 {
-    int i;
-    for ( i = 0; i < num; i++ ) {
-        if ( gr_numPolys >= GR_MAX_POLYS ) break;
-        if ( gr_numPolyVerts + numVerts > GR_MAX_POLY_VERTS ) break;
+    /* The 4th parameter is renderfx (render flags), NOT a poly count.
+     * The cgame always submits one polygon per call with renderfx
+     * for that polygon (often 0).  Add exactly one poly. */
+    if ( gr_numPolys >= GR_MAX_POLYS ) return qfalse;
+    if ( gr_numPolyVerts + numVerts > GR_MAX_POLY_VERTS ) return qfalse;
 
-        gr_poly_t *p = &gr_polys[gr_numPolys++];
-        p->hShader   = (int)hShader;
-        p->numVerts  = numVerts;
-        p->firstVert = gr_numPolyVerts;
+    gr_poly_t *p = &gr_polys[gr_numPolys++];
+    p->hShader   = (int)hShader;
+    p->numVerts  = numVerts;
+    p->firstVert = gr_numPolyVerts;
 
-        int v;
-        for ( v = 0; v < numVerts; v++ ) {
-            gr_polyVert_t *gv = &gr_polyVerts[gr_numPolyVerts++];
-            VectorCopy( verts[v].xyz, gv->xyz );
-            gv->st[0] = verts[v].st[0];
-            gv->st[1] = verts[v].st[1];
-            gv->rgba[0] = verts[v].modulate[0];
-            gv->rgba[1] = verts[v].modulate[1];
-            gv->rgba[2] = verts[v].modulate[2];
-            gv->rgba[3] = verts[v].modulate[3];
-        }
+    int v;
+    for ( v = 0; v < numVerts; v++ ) {
+        gr_polyVert_t *gv = &gr_polyVerts[gr_numPolyVerts++];
+        VectorCopy( verts[v].xyz, gv->xyz );
+        gv->st[0] = verts[v].st[0];
+        gv->st[1] = verts[v].st[1];
+        gv->rgba[0] = verts[v].modulate[0];
+        gv->rgba[1] = verts[v].modulate[1];
+        gv->rgba[2] = verts[v].modulate[2];
+        gv->rgba[3] = verts[v].modulate[3];
     }
+
     return qtrue;
 }
 
