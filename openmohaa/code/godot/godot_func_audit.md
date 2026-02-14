@@ -365,8 +365,9 @@ reads the entity buffer each frame and updates the corresponding `MeshInstance3D
 in Godot's scene tree.
 
 ### Note on `Godot_BSP_GetModelBounds` / `Godot_BSP_GetModelSurfaces`
-These function names (from the task specification) do not exist. The actual equivalents are
-`Godot_BSP_GetInlineModelBounds()` and `Godot_BSP_GetBrushModelMesh()` respectively.
+These function names (from the task specification) do not exist. The actual equivalents,
+defined in `code/godot/godot_bsp_mesh.h`, are `Godot_BSP_GetInlineModelBounds()` and
+`Godot_BSP_GetBrushModelMesh()` respectively.
 
 ---
 
