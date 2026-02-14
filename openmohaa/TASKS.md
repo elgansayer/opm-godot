@@ -1871,3 +1871,77 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Trigger Entity Audit for Godot GDExtension ✅
+
+Full audit of all `trigger_*` entity types for Godot GDExtension compatibility.
+
+### Trigger class hierarchy (31 classes)
+
+```
+Animate (parent)
+└── Trigger (base) — "trigger_multiple"
+    ├── TriggerVehicle — "trigger_vehicle"
+    ├── TriggerAll — "trigger_multipleall"
+    ├── TouchField — (internal, no classname)
+    ├── TriggerOnce — "trigger_once"
+    │   ├── TriggerSave — "trigger_save"
+    │   ├── TriggerSecret — "trigger_secret"
+    │   └── TriggerByPushObject — "trigger_pushobject"
+    ├── TriggerRelay — "trigger_relay"
+    ├── TriggerUse — "trigger_use"
+    │   ├── TriggerSidedUse — "trigger_sideduse"
+    │   ├── TriggerUseOnce — "trigger_useonce"
+    │   ├── TriggerCameraUse — "trigger_camerause"
+    │   └── TriggerNoDamage — "trigger_nodamage"
+    ├── TriggerPush — "trigger_push"
+    ├── TriggerPushAny — "trigger_pushany"
+    ├── TriggerPlaySound — "play_sound_triggered"
+    │   └── TriggerSpeaker — "sound_speaker"
+    │       └── RandomSpeaker — "sound_randomspeaker"
+    ├── TriggerChangeLevel — "trigger_changelevel"
+    ├── TriggerExit — "trigger_exit"
+    ├── TriggerHurt — "trigger_hurt"
+    ├── TriggerDamageTargets — "trigger_damagetargets"
+    ├── TriggerBox — "trigger_box"
+    ├── TriggerMusic — "trigger_music"
+    ├── TriggerReverb — "trigger_reverb"
+    ├── TriggerGivePowerup — "trigger_givepowerup"
+    ├── TriggerClickItem — "trigger_clickitem"
+    ├── TriggerEntity — "trigger_entity"
+    │   └── TriggerLandmine — "trigger_landmine"
+    └── Teleporter — "trigger_teleport" (in misc.cpp)
+        └── TeleporterDestination — "func_teleportdest" (in misc.cpp)
+```
+
+### Spawning path
+
+Entity spawning goes through `Level::SpawnEntities()` → `SpawnArgs::SpawnInternal()` → `getClassDef()` which uses the CLASS_DECLARATION registration system. The Q3-style `G_CallSpawn()` → `spawns[]` table in `g_spawn.cpp` is dead code for trigger entities — the `SP_trigger_*` functions are forward-declared but never defined.
+
+### Audit results — all trigger types are Godot-compatible ✅
+
+| Category | Status | Details |
+|----------|--------|---------|
+| Collision/touch detection | ✅ Works | Server-side `G_TouchTriggers()` → `gi.AreaEntities()` → `SOLID_TRIGGER` |
+| Event system (EV_Touch, EV_Use) | ✅ Works | Standard engine PostEvent/ProcessEvent |
+| Sound playback | ✅ Works | `Entity::Sound()` → `gi.sound()` → `godot_sound.c` capture |
+| Centre-print messages | ✅ Works | `gi.centerprintf()` → `PF_centerprintf()` in sv_game.c |
+| Music mood changes | ✅ Works | `ChangeMusic()` → `gi.SetConfigstring()` (server-side) |
+| Reverb changes | ✅ Works | `Player::SetReverb()` (server-side player state) |
+| Level transitions | ✅ Works | `G_BeginIntermission()` → `gi.SendServerCommand()` (server-side) |
+| Damage application | ✅ Works | `Entity::Damage()` (game logic, no rendering) |
+| Teleportation | ✅ Works | Direct entity state manipulation (server-side) |
+| Memory safety | ✅ Safe | `new Event()` uses engine allocator; no raw malloc/free |
+| No exit()/abort() | ✅ Verified | No fatal calls in any trigger code |
+| No rendering calls | ✅ Verified | Triggers are invisible (SVF_NOCLIENT), pure logic |
+
+### Bug fix: TriggerReverb classname
+
+`TriggerReverb` was registered with classname `"trigger_music"` (duplicate of `TriggerMusic`) instead of `"trigger_reverb"`. This is a pre-existing upstream bug (also present in openmoh/openmohaa main branch). BSP maps with `trigger_reverb` entities would fail to spawn. Fixed by changing the CLASS_DECLARATION to use `"trigger_reverb"`.
+
+### Dead code: SP_trigger_* in g_spawn.cpp
+
+The `spawns[]` table in `g_spawn.cpp` contains entries for `SP_trigger_always`, `SP_trigger_multiple`, `SP_trigger_push`, `SP_trigger_teleport`, and `SP_trigger_hurt`. These functions are forward-declared but never defined. This is harmless dead code because MOHAA's entity spawning uses `SpawnArgs::SpawnInternal()` (CLASS_DECLARATION system) and never reaches `G_CallSpawn()` for trigger entities.
+
+### Files modified:
+- `code/fgame/trigger.cpp` — fixed TriggerReverb CLASS_DECLARATION classname from `"trigger_music"` to `"trigger_reverb"`

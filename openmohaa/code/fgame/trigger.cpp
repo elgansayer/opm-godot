@@ -2683,7 +2683,7 @@ Event EV_TriggerReverb_OneShot
     EV_NORMAL
 );
 
-CLASS_DECLARATION(Trigger, TriggerReverb, "trigger_music") {
+CLASS_DECLARATION(Trigger, TriggerReverb, "trigger_reverb") {
     {&EV_TriggerReverb_ReverbType,     &TriggerReverb::SetReverbType    },
     {&EV_TriggerReverb_ReverbLevel,    &TriggerReverb::SetReverbLevel   },
     {&EV_TriggerReverb_AltReverbType,  &TriggerReverb::SetAltReverbType },
