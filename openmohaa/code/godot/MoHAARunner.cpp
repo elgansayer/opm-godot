@@ -80,6 +80,8 @@ extern "C" {
     void Godot_InjectCharEvent(int unicode);
     void Godot_InjectMouseMotion(int dx, int dy);
     void Godot_InjectMouseButton(int godot_button, int down);
+    void Godot_InjectMousePosition(int x, int y);
+    void Godot_ResetMousePosition(void);
 
     // Renderer / camera bridge (Phase 7a) — from godot_renderer.c
     int  Godot_Renderer_HasNewFrame(void);
@@ -186,6 +188,7 @@ extern "C" {
     void Godot_Client_SetKeyCatchers(int catchers);
     int  Godot_Client_GetPaused(void);
     void Godot_Client_ForceUnpause(void);
+    int  Godot_Client_IsAnyOverlayActive(void);
 
     // Cinematic bridge (Phase 11) — from godot_renderer.c
     int  Godot_Renderer_IsCinematicActive(void);
@@ -3334,33 +3337,8 @@ void MoHAARunner::_process(double delta) {
     // ── Update game flow state machine (Phase 261) ──
     update_game_flow_state();
 
-    // ── Enforce gameplay input mode each frame ──
-    // The engine's UI system can re-enable in_guimouse or set keyCatchers
-    // via menu code, focus changes, etc.  When we're in gameplay mode
-    // (mouse captured), ensure the engine is in freelook mode.
-    if (mouse_captured && !cin_was_active) {
-        int gui_mouse = Godot_Client_GetGuiMouse();
-        int paused_val = Godot_Client_GetPaused();
-        int catchers = Godot_Client_GetKeyCatchers();
-
-        // Force freelook if GUI mouse or pause is active
-        if (gui_mouse || paused_val || (catchers & 0x3)) {
-            Godot_Client_ForceUnpause();
-            // Only clear catchers if not in console mode (allow tilde to open console)
-            if (catchers & 0x2) {  // KEYCATCH_UI
-                Godot_Client_SetGameInputMode();
-            }
-
-            static int input_fix_count = 0;
-            if (input_fix_count < 5) {
-                UtilityFunctions::print(String("[MoHAA] Input fix: cleared guiMouse=") +
-                    String::num_int64(gui_mouse) + String(" paused=") +
-                    String::num_int64(paused_val) + String(" catchers=0x") +
-                    String::num_int64(catchers, 16));
-                input_fix_count++;
-            }
-        }
-    }
+    // ── Automatic input routing: sync cursor mode with engine keyCatcher state ──
+    update_input_routing();
 
     // ── State change detection for signals (Task 2.5.4) ──
     if (initialized) {
@@ -3379,20 +3357,12 @@ void MoHAARunner::_process(double delta) {
             int start_stage = Godot_Client_GetStartStage();
             int mx, my;
             Godot_Client_GetMousePos(&mx, &my);
+            // Log diagnostics; input routing is handled by update_input_routing()
             UtilityFunctions::print(String("[MoHAA] Client: state=") + String::num_int64(cl_state) +
                 String(" keyCatchers=0x") + String::num_int64(catchers, 16) +
                 String(" guiMouse=") + String::num_int64(gui_mouse) +
                 String(" startStage=") + String::num_int64(start_stage) +
                 String(" mousePos=(") + String::num_int64(mx) + String(",") + String::num_int64(my) + String(")"));
-
-            // Clear UI/console catchers and enable game input mode
-            if (catchers & 0x3) {  // KEYCATCH_CONSOLE(1) | KEYCATCH_UI(2)
-                Godot_Client_SetGameInputMode();
-                int new_catchers = Godot_Client_GetKeyCatchers();
-                int new_gui = Godot_Client_GetGuiMouse();
-                UtilityFunctions::print("[MoHAA] Cleared UI/console key catchers — game input active. Now: catchers=0x" +
-                    String::num_int64(new_catchers, 16) + "  =" + String::num_int64(new_gui));
-            }
 
             emit_signal("map_loaded", cur_map);
         }
@@ -3557,6 +3527,46 @@ void MoHAARunner::set_hud_visible(bool p_visible) {
 
 bool MoHAARunner::is_hud_visible() const {
     return hud_visible;
+}
+
+// ──────────────────────────────────────────────
+//  Input routing — automatic cursor management
+// ──────────────────────────────────────────────
+
+/*
+ * update_input_routing — Sync Godot cursor mode with the engine's
+ *   keyCatcher state each frame.
+ *
+ *   - When an overlay is active (UI menu, console, chat) the cursor is
+ *     released so the player can interact with the overlay.
+ *   - When no overlay is active and a map is loaded, the cursor is
+ *     captured for gameplay freelook.
+ *   - When no map is loaded (boot, main menu), the cursor stays visible.
+ *   - On transitions between modes, mouse position tracking is reset to
+ *     prevent large delta jumps.
+ */
+void MoHAARunner::update_input_routing() {
+    if (!initialized) return;
+
+    bool overlay_active = Godot_Client_IsAnyOverlayActive() != 0;
+    int sv_state = Godot_GetServerState();
+    bool in_map = (sv_state == 3);  // SS_GAME
+
+    // Determine desired cursor state:
+    //   captured (hidden, relative motion) when in-game with no overlay
+    //   visible (free cursor, absolute position) otherwise
+    bool should_capture = in_map && !overlay_active && !cin_was_active;
+
+    // Detect overlay transitions and reset mouse tracking to avoid jumps
+    if (overlay_active != overlay_was_active) {
+        Godot_ResetMousePosition();
+        overlay_was_active = overlay_active;
+    }
+
+    // Apply cursor mode change if needed
+    if (should_capture != mouse_captured) {
+        set_mouse_captured(should_capture);
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -3911,10 +3921,25 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     // ── Mouse motion ──
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
-        // Only forward mouse motion when captured (in-game mode)
         if (mouse_captured) {
+            // Gameplay: relative motion for freelook
             Vector2 rel = motion_event->get_relative();
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
+        } else {
+            // UI/menu mode: absolute position for cursor interaction.
+            // Scale from Godot viewport coordinates to engine render size.
+            Vector2 pos = motion_event->get_position();
+            int render_w, render_h;
+            Godot_Renderer_GetVidSize(&render_w, &render_h);
+            auto *vp = get_viewport();
+            if (vp) {
+                Vector2 vp_size = vp->get_visible_rect().size;
+                if (vp_size.x > 0 && vp_size.y > 0) {
+                    int ex = (int)(pos.x * (float)render_w / vp_size.x);
+                    int ey = (int)(pos.y * (float)render_h / vp_size.y);
+                    Godot_InjectMousePosition(ex, ey);
+                }
+            }
         }
         return;
     }

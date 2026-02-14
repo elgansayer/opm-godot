@@ -76,10 +76,8 @@ func _on_engine_error(message: String):
 
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
-	# Capture mouse when a map loads so mouse-look works
-	if runner and not launch_dedicated:
-		runner.set_mouse_captured(true)
-		print("Main: Mouse captured for gameplay.")
+	# Cursor mode is now managed automatically by MoHAARunner.update_input_routing()
+	# based on the engine's keyCatcher state (UI/console/gameplay).
 	# Schedule auto-screenshot
 	screenshot_pending = true
 	screenshot_timer = 0.0
@@ -87,10 +85,7 @@ func _on_map_loaded(map_name: String):
 
 func _on_map_unloaded():
 	print("Main: SIGNAL map_unloaded")
-	# Release mouse when map unloads
-	if runner:
-		runner.set_mouse_captured(false)
-		print("Main: Mouse released.")
+	# Cursor mode is managed automatically by update_input_routing()
 
 func _on_engine_shutdown():
 	print("Main: SIGNAL engine_shutdown_requested")

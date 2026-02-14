@@ -146,6 +146,10 @@ private:
     bool mouse_captured = false;  // Whether mouse is in relative/captured mode
     bool hud_visible = true;        // F9 toggles HUD overlay visibility
 
+    // Input routing — automatic cursor management based on engine keyCatcher state
+    bool overlay_was_active = false;   // Previous frame's overlay state (for transition detection)
+    void update_input_routing();       // Called each frame to sync cursor mode with engine state
+
     // 3D scene nodes (Phase 7a — camera bridge)
     Node3D *game_world = nullptr;            // Root for all 3D content
     Camera3D *camera = nullptr;              // Driven by engine refdef_t each frame
