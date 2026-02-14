@@ -26,7 +26,6 @@
 #include <godot_cpp/variant/transform3d.hpp>
 
 #include <cmath>
-#include <cstdlib>
 
 using namespace godot;
 
@@ -135,10 +134,10 @@ void Godot_CameraShake_Update(float delta, Camera3D *camera) {
 
         float mag = ev.intensity * t * atten;
 
-        /* Random offset per axis */
-        float rx = ((float)(rand() % 2001) / 1000.0f - 1.0f) * mag;
-        float ry = ((float)(rand() % 2001) / 1000.0f - 1.0f) * mag;
-        float rz = ((float)(rand() % 2001) / 1000.0f - 1.0f) * mag;
+        /* Random offset per axis (Godot RNG — thread-safe, good quality) */
+        float rx = (float)UtilityFunctions::randf_range(-1.0, 1.0) * mag;
+        float ry = (float)UtilityFunctions::randf_range(-1.0, 1.0) * mag;
+        float rz = (float)UtilityFunctions::randf_range(-1.0, 1.0) * mag;
 
         total_offset.x += rx;
         total_offset.y += ry;
@@ -176,11 +175,12 @@ void Godot_CameraShake_Clear(void) {
  * ================================================================ */
 
 struct DebrisChunk {
-    MeshInstance3D *mesh;
-    Vector3         velocity;
-    float           lifetime;      /* total fade time */
-    float           elapsed;
-    bool            active;
+    MeshInstance3D          *mesh;
+    Ref<StandardMaterial3D>  mat;       /* per-instance for alpha fade */
+    Vector3                  velocity;
+    float                    lifetime;  /* total fade time */
+    float                    elapsed;
+    bool                     active;
 };
 
 /* ===================================================================
@@ -196,10 +196,12 @@ struct ExplosionInstance {
     bool    active;
 
     /* Fireball (Phase 1) */
-    MeshInstance3D *fireball;
+    MeshInstance3D          *fireball;
+    Ref<StandardMaterial3D>  fireball_mat;  /* per-instance for alpha */
 
     /* Smoke ring (Phase 2) */
-    MeshInstance3D *smoke;
+    MeshInstance3D          *smoke;
+    Ref<StandardMaterial3D>  smoke_mat;     /* per-instance for alpha */
 
     /* Debris (Phase 3) */
     DebrisChunk debris[MAX_DEBRIS_PER_EXPL];
@@ -215,11 +217,6 @@ struct ExplosionInstance {
 
 static ExplosionInstance s_explosions[MAX_EXPLOSIONS];
 static Node3D           *s_expl_root = nullptr;
-
-/* Shared materials (created once) */
-static Ref<StandardMaterial3D> s_fireball_mat;
-static Ref<StandardMaterial3D> s_smoke_mat;
-static Ref<StandardMaterial3D> s_debris_mat;
 
 /* ===================================================================
  *  Material helpers
@@ -268,7 +265,6 @@ static MeshInstance3D *create_fireball_node(Node3D *parent) {
     sphere->set_radial_segments(12);
     sphere->set_rings(6);
     mi->set_mesh(sphere);
-    mi->set_material_override(s_fireball_mat);
     mi->set_visible(false);
     parent->add_child(mi);
     return mi;
@@ -283,7 +279,6 @@ static MeshInstance3D *create_smoke_node(Node3D *parent) {
     torus->set_rings(12);
     torus->set_ring_segments(8);
     mi->set_mesh(torus);
-    mi->set_material_override(s_smoke_mat);
     mi->set_visible(false);
     parent->add_child(mi);
     return mi;
@@ -294,10 +289,9 @@ static MeshInstance3D *create_debris_node(Node3D *parent) {
     Ref<BoxMesh> box;
     box.instantiate();
     float sz = DEBRIS_SIZE_MIN +
-               ((float)(rand() % 100) / 100.0f) * (DEBRIS_SIZE_MAX - DEBRIS_SIZE_MIN);
+               (float)UtilityFunctions::randf_range(0.0, 1.0) * (DEBRIS_SIZE_MAX - DEBRIS_SIZE_MIN);
     box->set_size(Vector3(sz, sz, sz));
     mi->set_mesh(box);
-    mi->set_material_override(s_debris_mat);
     mi->set_visible(false);
     parent->add_child(mi);
     return mi;
@@ -321,12 +315,22 @@ static void init_explosion_slot(ExplosionInstance &ex, Node3D *parent) {
     ex.elapsed      = 0.0f;
     ex.debris_count = 0;
 
+    /* Per-instance materials so alpha can be changed without allocation */
+    ex.fireball_mat = create_fireball_material();
+    ex.smoke_mat    = create_smoke_material();
+
     ex.fireball = create_fireball_node(parent);
-    ex.smoke    = create_smoke_node(parent);
-    ex.light    = create_light_node(parent);
+    ex.fireball->set_material_override(ex.fireball_mat);
+
+    ex.smoke = create_smoke_node(parent);
+    ex.smoke->set_material_override(ex.smoke_mat);
+
+    ex.light = create_light_node(parent);
 
     for (int i = 0; i < MAX_DEBRIS_PER_EXPL; i++) {
+        ex.debris[i].mat     = create_debris_material();
         ex.debris[i].mesh    = create_debris_node(parent);
+        ex.debris[i].mesh->set_material_override(ex.debris[i].mat);
         ex.debris[i].active  = false;
         ex.debris[i].elapsed = 0.0f;
     }
@@ -342,11 +346,6 @@ void Godot_Explosion_Init(Node3D *parent) {
     s_expl_root = memnew(Node3D);
     s_expl_root->set_name("ExplosionPool");
     parent->add_child(s_expl_root);
-
-    /* Create shared materials */
-    s_fireball_mat = create_fireball_material();
-    s_smoke_mat    = create_smoke_material();
-    s_debris_mat   = create_debris_material();
 
     for (int i = 0; i < MAX_EXPLOSIONS; i++) {
         init_explosion_slot(s_explosions[i], s_expl_root);
@@ -400,7 +399,7 @@ void Godot_Explosion_Spawn(const Vector3 &position, float radius,
 
     /* Spawn debris chunks (random count between MIN and MAX) */
     int count = MIN_DEBRIS_PER_EXPL +
-                (rand() % (MAX_DEBRIS_PER_EXPL - MIN_DEBRIS_PER_EXPL + 1));
+                (int)UtilityFunctions::randi_range(0, MAX_DEBRIS_PER_EXPL - MIN_DEBRIS_PER_EXPL);
     ex.debris_count = count;
 
     for (int i = 0; i < MAX_DEBRIS_PER_EXPL; i++) {
@@ -409,15 +408,15 @@ void Godot_Explosion_Spawn(const Vector3 &position, float radius,
             dc.active  = true;
             dc.elapsed = 0.0f;
             dc.lifetime = DEBRIS_FADE_MIN +
-                          ((float)(rand() % 100) / 100.0f) *
+                          (float)UtilityFunctions::randf_range(0.0, 1.0) *
                           (DEBRIS_FADE_MAX - DEBRIS_FADE_MIN);
 
             /* Random outward + upward velocity */
-            float angle = ((float)(rand() % 360)) * (float)M_PI / 180.0f;
-            float speed = 2.0f + (float)(rand() % 300) / 100.0f;  /* 2–5 m/s */
+            float angle = (float)UtilityFunctions::randf_range(0.0, 2.0 * M_PI);
+            float speed = (float)UtilityFunctions::randf_range(2.0, 5.0);
             dc.velocity = Vector3(
                 cosf(angle) * speed,
-                3.0f + (float)(rand() % 200) / 100.0f,  /* 3–5 m/s upward */
+                (float)UtilityFunctions::randf_range(3.0, 5.0),
                 sinf(angle) * speed);
 
             dc.mesh->set_global_position(position);
@@ -445,13 +444,12 @@ static void update_fireball(ExplosionInstance &ex) {
         float s    = frac * ex.radius;
         ex.fireball->set_scale(Vector3(s, s, s));
 
-        /* Fade alpha near the end */
+        /* Fade alpha near the end using per-instance material */
         float alpha = 1.0f - frac * 0.5f;
-        if (s_fireball_mat.is_valid()) {
-            Color c = s_fireball_mat->get_albedo();
+        if (ex.fireball_mat.is_valid()) {
+            Color c = ex.fireball_mat->get_albedo();
             c.a     = alpha;
-            /* Per-instance alpha via material override (shared mat — acceptable
-             * for a small pool where visual precision is secondary). */
+            ex.fireball_mat->set_albedo(c);
         }
         ex.fireball->set_visible(true);
     } else if (t > FIREBALL_END) {
@@ -465,6 +463,14 @@ static void update_smoke(ExplosionInstance &ex) {
         float frac = (t - SMOKE_START) / (SMOKE_END - SMOKE_START);
         float s    = frac * ex.radius * 1.5f;
         ex.smoke->set_scale(Vector3(s, s * 0.3f, s));
+
+        /* Fade smoke alpha over its lifetime */
+        float alpha = 0.6f * (1.0f - frac);
+        if (ex.smoke_mat.is_valid()) {
+            Color c = ex.smoke_mat->get_albedo();
+            c.a     = alpha;
+            ex.smoke_mat->set_albedo(c);
+        }
         ex.smoke->set_visible(true);
     } else if (t > SMOKE_END) {
         ex.smoke->set_visible(false);
@@ -491,21 +497,14 @@ static void update_debris(ExplosionInstance &ex, float delta) {
         pos += dc.velocity * delta;
         dc.mesh->set_global_position(pos);
 
-        /* Fade alpha over lifetime */
+        /* Fade alpha over lifetime using cached per-instance material */
         float alpha = 1.0f - (dc.elapsed / dc.lifetime);
         if (alpha < 0.0f) alpha = 0.0f;
 
-        /* Create per-instance material for alpha fade */
-        Ref<StandardMaterial3D> mat = dc.mesh->get_material_override();
-        if (mat.is_valid()) {
-            Color c = mat->get_albedo();
-            if (c.a != alpha) {
-                Ref<StandardMaterial3D> inst;
-                inst.instantiate();
-                inst->set_albedo(Color(0.3f, 0.25f, 0.2f, alpha));
-                inst->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                dc.mesh->set_material_override(inst);
-            }
+        if (dc.mat.is_valid()) {
+            Color c = dc.mat->get_albedo();
+            c.a     = alpha;
+            dc.mat->set_albedo(c);
         }
     }
 }
@@ -578,18 +577,16 @@ void Godot_Explosion_Shutdown(void) {
         s_expl_root = nullptr;
     }
 
-    /* Release shared materials */
-    s_fireball_mat.unref();
-    s_smoke_mat.unref();
-    s_debris_mat.unref();
-
-    /* Clear node pointers in pool slots */
+    /* Clear node pointers and per-instance materials in pool slots */
     for (int i = 0; i < MAX_EXPLOSIONS; i++) {
         s_explosions[i].fireball = nullptr;
         s_explosions[i].smoke    = nullptr;
         s_explosions[i].light    = nullptr;
+        s_explosions[i].fireball_mat.unref();
+        s_explosions[i].smoke_mat.unref();
         for (int d = 0; d < MAX_DEBRIS_PER_EXPL; d++) {
             s_explosions[i].debris[d].mesh = nullptr;
+            s_explosions[i].debris[d].mat.unref();
         }
     }
 }
