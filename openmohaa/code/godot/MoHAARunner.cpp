@@ -222,6 +222,10 @@ extern "C" {
     // Phase 35: Entity parenting — from godot_renderer.c
     int   Godot_Renderer_GetEntityParent(int index);
 
+    // Shadow blob accessors — from godot_renderer.c
+    float Godot_Renderer_GetEntityShadowPlane(int index);
+    float Godot_Model_GetRadius(int hModel);
+
     // Phase 26: Shader remap query — from godot_renderer.c
     const char *Godot_Renderer_GetShaderRemap(const char *shaderName);
 
@@ -2125,6 +2129,185 @@ void MoHAARunner::update_terrain_marks() {
 }
 
 // ──────────────────────────────────────────────
+//  Shadow blob projection for RF_SHADOW entities
+// ──────────────────────────────────────────────
+
+void MoHAARunner::update_shadow_blobs() {
+    if (!game_world) return;
+
+    int ent_count = Godot_Renderer_GetEntityCount();
+
+    // First pass: count entities that need shadow blobs
+    int shadow_count = 0;
+    for (int i = 0; i < ent_count; i++) {
+        float origin[3];
+        int renderfx = 0, hModel = 0, entityNumber = 0;
+        unsigned char rgba[4];
+        int reType = Godot_Renderer_GetEntity(i, origin, nullptr, nullptr,
+                                               &hModel, &entityNumber, rgba, &renderfx);
+        // RF_SHADOW = (1<<11) = 0x800
+        if (reType != 0 /* RT_MODEL */ || !(renderfx & 0x800) || (renderfx & 0x80))
+            continue;
+        shadow_count++;
+    }
+
+    // Create container on first use
+    if (!shadow_blob_root && shadow_count > 0) {
+        shadow_blob_root = memnew(Node3D);
+        shadow_blob_root->set_name("ShadowBlobs");
+        game_world->add_child(shadow_blob_root);
+    }
+
+    // Create shared shadow material on first use
+    if (shadow_blob_material.is_null() && shadow_count > 0) {
+        shadow_blob_material.instantiate();
+        shadow_blob_material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+        shadow_blob_material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        shadow_blob_material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+        shadow_blob_material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+        // Render above ground to avoid z-fighting
+        shadow_blob_material->set_render_priority(1);
+    }
+
+    // Grow pool if needed
+    if (shadow_blob_root) {
+        while ((int)shadow_blob_meshes.size() < shadow_count) {
+            MeshInstance3D *mi = memnew(MeshInstance3D);
+            mi->set_name(String("ShadowBlob_") + String::num_int64((int64_t)shadow_blob_meshes.size()));
+            mi->set_visible(false);
+            shadow_blob_root->add_child(mi);
+            shadow_blob_meshes.push_back(mi);
+        }
+    }
+
+    // Second pass: project shadow blobs
+    int shadow_idx = 0;
+    static const float SHADOW_DISTANCE = 96.0f; // id units — max downward trace
+    static const int SHADOW_CIRCLE_SEGMENTS = 8;
+
+    for (int i = 0; i < ent_count && shadow_idx < shadow_count; i++) {
+        float origin[3], axis[9], scale = 1.0f;
+        int renderfx = 0, hModel = 0, entityNumber = 0;
+        unsigned char rgba[4];
+        int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
+                                               &hModel, &entityNumber, rgba, &renderfx);
+        if (reType != 0 /* RT_MODEL */ || !(renderfx & 0x800) || (renderfx & 0x80))
+            continue;
+
+        MeshInstance3D *mi = shadow_blob_meshes[shadow_idx];
+
+        // Determine shadow blob radius from model
+        float modelRadius = Godot_Model_GetRadius(hModel);
+        float blobRadius = modelRadius * scale * 0.6f;
+        if (blobRadius < 4.0f) blobRadius = 4.0f;
+        if (blobRadius > 64.0f) blobRadius = 64.0f;
+
+        // Build a circular polygon in id space centred at entity origin,
+        // oriented horizontally (in XY plane, Z is up in id space)
+        float points[SHADOW_CIRCLE_SEGMENTS][3];
+        for (int s = 0; s < SHADOW_CIRCLE_SEGMENTS; s++) {
+            float angle = (float)s / (float)SHADOW_CIRCLE_SEGMENTS * 2.0f * 3.14159265f;
+            points[s][0] = origin[0] + cosf(angle) * blobRadius;
+            points[s][1] = origin[1] + sinf(angle) * blobRadius;
+            points[s][2] = origin[2];
+        }
+
+        // Projection vector: straight down in id space
+        float projection[3] = { 0.0f, 0.0f, -SHADOW_DISTANCE };
+
+        // Use BSP mark fragments to clip shadow polygon against world geometry
+        static const int MAX_FRAG_POINTS = 384;
+        static const int MAX_FRAGMENTS = 32;
+        float pointBuffer[MAX_FRAG_POINTS * 3];
+        int fragFirstPoint[MAX_FRAGMENTS];
+        int fragNumPoints[MAX_FRAGMENTS];
+        int fragIIndex[MAX_FRAGMENTS];
+
+        int numFragments = Godot_BSP_MarkFragments(
+            SHADOW_CIRCLE_SEGMENTS, (const float (*)[3])points, projection,
+            MAX_FRAG_POINTS, pointBuffer,
+            MAX_FRAGMENTS,
+            fragFirstPoint, fragNumPoints, fragIIndex,
+            blobRadius * blobRadius);
+
+        if (numFragments <= 0) {
+            mi->set_visible(false);
+            shadow_idx++;
+            continue;
+        }
+
+        // Compute alpha fade based on distance to ground:
+        // Use the first fragment point to estimate ground height
+        float groundZ = pointBuffer[fragFirstPoint[0] * 3 + 2];
+        float heightAboveGround = origin[2] - groundZ;
+        float fade = 1.0f - (heightAboveGround / SHADOW_DISTANCE);
+        if (fade < 0.0f) fade = 0.0f;
+        if (fade > 1.0f) fade = 1.0f;
+        float alpha = fade * 0.5f;
+
+        // Build mesh from all fragments
+        PackedVector3Array gPos;
+        PackedColorArray   gCol;
+        PackedInt32Array   gIdx;
+
+        int totalVerts = 0;
+        for (int f = 0; f < numFragments; f++)
+            totalVerts += fragNumPoints[f];
+
+        gPos.resize(totalVerts);
+        gCol.resize(totalVerts);
+
+        int vertOffset = 0;
+        for (int f = 0; f < numFragments; f++) {
+            int first = fragFirstPoint[f];
+            int count = fragNumPoints[f];
+            for (int v = 0; v < count; v++) {
+                float *pt = &pointBuffer[(first + v) * 3];
+                // Offset slightly upward to avoid z-fighting (0.5 id units)
+                gPos.set(vertOffset + v, id_to_godot_position(pt[0], pt[1], pt[2] + 0.5f));
+                gCol.set(vertOffset + v, Color(0.0f, 0.0f, 0.0f, alpha));
+            }
+            // Fan triangulation for this fragment
+            for (int v = 1; v < count - 1; v++) {
+                gIdx.push_back(vertOffset);
+                gIdx.push_back(vertOffset + v);
+                gIdx.push_back(vertOffset + v + 1);
+            }
+            vertOffset += count;
+        }
+
+        if (gIdx.size() < 3) {
+            mi->set_visible(false);
+            shadow_idx++;
+            continue;
+        }
+
+        Array arrays;
+        arrays.resize(Mesh::ARRAY_MAX);
+        arrays[Mesh::ARRAY_VERTEX] = gPos;
+        arrays[Mesh::ARRAY_COLOR]  = gCol;
+        arrays[Mesh::ARRAY_INDEX]  = gIdx;
+
+        Ref<ArrayMesh> smesh;
+        smesh.instantiate();
+        smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+        mi->set_mesh(smesh);
+        mi->set_surface_override_material(0, shadow_blob_material);
+
+        mi->set_global_transform(Transform3D());
+        mi->set_visible(true);
+        shadow_idx++;
+    }
+
+    // Hide excess pool meshes
+    for (int i = shadow_idx; i < active_shadow_blob_count; i++) {
+        if (i < (int)shadow_blob_meshes.size())
+            shadow_blob_meshes[i]->set_visible(false);
+    }
+    active_shadow_blob_count = shadow_idx;
+}
+
+// ──────────────────────────────────────────────
 //  Shader UV animation (Phase 36)
 // ──────────────────────────────────────────────
 
@@ -3306,6 +3489,7 @@ void MoHAARunner::_process(double delta) {
     update_polys();
     update_swipe_effects();     // Phase 24: swipe/melee trails
     update_terrain_marks();     // Phase 25: terrain mark decals
+    update_shadow_blobs();      // Shadow blob projection under RF_SHADOW entities
     update_shader_animations(delta);  // Phase 36: tcMod scroll/rotate
 
     // ── Update 2D HUD overlay from captured draw commands (Phase 7h) ──

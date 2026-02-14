@@ -253,6 +253,7 @@ typedef struct {
     int     parentEntity;
     float   radius;          /* RT_SPRITE size */
     float   rotation;        /* RT_SPRITE rotation angle (degrees) */
+    float   shadowPlane;     /* shadow projection plane height (id Z) */
 
     /* Skeletal animation data (Phase 13) */
     frameInfo_t frameInfo[MAX_FRAMEINFOS];
@@ -636,6 +637,7 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
     ge->parentEntity  = parentEntityNumber;
     ge->radius        = re->radius;
     ge->rotation      = re->rotation;
+    ge->shadowPlane   = re->shadowPlane;
 
     VectorCopy( re->origin, ge->origin );
     VectorCopy( re->oldorigin, ge->oldorigin );
@@ -2231,6 +2233,18 @@ int Godot_Renderer_GetEntityParent( int index )
 {
     if ( index < 0 || index >= gr_numEntities ) return -1;
     return gr_entities[index].parentEntity;
+}
+
+/* Shadow blob accessors: shadow plane height and model radius */
+float Godot_Renderer_GetEntityShadowPlane( int index )
+{
+    if ( index < 0 || index >= gr_numEntities ) return 0.0f;
+    return gr_entities[index].shadowPlane;
+}
+
+float Godot_Model_GetRadius( int hModel )
+{
+    return GR_ModelRadius( (qhandle_t)hModel );
 }
 
 /* Phase 26: Shader remap query — check if a shader name has been remapped */
