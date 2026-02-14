@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "cg_radar.h"
 
 #include "../corepp/str.h"
+#include "../qcommon/surface_types.h"
 
 extern int current_entity_number;
 
@@ -96,57 +97,7 @@ void CG_MakeBulletHoleSound(const vec3_t i_vPos, const vec3_t i_vNorm, int iLarg
 
     VectorAdd(trace.endpos, trace.plane.normal, vFrom);
     sSoundName = "snd_bh_";
-
-    switch (iSurfType) {
-    case SURF_FOLIAGE:
-        sSoundName += "foliage";
-        break;
-    case SURF_SNOW:
-        sSoundName += "snow";
-        break;
-    case SURF_CARPET:
-        sSoundName += "carpet";
-        break;
-    case SURF_SAND:
-        sSoundName += "sand";
-        break;
-    case SURF_PUDDLE:
-        sSoundName += "puddle";
-        break;
-    case SURF_GLASS:
-        sSoundName += "glass";
-        break;
-    case SURF_GRAVEL:
-        sSoundName += "gravel";
-        break;
-    case SURF_MUD:
-        sSoundName += "mud";
-        break;
-    case SURF_DIRT:
-        sSoundName += "dirt";
-        break;
-    case SURF_GRILL:
-        sSoundName += "grill";
-        break;
-    case SURF_GRASS:
-        sSoundName += "grass";
-        break;
-    case SURF_ROCK:
-        sSoundName += "stone";
-        break;
-    case SURF_PAPER:
-        sSoundName += "paper";
-        break;
-    case SURF_WOOD:
-        sSoundName += "wood";
-        break;
-    case SURF_METAL:
-        sSoundName += "metal";
-        break;
-    default:
-        sSoundName += "stone";
-        break;
-    }
+    sSoundName += SurfaceFlag_ToSoundSuffix(iSurfType);
 
     if (iLarge) {
         fVolume = 1.0f;

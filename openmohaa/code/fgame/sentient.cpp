@@ -42,6 +42,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "object.h"
 #include "../corepp/tiki.h"
 #include "weapturret.h"
+#include "../qcommon/surface_types.h"
 
 Event EV_Sentient_ReloadWeapon
 (
@@ -3103,56 +3104,7 @@ void Sentient::FootstepMain(trace_t *trace, int iRunning, int iEquipment)
         }
     } else {
         surftype = trace->surfaceFlags & MASK_SURF_TYPE;
-        switch (surftype) {
-        case SURF_FOLIAGE:
-            sSoundName += "foliage";
-            break;
-        case SURF_SNOW:
-            sSoundName += "snow";
-            break;
-        case SURF_CARPET:
-            sSoundName += "carpet";
-            break;
-        case SURF_SAND:
-            sSoundName += "sand";
-            break;
-        case SURF_PUDDLE:
-            sSoundName += "puddle";
-            break;
-        case SURF_GLASS:
-            sSoundName += "glass";
-            break;
-        case SURF_GRAVEL:
-            sSoundName += "gravel";
-            break;
-        case SURF_MUD:
-            sSoundName += "mud";
-            break;
-        case SURF_DIRT:
-            sSoundName += "dirt";
-            break;
-        case SURF_GRILL:
-            sSoundName += "grill";
-            break;
-        case SURF_GRASS:
-            sSoundName += "grass";
-            break;
-        case SURF_ROCK:
-            sSoundName += "stone";
-            break;
-        case SURF_PAPER:
-            sSoundName += "paper";
-            break;
-        case SURF_WOOD:
-            sSoundName += "wood";
-            break;
-        case SURF_METAL:
-            sSoundName += "metal";
-            break;
-        default:
-            sSoundName += "stone";
-            break;
-        }
+        sSoundName += SurfaceFlag_ToSoundSuffix(surftype);
     }
 
     if (iRunning) {
@@ -3284,56 +3236,7 @@ void Sentient::LandingSound(float volume, int iEquipment)
         }
     } else {
         surftype = trace.surfaceFlags & MASK_SURF_TYPE;
-        switch (surftype) {
-        case SURF_FOLIAGE:
-            sSoundName += "foliage";
-            break;
-        case SURF_SNOW:
-            sSoundName += "snow";
-            break;
-        case SURF_CARPET:
-            sSoundName += "carpet";
-            break;
-        case SURF_SAND:
-            sSoundName += "sand";
-            break;
-        case SURF_PUDDLE:
-            sSoundName += "puddle";
-            break;
-        case SURF_GLASS:
-            sSoundName += "glass";
-            break;
-        case SURF_GRAVEL:
-            sSoundName += "gravel";
-            break;
-        case SURF_MUD:
-            sSoundName += "mud";
-            break;
-        case SURF_DIRT:
-            sSoundName += "dirt";
-            break;
-        case SURF_GRILL:
-            sSoundName += "grill";
-            break;
-        case SURF_GRASS:
-            sSoundName += "grass";
-            break;
-        case SURF_ROCK:
-            sSoundName += "stone";
-            break;
-        case SURF_PAPER:
-            sSoundName += "paper";
-            break;
-        case SURF_WOOD:
-            sSoundName += "wood";
-            break;
-        case SURF_METAL:
-            sSoundName += "metal";
-            break;
-        default:
-            sSoundName += "stone";
-            break;
-        }
+        sSoundName += SurfaceFlag_ToSoundSuffix(surftype);
     }
 
     PlayNonPvsSound(sSoundName, volume);

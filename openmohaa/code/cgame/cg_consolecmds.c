@@ -26,6 +26,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "cg_local.h"
 #include "../fgame/bg_voteoptions.h"
+#include "../qcommon/surface_types.h"
 
 void CG_TargetCommand_f(void);
 
@@ -261,55 +262,11 @@ static void CG_PrintSurfaceProperties(int iSurfaceFlags)
 
 static void CG_PrintSurfaceType(int iSurfType)
 {
-    switch (iSurfType & MASK_SURF_TYPE) {
-    case SURF_FOLIAGE:
-        cgi.Printf("foliage");
-        break;
-    case SURF_SNOW:
-        cgi.Printf("snow");
-        break;
-    case SURF_CARPET:
-        cgi.Printf("carpet");
-        break;
-    case SURF_SAND:
-        cgi.Printf("sand");
-        break;
-    case SURF_PUDDLE:
-        cgi.Printf("puddle");
-        break;
-    case SURF_GLASS:
-        cgi.Printf("glass");
-        break;
-    case SURF_GRAVEL:
-        cgi.Printf("gravel");
-        break;
-    case SURF_MUD:
-        cgi.Printf("mud");
-        break;
-    case SURF_DIRT:
-        cgi.Printf("dirt");
-        break;
-    case SURF_GRILL:
-        cgi.Printf("metal grill");
-        break;
-    case SURF_GRASS:
-        cgi.Printf("grass");
-        break;
-    case SURF_ROCK:
-        cgi.Printf("rock");
-        break;
-    case SURF_PAPER:
-        cgi.Printf("paper");
-        break;
-    case SURF_WOOD:
-        cgi.Printf("wood");
-        break;
-    case SURF_METAL:
-        cgi.Printf("metal");
-        break;
-    default:
+    surfaceType_t type = SurfaceFlag_ToType(iSurfType & MASK_SURF_TYPE);
+    if (type != SURF_TYPE_NONE) {
+        cgi.Printf("%s", SurfaceFlag_ToName(iSurfType & MASK_SURF_TYPE));
+    } else {
         cgi.Printf("!!*none specified*!!");
-        break;
     }
 }
 
