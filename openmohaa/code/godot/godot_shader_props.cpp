@@ -700,8 +700,12 @@ static void parse_shader(char **text, GodotShaderProps *props)
         {
             token = COM_ParseExt(text, 0);
             if (!Q_stricmp(token, "trans")) {
-                if (props->transparency == SHADER_OPAQUE)
-                    props->transparency = SHADER_ALPHA_BLEND;
+                /* surfaceParm trans is a BSP compiler flag (vis portals)
+                 * with NO effect on runtime rendering transparency.
+                 * Transparency is determined solely by stage blendFunc,
+                 * matching R_FindShader / SortNewShader in the real
+                 * renderer.  Do NOT set transparency here. */
+                props->has_surfaceparm_trans = true;
             } else if (!Q_stricmp(token, "portal")) {
                 props->is_portal = true;
             } else if (!Q_stricmp(token, "sky")) {
@@ -1006,9 +1010,11 @@ void Godot_ShaderProps_Load() {
          * find the actual diffuse stage.  This handles 3-stage glass
          * shaders: env map → alpha-blended window → lightmap.
          *
-         * Only override if transparency isn't already set by alphaFunc
-         * or surfaceparm trans (which run during parsing). */
-        if (props.transparency == SHADER_OPAQUE && props.stage_count > 0) {
+         * Always run if we have stages — the stage blendFunc analysis
+         * is the authoritative source for transparency classification
+         * (matching the real renderer's SortNewShader).  alphaFunc
+         * is preserved since it's set from stage parsing. */
+        if (props.transparency != SHADER_ALPHA_TEST && props.stage_count > 0) {
             /* Detect whether a lightmap stage exists */
             bool has_lightmap_stage = false;
             for (int s = 0; s < props.stage_count; s++) {
