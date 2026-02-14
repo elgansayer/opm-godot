@@ -159,7 +159,10 @@ static void apply_rain_params(GPUParticles3D *rain, float density) {
     float engine_length = Godot_Weather_GetLength();    /* default 90 */
     float engine_width  = Godot_Weather_GetWidth();     /* default 1 */
 
-    /* Convert speed from engine units (inches/s) to Godot (m/s) */
+    /* Convert speed from engine units to Godot particle velocity (m/s).
+     * Engine speed is in game-units/frame (~200fps); the 0.005 factor
+     * accounts for the frame-rate difference and prevents excessively
+     * fast particles in Godot's continuous simulation. */
     float speed_ms  = engine_speed * MOHAA_UNIT_SCALE * 0.005f;
     float vary_ms   = (float)speed_vary * MOHAA_UNIT_SCALE * 0.005f;
     float speed_min = speed_ms - vary_ms * 0.5f;
@@ -167,10 +170,13 @@ static void apply_rain_params(GPUParticles3D *rain, float density) {
     if (speed_min < 1.0f) speed_min = 1.0f;
     if (speed_max < speed_min + 0.5f) speed_max = speed_min + 0.5f;
 
-    /* Convert slant to a horizontal wind component (engine units → m/s) */
+    /* Convert slant to a horizontal wind component.  The engine slant
+     * is a unitless factor (default 50); we scale by 0.01 to produce
+     * a gentle horizontal drift in metres/s². */
     float slant_x = (float)slant * MOHAA_UNIT_SCALE * 0.01f;
 
-    /* Particle count scales with density (0..1) */
+    /* Particle count: base 2000 at full density, clamped to
+     * [100, 4000] for visual quality vs GPU performance. */
     int amount = (int)(2000.0f * density);
     if (amount < 100)  amount = 100;
     if (amount > 4000) amount = 4000;
@@ -188,7 +194,9 @@ static void apply_rain_params(GPUParticles3D *rain, float density) {
         mat->set_gravity(Vector3(slant_x, -9.8f, 0.0f));
     }
 
-    /* Update draw mesh size from engine length/width */
+    /* Update draw mesh size from engine length/width (in inches → metres).
+     * Clamp to sane bounds: min 0.5cm wide / 5cm tall (invisible below),
+     * max 20cm wide / 2m tall (absurdly large above). */
     Ref<Mesh> draw = rain->get_draw_pass_mesh(0);
     if (draw.is_valid()) {
         QuadMesh *qm = Object::cast_to<QuadMesh>(draw.ptr());
