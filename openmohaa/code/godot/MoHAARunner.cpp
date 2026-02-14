@@ -353,6 +353,25 @@ MoHAARunner::~MoHAARunner() {
         /* Even if not initialized, mark shutdown as safety net */
         Z_MarkShutdown();
     }
+
+    // ── Module shutdown hooks (defensive) ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    Godot_WeaponViewport::get().destroy();
+#endif
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+    Godot_Speakers_Shutdown();
+#endif
+#ifdef HAS_UBERSOUND_MODULE
+    Godot_Ubersound_Shutdown();
+#endif
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_MeshCache::get().clear();
+    Godot_MaterialCache::get().clear();
+#endif
+#ifdef HAS_SHADER_MATERIAL_MODULE
+    Godot_Shader_ClearCache();
+#endif
+
     g_godot_ready = false;
 }
 
@@ -505,6 +524,15 @@ void MoHAARunner::setup_3d_scene() {
     game_world->add_child(world_env);
 
     UtilityFunctions::print("[MoHAA] 3D scene created (Camera3D + light + environment).");
+
+    // ── Phase 62: Create weapon SubViewport for first-person weapon rendering ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    {
+        int vp_w = 1280, vp_h = 720;  // Default; will be resized when window size is known
+        Godot_WeaponViewport::get().create(this, camera, vp_w, vp_h);
+        UtilityFunctions::print("[MoHAA] Weapon SubViewport created.");
+    }
+#endif
 }
 
 // ──────────────────────────────────────────────
@@ -604,6 +632,16 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+#ifdef HAS_MESH_CACHE_MODULE
+            Godot_MeshCache::get().clear();
+            Godot_MaterialCache::get().clear();
+#endif
+#ifdef HAS_SHADER_MATERIAL_MODULE
+            Godot_Shader_ClearCache();
+#endif
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+            Godot_Speakers_Shutdown();
+#endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -642,7 +680,28 @@ void MoHAARunner::check_world_load() {
 
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
-        Godot_Weather_Init();
+        Godot_Weather_Init(game_world);
+#endif
+#ifdef HAS_UI_SYSTEM_MODULE
+        Godot_UI_OnMapLoad();
+#endif
+#ifdef HAS_MESH_CACHE_MODULE
+        Godot_MeshCache::get().clear();
+        Godot_MaterialCache::get().clear();
+#endif
+#ifdef HAS_SHADER_MATERIAL_MODULE
+        Godot_Shader_ClearCache();
+#endif
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+        {
+            const char *ent_str = Godot_BSP_GetEntityString();
+            if (ent_str) {
+                Godot_Speakers_Init((void *)entity_root);
+                Godot_Speakers_LoadFromEntities(ent_str);
+                UtilityFunctions::print(String("[MoHAA] Speaker entities loaded: ") +
+                    String::num_int64(Godot_Speakers_GetCount()));
+            }
+        }
 #endif
 
     } else {
@@ -1111,6 +1170,22 @@ void MoHAARunner::update_entities() {
             mi->set_visible(false);
             continue;
         }
+
+        // ── Phase 62: Route first-person weapon entities to SubViewport ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+        bool is_weapon_entity = (renderfx & 0x02) || (renderfx & 0x04);  // RF_FIRST_PERSON or RF_DEPTHHACK
+        if (is_weapon_entity && Godot_WeaponViewport::get().is_created()) {
+            Node3D *weapon_root = Godot_WeaponViewport::get().get_weapon_root();
+            if (weapon_root && mi->get_parent() != weapon_root) {
+                mi->get_parent()->remove_child(mi);
+                weapon_root->add_child(mi);
+            }
+        } else if (!is_weapon_entity && mi->get_parent() != entity_root) {
+            // Return non-weapon entities to the main entity root
+            mi->get_parent()->remove_child(mi);
+            entity_root->add_child(mi);
+        }
+#endif
 
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
         if (reType == RT_SPRITE) {
@@ -1633,18 +1708,30 @@ void MoHAARunner::update_entities() {
         // ── Phase 21+22: Entity colour tinting + alpha ──
         // Apply shaderRGBA modulation when it's not opaque white.
         // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
-        float ambient[3] = {1.0f, 1.0f, 1.0f};
-        float directed[3] = {0.0f, 0.0f, 0.0f};
-        float ldir[3] = {0.0f, 0.0f, 1.0f};
-        float point[3] = { origin[0], origin[1], origin[2] };
-        int lit = Godot_BSP_LightForPoint(point, ambient, directed, ldir);
         Color light_mul(1.0f, 1.0f, 1.0f, 1.0f);
-        if (lit) {
-            light_mul = Color(clamp01(ambient[0] + directed[0] * 0.5f),
-                              clamp01(ambient[1] + directed[1] * 0.5f),
-                              clamp01(ambient[2] + directed[2] * 0.5f),
-                              1.0f);
+#ifdef HAS_ENTITY_LIGHTING_MODULE
+        {
+            // Phase 63+64: Combined lightgrid + dynamic light sampling
+            float lr, lg, lb;
+            float sample_origin[3] = { origin[0], origin[1], origin[2] };
+            Godot_EntityLight_Combined(sample_origin, 4, &lr, &lg, &lb);
+            light_mul = Color(lr, lg, lb, 1.0f);
         }
+#else
+        {
+            float ambient[3] = {1.0f, 1.0f, 1.0f};
+            float directed[3] = {0.0f, 0.0f, 0.0f};
+            float ldir[3] = {0.0f, 0.0f, 1.0f};
+            float point[3] = { origin[0], origin[1], origin[2] };
+            int lit = Godot_BSP_LightForPoint(point, ambient, directed, ldir);
+            if (lit) {
+                light_mul = Color(clamp01(ambient[0] + directed[0] * 0.5f),
+                                  clamp01(ambient[1] + directed[1] * 0.5f),
+                                  clamp01(ambient[2] + directed[2] * 0.5f),
+                                  1.0f);
+            }
+        }
+#endif
         bool has_light_tint = fabsf(light_mul.r - 1.0f) > 0.02f ||
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;
@@ -2560,6 +2647,18 @@ void MoHAARunner::setup_audio() {
     music_player->set_bus(StringName("Master"));
     add_child(music_player);
     UtilityFunctions::print("[MoHAA] Music player initialised.");
+
+    // ── Phase 45: Initialise ubersound alias system ──
+#ifdef HAS_UBERSOUND_MODULE
+    Godot_Ubersound_Init();
+    UtilityFunctions::print(String("[MoHAA] Ubersound initialised: ") +
+                            String::num_int64(Godot_Ubersound_GetAliasCount()) + " aliases.");
+#endif
+
+    // ── Phase 48: Enable sound occlusion ──
+#ifdef HAS_SOUND_OCCLUSION_MODULE
+    Godot_SoundOcclusion_SetEnabled(1);
+#endif
 }
 
 Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
@@ -2584,6 +2683,24 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
         snprintf(prefixed, sizeof(prefixed), "sound/%s", snd_name);
         len = Godot_VFS_ReadFile(prefixed, &buf);
     }
+
+    // ── Phase 45: Try ubersound alias resolution if direct load failed ──
+#ifdef HAS_UBERSOUND_MODULE
+    if (len <= 0 && Godot_Ubersound_IsLoaded()) {
+        char resolved_path[512];
+        float vol, mindist, maxdist, pitch;
+        int channel;
+        if (Godot_Ubersound_Resolve(snd_name, resolved_path, sizeof(resolved_path),
+                                     &vol, &mindist, &maxdist, &pitch, &channel)) {
+            len = Godot_VFS_ReadFile(resolved_path, &buf);
+            if (len <= 0 && strncmp(resolved_path, "sound/", 6) != 0) {
+                char prefixed[512];
+                snprintf(prefixed, sizeof(prefixed), "sound/%s", resolved_path);
+                len = Godot_VFS_ReadFile(prefixed, &buf);
+            }
+        }
+    }
+#endif
 
     if (len <= 0 || !buf) {
         // Cache a null ref so we don't keep retrying
@@ -2804,6 +2921,18 @@ void MoHAARunner::update_audio(double delta) {
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
             float vol_db = (volume > 0.001f) ? (20.0f * log10f(volume)) : -80.0f;
+#ifdef HAS_SOUND_OCCLUSION_MODULE
+            {
+                // Phase 48: Apply sound occlusion attenuation for 3D sounds
+                float lo[3], la[9]; int lent;
+                Godot_Sound_GetListener(lo, la, &lent);
+                float occ = Godot_SoundOcclusion_Check(lo[0], lo[1], lo[2],
+                                                        origin[0], origin[1], origin[2]);
+                if (occ < 1.0f) {
+                    vol_db += 20.0f * log10f(occ > 0.001f ? occ : 0.001f);
+                }
+            }
+#endif
             p->set_volume_db(vol_db);
             p->set_pitch_scale(pitch > 0.01f ? pitch : 1.0f);
             float max_m = (maxDist > 0) ? (maxDist * MOHAA_UNIT_SCALE) : 50.0f;
@@ -3254,7 +3383,7 @@ void MoHAARunner::_ready() {
 
     // ── Module init hooks (defensive — only called if module exists) ──
 #ifdef HAS_MUSIC_MODULE
-    Godot_Music_Init();
+    Godot_Music_Init((void *)this);
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Init(game_world);
@@ -3294,11 +3423,40 @@ void MoHAARunner::_process(double delta) {
     Com_Frame();
     godot_jmpbuf_valid = false;
 
+    // ── Phase 85: Begin per-frame render statistics ──
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_RenderStats_BeginFrame();
+#endif
+
+    // ── Phase 48: Poll UI state from engine keyCatchers ──
+#ifdef HAS_UI_SYSTEM_MODULE
+    Godot_UI_Update();
+    // Toggle mouse cursor visibility based on UI state
+    if (Godot_UI_ShouldShowCursor()) {
+        if (mouse_captured) {
+            Input::get_singleton()->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
+            mouse_captured = false;
+        }
+    } else {
+        if (!mouse_captured) {
+            Input::get_singleton()->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
+            mouse_captured = true;
+        }
+    }
+#endif
+
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
 
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
+
+    // ── Phase 62: Sync weapon viewport camera each frame ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    if (Godot_WeaponViewport::get().is_created()) {
+        Godot_WeaponViewport::get().sync_camera();
+    }
+#endif
 
     // ── Update entity debug meshes from captured render data (Phase 7e) ──
     update_entities();
@@ -3314,6 +3472,11 @@ void MoHAARunner::_process(double delta) {
     // ── Update audio from captured sound events (Phase 8) ──
     update_audio(delta);
 
+    // ── Phase 47: Update speaker entity sounds ──
+#ifdef HAS_SPEAKER_ENTITIES_MODULE
+    Godot_Speakers_Update((float)delta);
+#endif
+
     // ── Update cinematic video display (Phase 11) ──
     update_cinematic();
 
@@ -3322,13 +3485,32 @@ void MoHAARunner::_process(double delta) {
     Godot_Music_Update(delta);
 #endif
 #ifdef HAS_WEATHER_MODULE
-    Godot_Weather_Update(delta);
+    {
+        Vector3 cam_pos;
+        if (camera) cam_pos = camera->get_global_position();
+        Godot_Weather_Update(cam_pos, (float)delta);
+    }
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Update(delta);
 #endif
 #ifdef HAS_DEBUG_RENDER_MODULE
     Godot_DebugRender_Update(delta);
+#endif
+
+    // ── Phase 60/61: Evict stale mesh and material cache entries ──
+#ifdef HAS_MESH_CACHE_MODULE
+    {
+        static uint64_t frame_counter = 0;
+        frame_counter++;
+        Godot_MeshCache::get().evict_stale(frame_counter);
+        Godot_MaterialCache::get().evict_stale(frame_counter);
+    }
+#endif
+
+    // ── Phase 85: End per-frame render statistics ──
+#ifdef HAS_MESH_CACHE_MODULE
+    Godot_RenderStats_EndFrame();
 #endif
 
     // ── Update game flow state machine (Phase 261) ──
@@ -3858,6 +4040,15 @@ void MoHAARunner::close_menu() {
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (!initialized) return;
 
+    // ── Phase 48: UI input routing ──
+    // When the engine's UI is active (menus, console, chat), route input
+    // through the UI handlers instead of direct engine injection.
+#if defined(HAS_UI_INPUT_MODULE) && defined(HAS_UI_SYSTEM_MODULE)
+    bool ui_captures = Godot_UI_ShouldCaptureInput() != 0;
+#else
+    bool ui_captures = false;
+#endif
+
     // ── Keyboard events ──
     InputEventKey *key_event = Object::cast_to<InputEventKey>(p_event.ptr());
     if (key_event) {
@@ -3880,6 +4071,22 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         }
 
         if (godot_key != 0) {
+#ifdef HAS_UI_INPUT_MODULE
+            if (ui_captures) {
+                // Route key events through UI system (menus, console, chat)
+                if (!echo) {
+                    Godot_UI_HandleKeyEvent(godot_key, pressed ? 1 : 0);
+                }
+                // Route character events for text input (console, chat)
+                if (pressed || echo) {
+                    int64_t unicode = key_event->get_unicode();
+                    if (unicode > 0) {
+                        Godot_UI_HandleCharEvent((int)unicode);
+                    }
+                }
+                return;
+            }
+#endif
             // Send SE_KEY for initial press and release (not for echoes)
             // The engine tracks key state internally and handles its own repeat.
             if (!echo) {
@@ -3911,6 +4118,14 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     // ── Mouse motion ──
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
+#ifdef HAS_UI_INPUT_MODULE
+        if (ui_captures) {
+            // Route mouse motion to UI system for menu navigation
+            Vector2 rel = motion_event->get_relative();
+            Godot_UI_HandleMouseMotion((int)rel.x, (int)rel.y);
+            return;
+        }
+#endif
         // Only forward mouse motion when captured (in-game mode)
         if (mouse_captured) {
             Vector2 rel = motion_event->get_relative();
@@ -3924,6 +4139,14 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (button_event) {
         int godot_button = (int)button_event->get_button_index();
         bool pressed = button_event->is_pressed();
+
+#ifdef HAS_UI_INPUT_MODULE
+        if (ui_captures) {
+            // Route mouse buttons to UI system
+            Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
+            return;
+        }
+#endif
 
         // Regular buttons: send press and release
         if (godot_button >= 1 && godot_button <= 3) {

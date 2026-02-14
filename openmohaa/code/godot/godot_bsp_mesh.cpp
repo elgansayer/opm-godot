@@ -2430,6 +2430,14 @@ void Godot_BSP_ResetEntityTokenParse(void)
     s_world_data.entityParseOffset = 0;
 }
 
+/* Phase 47: Raw entity string accessor for speaker entity parsing */
+const char *Godot_BSP_GetEntityString(void)
+{
+    if (!s_world_data.loaded || s_world_data.entityString.empty())
+        return nullptr;
+    return s_world_data.entityString.c_str();
+}
+
 /* Phase 19: Inline model bounds — from BSP model lump */
 void Godot_BSP_GetInlineModelBounds(int index, float *mins, float *maxs)
 {
