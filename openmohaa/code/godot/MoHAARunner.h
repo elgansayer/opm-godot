@@ -96,6 +96,11 @@
 #define HAS_NETWORK_ACCESSORS_MODULE 1
 #endif
 
+#if __has_include("godot_multiplayer_accessors.h")
+#include "godot_multiplayer_accessors.h"
+#define HAS_MULTIPLAYER_MODULE 1
+#endif
+
 #if __has_include("godot_pvs.h")
 #include "godot_pvs.h"
 #define HAS_PVS_MODULE 1
@@ -350,6 +355,12 @@ public:
     void start_server(const String &p_map, const String &p_gametype, int max_clients);
     void connect_to_server(const String &p_address);
     void disconnect_from_server();
+
+    // Multiplayer server browser + hosting (Phase 263)
+    void host_server(const String &p_map, int maxplayers, int gametype);
+    void refresh_server_list();
+    void refresh_lan();
+    int get_server_count() const;
 
     // Settings helpers (Phases 267-270)
     void set_audio_volume(float master, float music, float dialog);
