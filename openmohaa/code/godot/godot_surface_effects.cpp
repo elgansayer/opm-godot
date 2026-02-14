@@ -21,14 +21,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 /**
- * godot_surface_effects.c
+ * godot_surface_effects.cpp
  * 
  * Implementation of centralised surface effect lookup tables.
  */
 
 #include "../qcommon/surfaceflags.h"
-#include "../cgame/cg_local.h"
+#include "../cgame/cg_specialfx.h"
 #include "godot_surface_effects.h"
+
+extern "C" {
 
 /**
  * Surface effect data structure
@@ -206,3 +208,5 @@ const char *SurfaceEffects_GetBulletImpactSound(int surfType)
 {
     return LookupSound(bulletImpactSounds, surfType);
 }
+
+} // extern "C"
