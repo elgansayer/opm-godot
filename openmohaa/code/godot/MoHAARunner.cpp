@@ -187,6 +187,13 @@ extern "C" {
     int  Godot_Client_GetPaused(void);
     void Godot_Client_ForceUnpause(void);
 
+    // Save/load bridge — from godot_save_accessors.c
+    void Godot_Save_QuickSave(void);
+    void Godot_Save_QuickLoad(void);
+    void Godot_Save_SaveToSlot(int slot);
+    void Godot_Save_LoadFromSlot(int slot);
+    int  Godot_Save_SlotExists(int slot);
+
     // Cinematic bridge (Phase 11) — from godot_renderer.c
     int  Godot_Renderer_IsCinematicActive(void);
     int  Godot_Renderer_GetCinematicFrame(const unsigned char **out_data,
@@ -3864,8 +3871,22 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         bool pressed = key_event->is_pressed();
         bool echo = key_event->is_echo();
 
-        // F9 — toggle HUD overlay visibility (debug aid)
+        // F5 — quick save
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F5) {
+            Godot_Save_QuickSave();
+            UtilityFunctions::print("[MoHAA] Quick save requested");
+            return;
+        }
+
+        // F9 — quick load
         if (pressed && !echo && key_event->get_keycode() == Key::KEY_F9) {
+            Godot_Save_QuickLoad();
+            UtilityFunctions::print("[MoHAA] Quick load requested");
+            return;
+        }
+
+        // F10 — toggle HUD overlay visibility (debug aid)
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F10) {
             hud_visible = !hud_visible;
             if (hud_layer) hud_layer->set_visible(hud_visible);
             UtilityFunctions::print(String("[MoHAA] HUD overlay ") + (hud_visible ? String("ON") : String("OFF")));

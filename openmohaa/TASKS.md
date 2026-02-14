@@ -1871,3 +1871,22 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 262: Save/Load Game Integration ✅
+- [x] **Task 262.1:** Created `code/godot/godot_save_accessors.c` — C accessor wrapping engine `savegame`/`loadgame` console commands via `Cbuf_ExecuteText(EXEC_APPEND, ...)`.
+- [x] **Task 262.2:** Created `code/godot/godot_save_accessors.h` — header with extern "C" declarations for `Godot_Save_QuickSave`, `Godot_Save_QuickLoad`, `Godot_Save_SaveToSlot`, `Godot_Save_LoadFromSlot`, `Godot_Save_SlotExists`.
+- [x] **Task 262.3:** Wired F5 (quick save) and F9 (quick load) key handlers in `MoHAARunner::_unhandled_input()`. Moved HUD toggle from F9 to F10.
+- [x] **Task 262.4:** `Godot_Save_SlotExists` uses `Com_GetArchiveFileName` + `FS_ReadFile` to check for save slot `.sav` files.
+
+### Key technical details (Phase 262):
+- Save/load commands are queued via `Cbuf_ExecuteText(EXEC_APPEND, ...)` — engine's `SV_Savegame_f`/`SV_Loadgame_f` (in `sv_ccmds.c`) handle all serialisation.
+- Slot-based saves use names `slot0`–`slotN`; quick save/load uses name `quick`.
+- `Godot_Save_SlotExists` checks `save/<config>/<slotN>.sav` via `Com_GetArchiveFileName` and `FS_ReadFile(path, NULL)`.
+- No SConstruct changes needed — `code/godot/` is already in `src_dirs` and `add_sources()` recursively collects `.c`/`.cpp`.
+
+### Files created (Phase 262):
+- `code/godot/godot_save_accessors.c`
+- `code/godot/godot_save_accessors.h`
+
+### Files modified (Phase 262):
+- `code/godot/MoHAARunner.cpp` — added save accessor extern declarations, F5/F9 key handlers, moved HUD toggle to F10
