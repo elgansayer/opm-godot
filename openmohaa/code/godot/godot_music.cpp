@@ -184,7 +184,13 @@ static bool parse_mus_file(const char *mus_path, char *out_track,
         } else if (line_len >= 12 && strncmp(src, "!normal loop", 12) == 0) {
             *out_loop = true;
         } else if (line_len > 16 && strncmp(src, "!normal volume ", 15) == 0) {
-            *out_volume = (float)atof(src + 15);
+            char *endptr = nullptr;
+            float parsed = strtof(src + 15, &endptr);
+            if (endptr != src + 15) {
+                if (parsed < 0.0f) parsed = 0.0f;
+                if (parsed > 2.0f) parsed = 2.0f;
+                *out_volume = parsed;
+            }
         }
 
         src = (eol < end) ? eol + 1 : end;
@@ -248,8 +254,9 @@ static Ref<AudioStreamMP3> load_music_from_vfs(const char *name,
 
         /* Replace or append .mus extension */
         char *dot = strrchr(mus_path, '.');
-        if (dot && (strcmp(dot, ".mus") == 0 || strcmp(dot, ".mp3") == 0)) {
-            strcpy(dot, ".mus");
+        if (dot && (strcmp(dot, ".mus") == 0 || strcmp(dot, ".mp3") == 0)
+            && (dot - mus_path + 5) <= MUSIC_MAX_PATH) {
+            memcpy(dot, ".mus", 5); /* includes NUL terminator */
         } else {
             size_t plen = strlen(mus_path);
             if (plen + 4 < MUSIC_MAX_PATH) {

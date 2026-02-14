@@ -2738,14 +2738,14 @@ void MoHAARunner::update_audio(double delta) {
     if (!audio_root) return;
 
     // -- 1. Update listener position from engine camera --
-    float listener_id[3] = {0, 0, 0};  // Listener in id-space for occlusion checks
+    float listener_id_space[3] = {0, 0, 0};  // Listener in id-space for occlusion checks
     {
         float lo[3], la[9];
         int lent;
         Godot_Sound_GetListener(lo, la, &lent);
-        listener_id[0] = lo[0];
-        listener_id[1] = lo[1];
-        listener_id[2] = lo[2];
+        listener_id_space[0] = lo[0];
+        listener_id_space[1] = lo[1];
+        listener_id_space[2] = lo[2];
         Vector3 listener_pos = id_to_godot_position(lo[0], lo[1], lo[2]);
         if (audio_listener) {
             audio_listener->set_global_position(listener_pos);
@@ -2816,8 +2816,8 @@ void MoHAARunner::update_audio(double delta) {
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
             // Apply sound occlusion attenuation (BSP line-of-sight check)
-            float occ = Godot_SoundOcclusion_Check(listener_id[0], listener_id[1],
-                                                    listener_id[2],
+            float occ = Godot_SoundOcclusion_Check(listener_id_space[0], listener_id_space[1],
+                                                    listener_id_space[2],
                                                     origin[0], origin[1], origin[2]);
             float adj_vol = volume * occ;
             float vol_db = (adj_vol > 0.001f) ? (20.0f * log10f(adj_vol)) : -80.0f;
@@ -2873,8 +2873,8 @@ void MoHAARunner::update_audio(double delta) {
                 Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
                 p->set_global_position(pos);
                 // Apply sound occlusion attenuation for looping sounds
-                float occ = Godot_SoundOcclusion_Check(listener_id[0], listener_id[1],
-                                                        listener_id[2],
+                float occ = Godot_SoundOcclusion_Check(listener_id_space[0], listener_id_space[1],
+                                                        listener_id_space[2],
                                                         origin[0], origin[1], origin[2]);
                 float adj_vol = volume * occ;
                 float vol_db = (adj_vol > 0.001f) ? (20.0f * log10f(adj_vol)) : -80.0f;
@@ -2915,8 +2915,8 @@ void MoHAARunner::update_audio(double delta) {
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
             // Apply sound occlusion attenuation for new looping sounds
-            float occ = Godot_SoundOcclusion_Check(listener_id[0], listener_id[1],
-                                                    listener_id[2],
+            float occ = Godot_SoundOcclusion_Check(listener_id_space[0], listener_id_space[1],
+                                                    listener_id_space[2],
                                                     origin[0], origin[1], origin[2]);
             float adj_vol = volume * occ;
             float vol_db = (adj_vol > 0.001f) ? (20.0f * log10f(adj_vol)) : -80.0f;
