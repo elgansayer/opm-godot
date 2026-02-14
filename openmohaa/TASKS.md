@@ -1871,3 +1871,346 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Entity Audit: info, light, misc, weapon, and worldspawn
+
+This section documents a full audit of how five entity categories flow through the OpenMoHAA → Godot pipeline: BSP entity tokens → fgame spawn → engine render submission → `godot_renderer.c` capture → `MoHAARunner.cpp` rendering.
+
+### Render Flag Reference (q_shared.h)
+
+All `renderfx` flags used by MOHAA entities (from `code/qcommon/q_shared.h`):
+
+| Flag | Bit | Hex | Handled in MoHAARunner | Notes |
+|------|-----|-----|------------------------|-------|
+| `RF_THIRD_PERSON` | 1<<0 | 0x01 | ✅ Line 1110 | Player body hidden in first-person |
+| `RF_FIRST_PERSON` | 1<<1 | 0x02 | ✅ Line 1272 | View weapon only visible in first-person |
+| `RF_DEPTHHACK` | 1<<2 | 0x04 | ⚠️ Line 1273 | Flag read, depth test disabled but no actual depth compression |
+| `RF_VIEWLENSFLARE` | 1<<3 | 0x08 | ❌ | View-dependent lens flare — not implemented |
+| `RF_FRAMELERP` | 1<<4 | 0x10 | ❌ | Frame interpolation — handled implicitly by animation system |
+| `RF_BEAM` | 1<<5 | 0x20 | ❌ | Beam entity — handled via `reType == RT_BEAM` instead |
+| `RF_DONTDRAW` | 1<<7 | 0x80 | ✅ Line 1267 | Entity hidden |
+| `RF_LENSFLARE` | 1<<8 | 0x100 | ❌ | Lens flare effect — not implemented |
+| `RF_EXTRALIGHT` | 1<<9 | 0x200 | ❌ | Extra lighting on entity — not implemented |
+| `RF_DETAIL` | 1<<10 | 0x400 | ❌ | Distance-based LOD culling — not implemented |
+| `RF_SHADOW` | 1<<11 | 0x800 | ❌ | Shadow casting — not implemented |
+| `RF_PORTALSURFACE` | 1<<12 | 0x1000 | ❌ | Portal surface — not implemented |
+| `RF_SKYORIGIN` | 1<<13 | 0x2000 | ❌ | Sky portal origin — not implemented |
+| `RF_SKYENTITY` | 1<<14 | 0x4000 | ❌ | Only visible through skyportal — not implemented |
+| `RF_LIGHTOFFSET` | 1<<15 | 0x8000 | ❌ | Light origin offset — not implemented |
+| `RF_CUSTOMSHADERPASS` | 1<<16 | 0x10000 | ❌ | Custom shader overlay pass — not implemented |
+| `RF_MINLIGHT` | 1<<17 | 0x20000 | ❌ | Minimum lighting guarantee — not implemented |
+| `RF_FULLBRIGHT` | 1<<18 | 0x40000 | ❌ | Full brightness — not implemented |
+| `RF_LIGHTING_ORIGIN` | 1<<19 | 0x80000 | ❌ | Custom lighting sample origin — not implemented |
+| `RF_SHADOW_PLANE` | 1<<20 | 0x100000 | ❌ | Shadow plane projection — not implemented |
+| `RF_WRAP_FRAMES` | 1<<21 | 0x200000 | ❌ | Frame wrapping for continuous animation — not implemented |
+| `RF_ADDITIVE_DLIGHT` | 1<<22 | 0x400000 | ❌ | Additive dynamic light on entity — not implemented |
+| `RF_LIGHTSTYLE_DLIGHT` | 1<<23 | 0x800000 | ❌ | Light style dynamic light — not implemented |
+| `RF_SHADOW_PRECISE` | 1<<24 | 0x1000000 | ❌ | Precise shadow mapping — not implemented |
+| `RF_INVISIBLE` | 1<<25 | 0x2000000 | ❌ | Invisible, only negative lights affect — not implemented |
+| `RF_ALWAYSDRAW` | 1<<26 | 0x4000000 | ❌ | Always draw regardless of PVS — not implemented |
+
+**Note:** MoHAARunner line 1635 references `RF_ALPHAFADE = 0x0400` but this flag does not exist in the engine headers. The value 0x0400 actually corresponds to `RF_DETAIL` (distance LOD culling). This check is functionally harmless since the primary alpha detection (`rgba[3] < 255`) works correctly.
+
+---
+
+### 1. Worldspawn Audit
+
+**Pipeline:** BSP entity lump → `G_SpawnEntitiesFromString()` → `SP_worldspawn()` → `World` class events → client `refdef_t` → `GR_RenderScene()` → `MoHAARunner::update_camera()`
+
+**Spawn path** (`code/fgame/g_spawn.cpp:1214-1267`):
+- `SP_worldspawn()` is called first before any other entity
+- Reads BSP spawnvars: `music`, `gravity`, `message`, `enableDust`, `enableBreath`
+- Sets config strings (`CS_MUSIC`, `CS_MESSAGE`) and cvars (`g_gravity`, `g_enableDust`, `g_enableBreath`)
+- Posts all remaining spawnvars as events to the `world` entity (C++ `World` class)
+
+**World class** (`code/fgame/worldspawn.h:101-203`, `worldspawn.cpp`):
+- Processes farplane, sky, weather, and rendering properties via event handlers
+- Key members: `farplane_distance`, `farplane_color`, `farplane_cull`, `sky_alpha`, `sky_portal`, `skybox_speed`, `farclip_override`, `farplane_color_override`, animated farplane variants
+
+**Rendering capture** (`code/godot/godot_renderer.c`):
+- `GR_RenderScene()` captures from `refdef_t`: `farplane_distance`, `farplane_color[3]`, `farplane_cull`
+- Stored in static variables, read by `Godot_Renderer_GetFarplane()` accessor
+
+**Godot-side** (`code/godot/MoHAARunner.cpp`):
+- `update_camera()` reads farplane → sets `Camera3D.far` and `Environment.fog_*` properties
+- `load_skybox()` reads sky shader from `Godot_ShaderProps_GetSkyEnv()` → loads 6 cubemap faces
+
+#### Worldspawn: What works ✅
+| Property | Pipeline | Status |
+|----------|----------|--------|
+| `farplane_distance` | SP_worldspawn → World → CG refdef → GR_RenderScene → update_camera | ✅ Working — sets camera far plane and fog distance |
+| `farplane_color` | Same pipeline as distance | ✅ Working — sets fog colour |
+| `farplane_cull` | Captured by GR_RenderScene | ⚠️ Captured but unused — flag is read but not applied for entity culling |
+| `gravity` | SP_worldspawn → `gi.cvar_set("g_gravity")` | ✅ Working — engine physics uses cvar directly |
+| `message` | SP_worldspawn → CS_MESSAGE config string | ✅ Working — displayed during connection |
+| Sky shader | World → shader system → `Godot_ShaderProps_GetSkyEnv()` → `load_skybox()` | ✅ Working — cubemap skybox loaded |
+
+#### Worldspawn: What's missing ❌
+| Property | Set by World class | Read by Godot | Issue |
+|----------|-------------------|---------------|-------|
+| `sky_alpha` | `worldspawn.h:132` | ❌ Never read | Sky blending with world not supported |
+| `sky_portal` | `worldspawn.h:133` | ❌ Never read | Sky portal rendering not implemented |
+| `skybox_speed` | `worldspawn.h:115` | ❌ Never read | Rotating skybox not supported |
+| `skybox_farplane` | `worldspawn.h:113` | ❌ Never read | Separate far plane for skybox rendering |
+| `farclip_override` | `worldspawn.h:116` | ❌ Never read | Override far clip not exposed to Godot |
+| `farplane_color_override` | `worldspawn.h:117` | ❌ Never read | Override fog colour not exposed to Godot |
+| `animated_farplane_*` | `worldspawn.h:118-129` | ❌ Never read | 8 animated farplane variants: start/end distance, colour, bias, Z-range |
+| `render_terrain` | `worldspawn.h:114` | ❌ Never read | Terrain rendering toggle |
+| `music` (CS_MUSIC) | `g_spawn.cpp:1229` | ❌ Never read | Music playback not implemented (noted in project status) |
+| `enableDust` | `g_spawn.cpp:1239-1240` | ❌ Never read | Dust particle effects not implemented |
+| `enableBreath` | `g_spawn.cpp:1242-1243` | ❌ Never read | Breath vapour effects not implemented |
+| `farplane_cull` application | Captured in renderer | ⚠️ Read but unused | Should cull entities beyond farplane distance |
+
+**Recommendations:**
+1. Add accessor functions for `sky_alpha`, `skybox_speed`, `farclip_override` via a new `godot_world_accessors.c`
+2. Implement animated farplane support by reading World class properties per-frame
+3. Implement music playback from CS_MUSIC config string (already noted as future work)
+4. Apply `farplane_cull` flag in `update_entities()` to skip entities beyond farplane distance
+
+---
+
+### 2. Light Entity Audit
+
+**Pipeline:** BSP entity lump → `G_CallSpawn()` → `SP_light()` → `Light` class (self-removes) | BSP lightmaps → `godot_bsp_mesh.cpp` | Dynamic lights → `GR_AddLightToScene()` → `MoHAARunner::update_dlights()`
+
+**Light entity spawn** (`code/fgame/light.cpp`):
+- `Light` class constructor calls `PostEvent(EV_Remove, 0)` — entity immediately removed
+- This is **correct behaviour**: BSP light entities are compile-time only; their illumination is baked into lightmaps during map compilation
+- Properties defined in QUAKED comment: intensity, colour, falloff, radius, spotlight angles, entity trace flag
+
+**BSP lightmaps** (`code/godot/godot_bsp_mesh.cpp`):
+- Loaded from `LUMP_LIGHTMAPS` (BSP lump 2)
+- Each lightmap is 128×128 pixels, RGB format
+- Expanded to RGBA8, with overbright shift (<<1)
+- Applied as UV2 detail texture on StandardMaterial3D per BSP surface
+- `SURF_NOLIGHTMAP` flag (0x100) respected — surfaces with flag skip lightmap
+
+**Dynamic lights** (`code/godot/godot_renderer.c`):
+- Captured via `GR_AddLightToScene()` and `GR_AddAdditiveLightToScene()`
+- Up to 64 dynamic lights per frame in `gr_dlights[]` buffer
+- Each stores: `origin[3]`, `intensity`, `r/g/b`, `type` (0=normal, 1=additive)
+- Cleared each frame by `GR_ClearScene()`
+
+**Godot rendering** (`code/godot/MoHAARunner.cpp`):
+- `update_dlights()` creates `OmniLight3D` node pool
+- Position converted from id Tech 3 → Godot coordinates
+- `intensity` used as light range (metres after unit scale)
+- Energy hardcoded to 2.0, attenuation hardcoded to 1.5
+
+**Lightgrid** (`code/godot/godot_entity_lighting.cpp`):
+- `Godot_EntityLight_Sample()` reads BSP lightgrid for ambient + directed light at a point
+- `Godot_EntityLight_Dlights()` accumulates nearest N dynamic lights with linear attenuation
+- `Godot_EntityLight_Combined()` merges both sources
+- Used in `update_entities()` for entity material tinting
+
+#### Light: What works ✅
+| Feature | Status |
+|---------|--------|
+| BSP lightmaps loaded and applied | ✅ 128×128 RGB→RGBA with overbright |
+| Light entities self-remove (correct) | ✅ Compile-time only |
+| Dynamic lights captured (up to 64) | ✅ GR_AddLightToScene/GR_AddAdditiveLightToScene |
+| Dynamic lights rendered in Godot | ✅ OmniLight3D pool with coordinate conversion |
+| Lightgrid sampling for entities | ✅ Ambient + directed light at entity position |
+| Entity tinting from lightgrid | ✅ Material colour modulation |
+
+#### Light: What's missing ❌
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Additive light type differentiation | ❌ | `type=1` (additive) captured but not differentiated in Godot rendering — all lights treated identically |
+| Spotlight support | ❌ | Engine supports direction + cone angle but only `OmniLight3D` (omnidirectional) used in Godot |
+| Dynamic shadows | ❌ | No shadow casting enabled on `OmniLight3D` nodes |
+| RF_SHADOW flag handling | ❌ | Per-entity shadow enable/disable not implemented |
+| Light flicker/animation | ❌ | No temporal variation support |
+| RF_EXTRALIGHT / RF_FULLBRIGHT | ❌ | Not applied to entity materials |
+| RF_MINLIGHT | ❌ | Minimum lighting guarantee not applied |
+| RF_LIGHTING_ORIGIN | ❌ | Custom lighting sample point not used — always samples at entity origin |
+| RF_LIGHTOFFSET | ❌ | Light origin offset not applied |
+
+**Recommendations:**
+1. Differentiate additive lights: set `OmniLight3D.light_negative = false` with additive blending or higher energy
+2. Consider enabling shadows on a few closest/brightest dynamic lights (performance trade-off)
+3. Implement RF_FULLBRIGHT as `StandardMaterial3D.emission_enabled = true` with full white emission
+4. Implement RF_MINLIGHT by clamping lightgrid sample minimum to 0.2
+
+---
+
+### 3. Info Entity Audit
+
+**Pipeline:** BSP entity lump → `G_CallSpawn()` → `SP_info_*()` → entity class constructor
+
+**info_player_start** (`code/fgame/playerstart.cpp`):
+- Class: `PlayerStart : SimpleArchivedEntity`
+- Constructor sets `m_bForbidSpawns = false`, `m_bDeleteOnSpawn = false`
+- Pure positional entity — no visual model, no render submission
+- Used by player manager to select spawn locations
+- SP function (`g_client.cpp:63`): delegates to `SP_info_player_deathmatch`
+
+**info_player_deathmatch** (`code/fgame/g_client.cpp:47`):
+- Reads `nobots`/`nohumans` spawn flags → sets FL_NO_BOTS/FL_NO_HUMANS
+- No visual component
+
+**info_player_intermission** (`code/fgame/playerstart.cpp`):
+- Class: `PlayerIntermission : Camera` — inherits from Camera entity
+- Used for intermission camera viewpoint between levels
+- Sets `currentstate.watch.watchPath = false`
+
+**info_player_axis / info_player_allied** (`code/fgame/g_spawn.cpp:842-843`):
+- Mapped to `SP_team_CTF_redspawn` / `SP_team_CTF_bluespawn`
+- Team-specific spawn points for multiplayer
+
+**info_null** (`code/fgame/misc.cpp`):
+- Class: `InfoNull : Listener` — minimal base class
+- Self-removes immediately via `PostEvent(EV_Remove, EV_REMOVE)`
+- Used as target position for lights and effects
+
+**info_notnull** (`code/fgame/misc.cpp`):
+- Class: `InfoNotNull : Entity`
+- Persists in world — used as lightning/effect endpoint
+- No visual model
+
+**info_camp**: Declared in g_spawn.cpp but no implementation found — likely unused in MOHAA.
+
+#### Info: What works ✅
+| Entity | Status | Notes |
+|--------|--------|-------|
+| `info_player_start` | ✅ | Spawns correctly; player positioning works |
+| `info_player_deathmatch` | ✅ | Bot/human flags parsed; spawn selection works |
+| `info_player_intermission` | ✅ | Camera entity for intermission view |
+| `info_player_axis/allied` | ✅ | Team spawn points work |
+| `info_null` | ✅ | Self-removes correctly (utility target) |
+| `info_notnull` | ✅ | Persists as lightning/effect endpoint |
+
+#### Info: What's missing ❌
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Initial camera at info_player_start | ⚠️ | Camera follows engine refdef, not explicitly positioned at spawn point before player spawns |
+| info_camp | ⚠️ | Declared but may lack implementation — does not affect Godot rendering |
+
+**Assessment:** Info entities are non-visual game logic entities. They function correctly within the engine and do not require Godot-side rendering. No action needed.
+
+---
+
+### 4. Misc Entity Audit
+
+**Pipeline:** BSP entity lump → `G_CallSpawn()` → `SP_misc_*()` → entity class | BSP static models → `godot_bsp_mesh.cpp` → `MoHAARunner::load_static_models()`
+
+**misc_model** (`code/fgame/misc.cpp`):
+- Class: `MiscModel : Entity`
+- Self-removes immediately via `PostEvent(EV_Remove, EV_REMOVE)`
+- This is correct: misc_model entities in MOHAA are baked into BSP as static models at compile time
+- Their rendering comes from the BSP static model system, not from the entity system
+
+**BSP Static Models** (`code/godot/godot_bsp_mesh.cpp`):
+- Loaded from `LUMP_STATICMODELDEF` (lump 25) and `LUMP_STATICMODELDATA` (lump 24)
+- Each static model has: TIKI name, position, angles, scale
+- Rendered via `MoHAARunner::load_static_models()` which creates `MeshInstance3D` nodes with TIKI meshes
+
+**misc_portal_surface** / **misc_portal_camera**:
+- Declared in spawn table but not implemented in Godot
+- Portal rendering requires a secondary camera render pass — fundamentally different from standard entity rendering
+
+**misc_teleporter_dest** (`code/fgame/g_spawn.cpp`):
+- Pure positional entity — teleporter destination point
+- No visual component needed
+
+#### Misc: What works ✅
+| Entity | Status | Notes |
+|--------|--------|-------|
+| `misc_model` | ✅ | Self-removes correctly; rendered via BSP static model system |
+| BSP static models | ✅ | Loaded from BSP lumps, rendered as MeshInstance3D with TIKI meshes |
+| `misc_teleporter_dest` | ✅ | Positional entity; no rendering needed |
+
+#### Misc: What's missing ❌
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `misc_portal_surface` rendering | ❌ | Portal rendering completely unimplemented — requires secondary Viewport + Camera |
+| `misc_portal_camera` support | ❌ | Portal camera viewpoint not captured or used |
+| RT_PORTALSURFACE render type | ❌ | Render type not handled in `update_entities()` |
+
+**Recommendations:**
+1. Portal rendering is a significant feature requiring a secondary `SubViewport` in Godot to render from the portal camera's perspective, then projecting that texture onto the portal surface. This should be a dedicated future phase.
+2. Consider adding `RF_PORTALSURFACE` entity type detection to log portal surface locations for debugging.
+
+---
+
+### 5. Weapon Entity Audit
+
+**Pipeline:** Script/spawn system → `Weapon : Item : Trigger : Entity` → entity state → cgame render → `GR_AddRefEntityToScene()` → `MoHAARunner::update_entities()`
+
+**Weapon class** (`code/fgame/weapon.h`, `weapon.cpp`):
+- Inherits: `Weapon : Item : Trigger : Animate : Entity`
+- Spawned via event/script system, not through SP_ functions
+- CLASS_DECLARATION with NULL classname — dynamically instantiated
+- ~70 event handlers for fire, reload, raise, lower, etc.
+- Dual model system: world model (ground/third-person) + view model (first-person)
+- `weaponstate` state machine: HOLSTERED, READY, FIRING, LOWERING, RAISING, RELOADING
+
+**Item/Pickup system** (`code/fgame/item.h`, `item.cpp`):
+- Base class for all pickupable items including weapons
+- Handles pickup radius, respawn timing, inventory management
+- Ground pickup model set via `setModel()`
+
+**Render submission:**
+- World model: standard entity submitted as `refEntity_t` with `renderfx = 0` (normal entity)
+- First-person view model: submitted with `RF_FIRST_PERSON | RF_DEPTHHACK` flags
+- Third-person player weapon: submitted with RF_THIRD_PERSON (hidden in first-person view)
+
+**Godot handling** (`code/godot/MoHAARunner.cpp`):
+- Ground/pickup weapons rendered as standard RT_MODEL entities — TIKI mesh loaded, positioned, textured
+- First-person weapon: `RF_FIRST_PERSON` flag detected, depth test disabled, render priority set to 127
+- Third-person weapon: `RF_THIRD_PERSON` flag causes entity to be hidden (correct for first-person view)
+
+#### Weapon: What works ✅
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Ground/pickup weapon models | ✅ | Rendered as standard TIKI entities via RT_MODEL |
+| First-person weapon rendering | ✅ | RF_FIRST_PERSON detected; depth hack applied |
+| Third-person weapon hiding | ✅ | RF_THIRD_PERSON correctly hides player body/weapon in first-person |
+| Weapon state machine | ✅ | Engine handles all weapon states internally |
+| Weapon animation | ✅ | Skeletal animation via TIKI system, CPU skinning in Godot |
+
+#### Weapon: What's missing ❌
+| Feature | Status | Notes |
+|---------|--------|-------|
+| RF_DEPTHHACK depth compression | ⚠️ | Flag detected, depth test disabled and render priority set, but no actual Z-buffer compression (view weapon may clip through thin walls) |
+| Weapon pickup glow/highlight | ❌ | No special rendering for item pickups on ground |
+| Muzzle flash light | ⚠️ | Handled through dynamic light system (if engine submits dlight), but no special integration |
+| Tracer rendering | ⚠️ | Handled via RT_BEAM entities, but not weapon-specific |
+| Shell ejection particles | ❌ | Particle effects not specially handled for weapons |
+
+**Assessment:** Weapon entities work correctly through the standard entity rendering pipeline. The dual world/view model system functions as expected. No critical issues found.
+
+---
+
+### Summary of Findings
+
+**Critical Issues (0):** None found — all five entity categories function correctly through the pipeline.
+
+**Notable Gaps (ordered by impact):**
+1. **Portal rendering** — `misc_portal_surface`/`misc_portal_camera` completely unimplemented (requires SubViewport)
+2. **Music playback** — CS_MUSIC config string from worldspawn not read (already noted in project status)
+3. **Animated farplane** — 8 worldspawn variants set by World class but never exposed to Godot
+4. **Sky properties** — `sky_alpha`, `sky_portal`, `skybox_speed` not read by Godot
+5. **Render flags** — 20+ flags defined but only 4 handled (RF_THIRD_PERSON, RF_FIRST_PERSON, RF_DEPTHHACK, RF_DONTDRAW)
+6. **Additive dynamic lights** — type flag captured but not differentiated in rendering
+7. **RF_FULLBRIGHT/RF_MINLIGHT** — entity lighting overrides not applied
+
+**Minor Issues:**
+1. **`RF_ALPHAFADE`** comment at MoHAARunner line 1635 references non-existent flag — the value 0x0400 is actually `RF_DETAIL`. The check is functionally harmless since the primary alpha detection (`rgba[3] < 255`) is correct.
+2. **`farplane_cull`** flag captured by renderer but never applied for entity distance culling.
+
+### Files Referenced in This Audit
+- `code/fgame/g_spawn.cpp` — Entity spawn table and SP_worldspawn
+- `code/fgame/worldspawn.h` / `worldspawn.cpp` — World class with farplane/sky properties
+- `code/fgame/light.cpp` — Light entity (self-removing)
+- `code/fgame/misc.cpp` / `misc.h` — MiscModel, InfoNull, InfoNotNull entities
+- `code/fgame/playerstart.cpp` / `playerstart.h` — PlayerStart, PlayerIntermission entities
+- `code/fgame/g_client.cpp` — SP_info_player_* implementations
+- `code/fgame/weapon.cpp` / `weapon.h` — Weapon class and state machine
+- `code/fgame/item.h` / `item.cpp` — Item base class
+- `code/godot/godot_renderer.c` — Entity/light/camera capture + accessor layer
+- `code/godot/godot_bsp_mesh.cpp` — BSP lightmaps and static models
+- `code/godot/godot_entity_lighting.cpp` — Lightgrid + dynamic light sampling
+- `code/godot/MoHAARunner.cpp` — Entity rendering, camera, dynamic lights, HUD
+- `code/qcommon/q_shared.h` — RF_* render flag definitions
+- `code/renderercommon/tr_types.h` — Q3 render flag definitions (mostly commented out)

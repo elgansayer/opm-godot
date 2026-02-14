@@ -1632,7 +1632,7 @@ void MoHAARunner::update_entities() {
 
         // ── Phase 21+22: Entity colour tinting + alpha ──
         // Apply shaderRGBA modulation when it's not opaque white.
-        // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
+        // RF_DETAIL = 0x0400 (1<<10) — distance-based LOD culling (not implemented)
         float ambient[3] = {1.0f, 1.0f, 1.0f};
         float directed[3] = {0.0f, 0.0f, 0.0f};
         float ldir[3] = {0.0f, 0.0f, 1.0f};
@@ -1649,7 +1649,7 @@ void MoHAARunner::update_entities() {
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;
         bool has_tint  = (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255);
-        bool has_alpha = (rgba[3] < 255) || (renderfx & 0x0400);
+        bool has_alpha = (rgba[3] < 255);
         if (has_tint || has_alpha || has_light_tint) {
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
