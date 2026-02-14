@@ -1871,3 +1871,14 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 116-120: Collision & Physics Audit ✅
+- [x] **BSP collision (CM_BoxTrace):** `CM_BoxTrace()` traces boxes through BSP world correctly. `CM_PointContents()` returns content flags. Brush collision (solid, water, lava, clip), patch collision hulls from Bézier patches, and terrain heightfield traces all function correctly. No `#ifdef GODOT_GDEXTENSION` guards needed — compiled identically for Godot and native.
+- [x] **Entity collision:** `SV_Trace()` wraps `CM_BoxTrace` with entity clipping via `SV_ClipMoveToEntities()`. Entity clip models (bounding boxes and BSP sub-models) handled by `SV_ClipHandleForEntity()`. Pusher entities (doors, elevators) use `G_Push()` with rollback on blocking. Trigger touches detected via `G_TouchTriggers()`. `CONTENTS_BODY`, `CONTENTS_SOLID`, `CONTENTS_PLAYERCLIP` masks used correctly.
+- [x] **Projectile physics:** Grenades use `MOVETYPE_BOUNCE` with engine gravity and surface-aware bounce sounds. Rockets travel straight-line and detonate on impact with `RadiusDamage()` splash. Bullets use instant-hit `G_Trace()` with material penetration (up to 5 layers). Per-weapon definitions loaded from TIKI files via `SpawnArgs`. Projectile–entity collision applies damage with knockback and means-of-death tracking.
+- [x] **Water physics:** `PM_WaterMove()` applies velocity scaling (80%/50% by water level) and water friction. Water level detection via `PM_SetWaterLevel()` (0–3 tiers). Drowning damage in `P_WorldEffects()` scales from 2–15 HP/tick. Transition sounds: `EV_WATER_TOUCH`, `EV_WATER_LEAVE`, `EV_WATER_UNDER`, `EV_WATER_CLEAR`.
+- [x] **Fall damage:** `PM_CrashLand()` uses kinematic delta calculation with four severity tiers (short/medium/far/fatal). Water reduces fall damage by 50–75%. `SURF_NODAMAGE` suppresses damage on bounce pads. Terminal velocity event at 1200 ups.
+- [x] **Kill triggers and world damage:** `trigger_hurt` applies configurable damage with `DAMAGE_NO_ARMOR`. Lava deals 30×waterlevel, slime deals 10×waterlevel per frame via `P_WorldEffects()`. Out-of-world kills handled by map-placed `trigger_hurt` volumes (standard id Tech 3 practice).
+
+### Audit documentation:
+- `code/godot/godot_physics_audit.md` — full audit results with per-subsystem findings
