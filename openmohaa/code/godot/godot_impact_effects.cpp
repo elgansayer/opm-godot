@@ -124,11 +124,6 @@ static float randf(void) {
     return (float)rand() / (float)RAND_MAX;
 }
 
-/* Returns a float in [-1, 1). */
-static float randf_signed(void) {
-    return randf() * 2.0f - 1.0f;
-}
-
 /* ===================================================================
  *  Build a randomised velocity vector within a cone around `normal`.
  *  spread_deg is the cone half-angle in degrees.
