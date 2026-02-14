@@ -224,6 +224,9 @@ extern "C" {
     // Phase 35: Entity parenting — from godot_renderer.c
     int   Godot_Renderer_GetEntityParent(int index);
 
+    // Phase 268: Entity lighting origin — from godot_renderer.c
+    void  Godot_Renderer_GetEntityLightingOrigin(int index, float *out);
+
     // Phase 26: Shader remap query — from godot_renderer.c
     const char *Godot_Renderer_GetShaderRemap(const char *shaderName);
 
@@ -1671,21 +1674,37 @@ void MoHAARunner::update_entities() {
             }
         }
 
-        // ── Phase 21+22: Entity colour tinting + alpha ──
+        // ── Phase 21+22+268: Entity colour tinting + alpha + entity lighting ──
         // Apply shaderRGBA modulation when it's not opaque white.
         // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
-        float ambient[3] = {1.0f, 1.0f, 1.0f};
-        float directed[3] = {0.0f, 0.0f, 0.0f};
-        float ldir[3] = {0.0f, 0.0f, 1.0f};
-        float point[3] = { origin[0], origin[1], origin[2] };
-        int lit = Godot_BSP_LightForPoint(point, ambient, directed, ldir);
         Color light_mul(1.0f, 1.0f, 1.0f, 1.0f);
-        if (lit) {
-            light_mul = Color(clamp01(ambient[0] + directed[0] * 0.5f),
-                              clamp01(ambient[1] + directed[1] * 0.5f),
-                              clamp01(ambient[2] + directed[2] * 0.5f),
-                              1.0f);
+#ifdef HAS_ENTITY_LIGHTING_MODULE
+        {
+            // Determine lighting sample position in id Tech 3 coordinates
+            float light_pos[3] = { origin[0], origin[1], origin[2] };
+            // RF_LIGHTING_ORIGIN (0x0080): sample at lightingOrigin instead
+            if (renderfx & 0x0080) {
+                Godot_Renderer_GetEntityLightingOrigin(i, light_pos);
+            }
+            float lr, lg, lb;
+            Godot_EntityLight_Combined(light_pos, 4, &lr, &lg, &lb); // 4 closest dlights per entity
+            light_mul = Color(lr, lg, lb, 1.0f);
         }
+#else
+        {
+            float ambient[3] = {1.0f, 1.0f, 1.0f};
+            float directed[3] = {0.0f, 0.0f, 0.0f};
+            float ldir[3] = {0.0f, 0.0f, 1.0f};
+            float point[3] = { origin[0], origin[1], origin[2] };
+            int lit = Godot_BSP_LightForPoint(point, ambient, directed, ldir);
+            if (lit) {
+                light_mul = Color(clamp01(ambient[0] + directed[0] * 0.5f),
+                                  clamp01(ambient[1] + directed[1] * 0.5f),
+                                  clamp01(ambient[2] + directed[2] * 0.5f),
+                                  1.0f);
+            }
+        }
+#endif
         bool has_light_tint = fabsf(light_mul.r - 1.0f) > 0.02f ||
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;

@@ -254,6 +254,7 @@ typedef struct {
     int     parentEntity;
     float   radius;          /* RT_SPRITE size */
     float   rotation;        /* RT_SPRITE rotation angle (degrees) */
+    float   lightingOrigin[3]; /* RF_LIGHTING_ORIGIN override point */
 
     /* Skeletal animation data (Phase 13) */
     frameInfo_t frameInfo[MAX_FRAMEINFOS];
@@ -637,6 +638,8 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
     ge->parentEntity  = parentEntityNumber;
     ge->radius        = re->radius;
     ge->rotation      = re->rotation;
+
+    VectorCopy( re->lightingOrigin, ge->lightingOrigin );
 
     VectorCopy( re->origin, ge->origin );
     VectorCopy( re->oldorigin, ge->oldorigin );
@@ -2234,6 +2237,15 @@ int Godot_Renderer_GetEntityParent( int index )
 {
     if ( index < 0 || index >= gr_numEntities ) return -1;
     return gr_entities[index].parentEntity;
+}
+
+/* Phase 268: Entity lighting origin accessor */
+void Godot_Renderer_GetEntityLightingOrigin( int index, float *out )
+{
+    if ( index < 0 || index >= gr_numEntities || !out ) return;
+    out[0] = gr_entities[index].lightingOrigin[0];
+    out[1] = gr_entities[index].lightingOrigin[1];
+    out[2] = gr_entities[index].lightingOrigin[2];
 }
 
 /* Phase 26: Shader remap query — check if a shader name has been remapped */
