@@ -938,7 +938,9 @@ static Ref<ArrayMesh> batches_to_array_mesh(
         // Material with texture and shader properties
         Ref<StandardMaterial3D> mat;
         mat.instantiate();
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+        // MOHAA default is CT_FRONT_SIDED (back-face cull).
+        // Shader overrides (cull none / cull twosided) are applied below.
+        mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
         /* BSP world geometry uses baked lightmaps for all lighting.
          * Set UNSHADED so Godot's dynamic lights (DirectionalLight3D,
@@ -990,7 +992,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                         mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
                         break;
                     case SHADER_CULL_NONE:
-                        /* Already CULL_DISABLED from default */
+                        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
                         break;
                 }
             }
