@@ -24,9 +24,10 @@
 using namespace godot;
 
 /* ── Constants ── */
-static constexpr float INCHES_TO_METRES  = 1.0f / 39.37f;
-static constexpr float DEFAULT_FAR_METRES = 1000.0f;
-static constexpr float POLL_INTERVAL      = 1.0f; /* seconds */
+static constexpr float INCHES_TO_METRES   = 1.0f / 39.37f;
+static constexpr float DEFAULT_FAR_METRES  = 1000.0f;
+static constexpr float MIN_NEAR_METRES     = 0.001f;
+static constexpr float POLL_INTERVAL       = 1.0f; /* seconds */
 
 /* ── Cached state ── */
 static float s_near_metres       = 4.0f * INCHES_TO_METRES;
@@ -55,8 +56,8 @@ static void draw_distance_poll(void)
     /* Near plane */
     float znear = Godot_DrawDistance_GetZNear();
     s_near_metres = znear * INCHES_TO_METRES;
-    if (s_near_metres < 0.001f) {
-        s_near_metres = 0.001f;
+    if (s_near_metres < MIN_NEAR_METRES) {
+        s_near_metres = MIN_NEAR_METRES;
     }
 
     /* Far plane — cg_farplane overrides r_zfar */

@@ -19,6 +19,9 @@
 /* ── Renderer farplane accessor (godot_renderer.c) ── */
 extern void Godot_Renderer_GetFarplane(float *distance, float *color, int *cull);
 
+/* Default near clip plane in inches (matches upstream r_znear). */
+#define DEFAULT_ZNEAR_INCHES 4.0f
+
 /*
  * Godot_DrawDistance_GetZNear — near clip plane in inches.
  *
@@ -32,7 +35,7 @@ float Godot_DrawDistance_GetZNear(void)
     if (cv && cv->value > 0.0f) {
         return cv->value;
     }
-    return 4.0f;
+    return DEFAULT_ZNEAR_INCHES;
 }
 
 /*
