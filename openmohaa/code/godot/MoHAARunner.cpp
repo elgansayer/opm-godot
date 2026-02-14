@@ -1401,19 +1401,20 @@ void MoHAARunner::update_entities() {
                 if (has_anim && tikiPtr) {
 #ifdef HAS_MESH_CACHE_MODULE
                     // Phase 60: Build EntityMeshCacheKey from animation state
-                    EntityMeshCacheKey mesh_key;
-                    memset(&mesh_key, 0, sizeof(mesh_key));
+                    EntityMeshCacheKey mesh_key{};
                     mesh_key.hModel = hModel;
                     mesh_key.lodLevel = 0;
-                    // Fill frame slots from frameInfoBuf (index, weight, time)
-                    // frameInfoBuf holds up to 16 frameInfo_t entries; we use first 4.
+                    // Fill frame slots from frameInfoBuf (index, weight, time).
+                    // frameInfoBuf holds up to 16 frameInfo_t entries; we use the first 4.
+                    // Each frameInfo_t is 16 bytes: { int index, float weight, float time, int padding }
+                    // so stride = 4 ints or 4 floats per entry.
+                    static const int FRAME_INFO_STRIDE = 4;
                     const float *fi_floats = reinterpret_cast<const float *>(frameInfoBuf);
                     for (int f = 0; f < 4; f++) {
-                        // Each frameInfo_t: int index, float weight, float time (+ padding)
-                        const int *fi_ints = reinterpret_cast<const int *>(frameInfoBuf) + f * 4;
+                        const int *fi_ints = reinterpret_cast<const int *>(frameInfoBuf) + f * FRAME_INFO_STRIDE;
                         mesh_key.frames[f].index  = fi_ints[0];
-                        mesh_key.frames[f].weight = fi_floats[f * 4 + 1];
-                        mesh_key.frames[f].time   = fi_floats[f * 4 + 2];
+                        mesh_key.frames[f].weight = fi_floats[f * FRAME_INFO_STRIDE + 1];
+                        mesh_key.frames[f].time   = fi_floats[f * FRAME_INFO_STRIDE + 2];
                     }
 
                     const EntityMeshCacheEntry *cached_entry =
@@ -1676,13 +1677,16 @@ void MoHAARunner::update_entities() {
                 int sc = mesh->get_surface_count();
                 for (int s = 0; s < sc; s++) {
 #ifdef HAS_MESH_CACHE_MODULE
-                    // Phase 61: Build MaterialCacheKey for singleton cache lookup
-                    // Quantise light into the RGBA bytes to capture lighting in the key
+                    // Phase 61: Build MaterialCacheKey for singleton cache lookup.
+                    // Quantise light into RGBA bytes to capture lighting in the key.
+                    // Each rgba byte: lower 4 bits = quantised entity RGBA,
+                    //                 upper 4 bits = quantised lightgrid intensity.
                     uint8_t lr = (uint8_t)(light_mul.r * 15.0f + 0.5f);
                     uint8_t lg = (uint8_t)(light_mul.g * 15.0f + 0.5f);
                     uint8_t lb = (uint8_t)(light_mul.b * 15.0f + 0.5f);
                     MaterialCacheKey mat_key;
-                    // Encode hModel + surface index into shader_handle for uniqueness
+                    // shader_handle encodes hModel (upper bits) + surface index
+                    // (lower 4 bits, supporting up to 16 surfaces per model).
                     mat_key.shader_handle = (hModel << 4) | (s & 0xF);
                     mat_key.rgba[0] = (rgba[0] >> 4) | (lr << 4);
                     mat_key.rgba[1] = (rgba[1] >> 4) | (lg << 4);
