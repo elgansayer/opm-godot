@@ -27,6 +27,12 @@
 #include <math.h>
 #include <string.h>
 
+/*
+ * Size of skelBoneCache_t (float offset[4] + float matrix[3][4] = 64 bytes).
+ * Defined locally to avoid pulling in the full skeletor header chain.
+ */
+#define SKEL_BONE_CACHE_SIZE 64
+
 /* ── External accessors (implemented in godot_renderer.c) ── */
 extern "C" {
 
@@ -211,8 +217,8 @@ int Godot_AnimBlend_ComputeBones(void *tiki_ptr,
         copyCount = max_bones;
     }
 
-    /* skelBoneCache_t is 64 bytes: float offset[4] + float matrix[3][4] */
-    memcpy(out_bones, bones, (size_t)copyCount * 64);
+    /* skelBoneCache_t is SKEL_BONE_CACHE_SIZE bytes: float offset[4] + float matrix[3][4] */
+    memcpy(out_bones, bones, (size_t)copyCount * SKEL_BONE_CACHE_SIZE);
 
     free(bones);
 
