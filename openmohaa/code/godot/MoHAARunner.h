@@ -145,6 +145,7 @@ private:
     // Input state (Phase 6)
     bool mouse_captured = false;  // Whether mouse is in relative/captured mode
     bool hud_visible = true;        // F9 toggles HUD overlay visibility
+    bool last_ui_cursor_shown = false; // Phase 59: track cursor state for mode transitions
 
     // 3D scene nodes (Phase 7a — camera bridge)
     Node3D *game_world = nullptr;            // Root for all 3D content

@@ -245,6 +245,28 @@ extern "C" {
     // Phase 33: Background image accessor — from godot_renderer.c
     int   Godot_Renderer_GetBackground(int *cols, int *rows, int *bgr,
                                        const unsigned char **data);
+
+    // Phase 59: UI system — from godot_ui_system.cpp / godot_ui_input.cpp
+    // Function declarations are provided by godot_ui_system.h and
+    // godot_ui_input.h (included via MoHAARunner.h's __has_include guards).
+    // Fallback declarations in case headers are absent:
+#ifndef HAS_UI_SYSTEM_MODULE
+    int   Godot_UI_Update(void);
+    int   Godot_UI_IsActive(void);
+    int   Godot_UI_ShouldShowCursor(void);
+    void  Godot_UI_OnMapLoad(void);
+    int   Godot_UI_IsLoading(void);
+#endif
+#ifndef HAS_UI_INPUT_MODULE
+    int   Godot_UI_HandleKeyEvent(int godot_key, int down);
+    int   Godot_UI_HandleCharEvent(int unicode);
+    int   Godot_UI_HandleMouseButton(int godot_button, int down);
+    int   Godot_UI_HandleMouseMotion(int dx, int dy);
+    int   Godot_UI_ShouldCaptureInput(void);
+#endif
+
+    // Phase 59: Mouse reset — from godot_input_bridge.c
+    void  Godot_ResetMousePosition(void);
 }
 
 // ──────────────────────────────────────────────
@@ -624,6 +646,9 @@ void MoHAARunner::check_world_load() {
 
     // Load new BSP geometry
     UtilityFunctions::print(String("[MoHAA] Loading BSP world: ") + new_bsp);
+
+    // Phase 59: Notify UI system that a map load has started
+    Godot_UI_OnMapLoad();
 
     Node3D *map_node = Godot_BSP_LoadWorld(map_path);
     if (map_node) {
@@ -3294,6 +3319,28 @@ void MoHAARunner::_process(double delta) {
     Com_Frame();
     godot_jmpbuf_valid = false;
 
+    // ── Phase 59: Poll UI state machine before rendering/input ──
+    Godot_UI_Update();
+
+    // ── Phase 59: Cursor management — toggle mouse mode based on UI state ──
+    {
+        bool show_cursor = Godot_UI_ShouldShowCursor() != 0;
+        if (show_cursor != last_ui_cursor_shown) {
+            last_ui_cursor_shown = show_cursor;
+            Input *input = Input::get_singleton();
+            if (input) {
+                if (show_cursor) {
+                    input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
+                    mouse_captured = false;
+                } else {
+                    input->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
+                    mouse_captured = true;
+                }
+                Godot_ResetMousePosition();
+            }
+        }
+    }
+
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
 
@@ -3334,33 +3381,12 @@ void MoHAARunner::_process(double delta) {
     // ── Update game flow state machine (Phase 261) ──
     update_game_flow_state();
 
-    // ── Enforce gameplay input mode each frame ──
-    // The engine's UI system can re-enable in_guimouse or set keyCatchers
-    // via menu code, focus changes, etc.  When we're in gameplay mode
-    // (mouse captured), ensure the engine is in freelook mode.
-    if (mouse_captured && !cin_was_active) {
-        int gui_mouse = Godot_Client_GetGuiMouse();
-        int paused_val = Godot_Client_GetPaused();
-        int catchers = Godot_Client_GetKeyCatchers();
-
-        // Force freelook if GUI mouse or pause is active
-        if (gui_mouse || paused_val || (catchers & 0x3)) {
-            Godot_Client_ForceUnpause();
-            // Only clear catchers if not in console mode (allow tilde to open console)
-            if (catchers & 0x2) {  // KEYCATCH_UI
-                Godot_Client_SetGameInputMode();
-            }
-
-            static int input_fix_count = 0;
-            if (input_fix_count < 5) {
-                UtilityFunctions::print(String("[MoHAA] Input fix: cleared guiMouse=") +
-                    String::num_int64(gui_mouse) + String(" paused=") +
-                    String::num_int64(paused_val) + String(" catchers=0x") +
-                    String::num_int64(catchers, 16));
-                input_fix_count++;
-            }
-        }
-    }
+    // ── Phase 59: Input mode enforcement now handled by UI state machine ──
+    // Godot_UI_Update() + Godot_UI_ShouldShowCursor() above manage the
+    // cursor mode automatically.  The engine's keyCatchers-based UI
+    // routing (cl_keys.c) handles console/menu/game input dispatch.
+    // We no longer forcibly clear catchers or unpause here — that is
+    // the engine's responsibility via its own UI code paths.
 
     // ── State change detection for signals (Task 2.5.4) ──
     if (initialized) {
@@ -3858,13 +3884,16 @@ void MoHAARunner::close_menu() {
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (!initialized) return;
 
+    // Phase 59: Check if UI should capture input
+    bool ui_active = Godot_UI_ShouldCaptureInput() != 0;
+
     // ── Keyboard events ──
     InputEventKey *key_event = Object::cast_to<InputEventKey>(p_event.ptr());
     if (key_event) {
         bool pressed = key_event->is_pressed();
         bool echo = key_event->is_echo();
 
-        // F9 — toggle HUD overlay visibility (debug aid)
+        // F9 — toggle HUD overlay visibility (debug aid, always active)
         if (pressed && !echo && key_event->get_keycode() == Key::KEY_F9) {
             hud_visible = !hud_visible;
             if (hud_layer) hud_layer->set_visible(hud_visible);
@@ -3880,27 +3909,27 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         }
 
         if (godot_key != 0) {
-            // Send SE_KEY for initial press and release (not for echoes)
-            // The engine tracks key state internally and handles its own repeat.
-            if (!echo) {
-                int mapped = Godot_InjectKeyEvent(godot_key, pressed ? 1 : 0);
-
-                // Debug: log first few key events
-                static int key_debug_count = 0;
-                if (key_debug_count < 10 && pressed) {
-                    UtilityFunctions::print(String("[Input] key godot=") + String::num_int64(godot_key) +
-                        String(" mapped=") + String::num_int64(mapped) +
-                        String(" catchers=0x") + String::num_int64(Godot_Client_GetKeyCatchers(), 16) +
-                        String(" guiMouse=") + String::num_int64(Godot_Client_GetGuiMouse()));
-                    key_debug_count++;
+            if (ui_active) {
+                // Phase 59: Route through UI input handlers when UI is active
+                if (!echo) {
+                    Godot_UI_HandleKeyEvent(godot_key, pressed ? 1 : 0);
                 }
-            }
-
-            // Send SE_CHAR for text input on press + echo (for console/chat)
-            if (pressed || echo) {
-                int64_t unicode = key_event->get_unicode();
-                if (unicode > 0) {
-                    Godot_InjectCharEvent((int)unicode);
+                if (pressed || echo) {
+                    int64_t unicode = key_event->get_unicode();
+                    if (unicode > 0) {
+                        Godot_UI_HandleCharEvent((int)unicode);
+                    }
+                }
+            } else {
+                // Game mode: inject directly to engine
+                if (!echo) {
+                    Godot_InjectKeyEvent(godot_key, pressed ? 1 : 0);
+                }
+                if (pressed || echo) {
+                    int64_t unicode = key_event->get_unicode();
+                    if (unicode > 0) {
+                        Godot_InjectCharEvent((int)unicode);
+                    }
                 }
             }
         }
@@ -3911,9 +3940,12 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     // ── Mouse motion ──
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
-        // Only forward mouse motion when captured (in-game mode)
-        if (mouse_captured) {
-            Vector2 rel = motion_event->get_relative();
+        Vector2 rel = motion_event->get_relative();
+        if (ui_active) {
+            // Phase 59: Forward mouse motion to UI for cursor movement
+            Godot_UI_HandleMouseMotion((int)rel.x, (int)rel.y);
+        } else if (mouse_captured) {
+            // Game mode: forward relative motion for freelook
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
         }
         return;
@@ -3925,20 +3957,29 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         int godot_button = (int)button_event->get_button_index();
         bool pressed = button_event->is_pressed();
 
-        // Regular buttons: send press and release
-        if (godot_button >= 1 && godot_button <= 3) {
-            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-        }
-        // Extra buttons (thumb buttons)
-        else if (godot_button == 8 || godot_button == 9) {
-            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-        }
-        // Wheel events: Godot only fires pressed=true for wheel notches.
-        // The engine expects a press immediately followed by a release.
-        else if (godot_button >= 4 && godot_button <= 5) {
-            if (pressed) {
-                Godot_InjectMouseButton(godot_button, 1);  // press
-                Godot_InjectMouseButton(godot_button, 0);  // release
+        if (ui_active) {
+            // Phase 59: Route mouse buttons through UI system
+            if (godot_button >= 1 && godot_button <= 3) {
+                Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
+            } else if (godot_button >= 4 && godot_button <= 5) {
+                if (pressed) {
+                    Godot_UI_HandleMouseButton(godot_button, 1);
+                    Godot_UI_HandleMouseButton(godot_button, 0);
+                }
+            }
+        } else {
+            // Game mode: inject directly
+            if (godot_button >= 1 && godot_button <= 3) {
+                Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+            }
+            else if (godot_button == 8 || godot_button == 9) {
+                Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+            }
+            else if (godot_button >= 4 && godot_button <= 5) {
+                if (pressed) {
+                    Godot_InjectMouseButton(godot_button, 1);  // press
+                    Godot_InjectMouseButton(godot_button, 0);  // release
+                }
             }
         }
 
