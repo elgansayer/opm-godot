@@ -1944,3 +1944,40 @@ Wired the engine's existing GameSpy master server query and server hosting into 
 2. **In `_process()`:** Call `Godot_Impact_Update(delta)` each frame.
 3. **When processing impacts:** Call `Godot_Impact_SurfaceFromFlags(surfaceFlags)` to get the type, then `Godot_Impact_Spawn(type, position, normal)`.
 4. **On map unload / shutdown:** Call `Godot_Impact_Shutdown()`.
+
+## Phase 223: Explosion Effects ✅
+
+Implemented explosion visual effects and a camera shake API in
+`code/godot/godot_explosion_effects.{h,cpp}`.
+
+### Camera Shake API
+- `Godot_CameraShake_Trigger()` — queue a shake event with intensity, duration,
+  falloff distance, and source position.
+- `Godot_CameraShake_Update()` — apply accumulated shake to Camera3D each frame;
+  offset is restored on the next call. Linear decay over duration, distance
+  attenuation from source, random per-axis offset. Multiple shakes stack
+  additively with total offset capped to ±0.15 m.
+- `Godot_CameraShake_Clear()` — reset all pending shake events.
+
+### Explosion System
+- `Godot_Explosion_Init()` — create a pool of 16 explosion node hierarchies
+  (fireball sphere, smoke torus, omni light, 10 debris box chunks each).
+- `Godot_Explosion_Spawn()` — activate a pool slot at a world position with
+  configurable radius and intensity. Automatically triggers camera shake.
+- `Godot_Explosion_Update()` — per-frame update of three visual phases:
+  - Phase 1 (0–0.2 s): Expanding bright-orange fireball sphere.
+  - Phase 2 (0.1–0.8 s): Dark smoke ring expanding outward, alpha fading.
+  - Phase 3 (0–0.5 s): 5–10 debris chunks with parabolic arcs and alpha fade.
+  - Short-lived OmniLight3D (orange, 0.3 s, energy from intensity parameter).
+- `Godot_Explosion_Clear()` — hide all active explosions without freeing pools.
+- `Godot_Explosion_Shutdown()` — free pooled nodes and shared materials.
+
+### Debris Chunks
+- Small BoxMesh (0.05–0.15 m), dark grey-brown colour.
+- Parabolic arc: random outward + upward initial velocity, gravity applied each frame.
+- Alpha fades over 1–2 s randomised lifetime, then recycled.
+
+### Integration
+Call `Godot_Explosion_Init(parent)` after map load and
+`Godot_Explosion_Update(delta)` + `Godot_CameraShake_Update(delta, camera)`
+each frame.  `Godot_Explosion_Shutdown()` on map unload or module teardown.
