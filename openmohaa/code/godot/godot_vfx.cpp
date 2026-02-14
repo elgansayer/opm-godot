@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <cstring>
 #include <cmath>
+#include <cstdint>
 
 using namespace godot;
 
@@ -59,6 +60,16 @@ static Node3D                              *vfx_parent     = nullptr;
 static MeshInstance3D                      *vfx_pool[VFX_SPRITE_POOL_SIZE] = {};
 static bool                                 vfx_initialised = false;
 static std::unordered_map<int, Ref<ImageTexture>> vfx_tex_cache;
+
+/* Material cache keyed by (shaderHandle << 32 | rgba32) to avoid per-frame allocation */
+static std::unordered_map<uint64_t, Ref<StandardMaterial3D>> vfx_mat_cache;
+
+static inline uint64_t vfx_mat_key(int shaderHandle, const unsigned char rgba[4])
+{
+    uint32_t c = (uint32_t)rgba[0] | ((uint32_t)rgba[1] << 8)
+               | ((uint32_t)rgba[2] << 16) | ((uint32_t)rgba[3] << 24);
+    return ((uint64_t)(unsigned)shaderHandle << 32) | c;
+}
 
 /* ── Texture loading (mirrors MoHAARunner::get_shader_texture pattern) ── */
 static Ref<ImageTexture> vfx_load_texture(int shader_handle)
@@ -218,23 +229,29 @@ void Godot_VFX_Update(float delta)
         Vector3 pos = id_to_godot(origin[0], origin[1], origin[2]);
         float scaledRadius = radius * MOHAA_UNIT_SCALE;
 
-        /* Apply billboard material */
+        /* Cached billboard material (keyed by shader handle + RGBA) */
+        uint64_t mkey = vfx_mat_key(shaderHandle, rgba);
         Ref<StandardMaterial3D> mat;
-        mat.instantiate();
-        mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-        mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-        mat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                              rgba[2] / 255.0f, rgba[3] / 255.0f));
+        auto mit = vfx_mat_cache.find(mkey);
+        if (mit != vfx_mat_cache.end()) {
+            mat = mit->second;
+        } else {
+            mat.instantiate();
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+            mat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                  rgba[2] / 255.0f, rgba[3] / 255.0f));
 
-        /* Load and apply texture */
-        if (shaderHandle > 0) {
-            Ref<ImageTexture> tex = vfx_load_texture(shaderHandle);
-            if (tex.is_valid()) {
-                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            if (shaderHandle > 0) {
+                Ref<ImageTexture> tex = vfx_load_texture(shaderHandle);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
             }
+            vfx_mat_cache[mkey] = mat;
         }
 
         mi->set_surface_override_material(0, mat);
@@ -263,6 +280,7 @@ void Godot_VFX_Shutdown(void)
     }
 
     vfx_tex_cache.clear();
+    vfx_mat_cache.clear();
     vfx_unit_quad.unref();
     vfx_parent      = nullptr;
     vfx_initialised = false;
@@ -277,4 +295,8 @@ void Godot_VFX_Clear(void)
             vfx_pool[i]->set_visible(false);
         }
     }
+
+    /* Flush caches — shaders/textures may differ on the next map */
+    vfx_tex_cache.clear();
+    vfx_mat_cache.clear();
 }
