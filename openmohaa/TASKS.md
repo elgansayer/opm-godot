@@ -1981,3 +1981,21 @@ Implemented explosion visual effects and a camera shake API in
 Call `Godot_Explosion_Init(parent)` after map load and
 `Godot_Explosion_Update(delta)` + `Godot_CameraShake_Update(delta, camera)`
 each frame.  `Godot_Explosion_Shutdown()` on map unload or module teardown.
+
+## Phase 224: Muzzle Flash & Shell Casings ✅
+
+- [x] **Task 224.1:** Muzzle flash system — pooled billboard quads (max 8) with additive blending and warm yellow-white colour, plus OmniLight3D (3 m range) that fades over 0.08 s.
+- [x] **Task 224.2:** Shell casing system — pooled brass-coloured cylinder meshes (max 32) ejected with parabolic gravity (9.8 m/s²), random spin (720°/s), single ground bounce (0.3× velocity retention), and 2 s lifetime with scale fade-out.
+- [x] **Task 224.3:** Shared StandardMaterial3D instances: flash material (unshaded, additive, billboard) and casing material (metallic=0.8, roughness=0.3, brass albedo).
+- [x] **Task 224.4:** Three casing sizes: pistol (0.01×0.005 m), rifle (0.014×0.006 m), shotgun (0.018×0.01 m).
+- [x] **Task 224.5:** Ring-buffer pool recycling for both systems — oldest slot reused when pool is full.
+
+### Key technical details (Phase 224):
+- `Godot_MuzzleFlash_Spawn()` places a billboard quad + OmniLight3D at the muzzle position; `Godot_MuzzleFlash_Update()` fades both via scale and energy over `MUZZLE_FLASH_LIFETIME` (0.08 s)
+- `Godot_ShellCasing_Eject()` spawns a CylinderMesh sized per casing type; `Godot_ShellCasing_Update()` integrates velocity with gravity, applies spin rotation via `Basis::rotated()`, and handles a single bounce at Y=0
+- All scene nodes pre-created during `Godot_WeaponEffects_Init()` and reused — no per-frame allocation
+- Visual fade uses `set_scale()` since MeshInstance3D does not support `set_modulate()` (which is a CanvasItem method)
+
+### Files created (Phase 224):
+- `code/godot/godot_weapon_effects.h` — public API: spawn/update/clear/init/cleanup
+- `code/godot/godot_weapon_effects.cpp` — muzzle flash pool (8 slots) + shell casing pool (32 slots) with physics simulation
