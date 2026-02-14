@@ -2197,3 +2197,44 @@ All cvars are read via thin C accessor functions (`godot_debug_render_accessors.
 ### Files created (Phase 251):
 - `code/godot/godot_render_sort.h` — Public API: `SortableEntity`, sort key thresholds, function declarations (~105 lines)
 - `code/godot/godot_render_sort.cpp` — Sort + priority implementation (~170 lines)
+
+## Phase 258: Frustum Culling ✅
+
+Camera frustum culling for entities and effects.  Extracts 6 frustum
+planes from the active Camera3D's view-projection matrix and provides
+fast AABB / sphere visibility tests.  Entities or effects whose bounding
+volumes fall entirely outside the frustum can be skipped, reducing draw
+calls when many objects exist off-screen.
+
+### Public API (`godot_frustum_cull.h`)
+
+| Function | Purpose |
+|----------|---------|
+| `Godot_FrustumCull_Init()` | Initialise internal state (planes, stats). |
+| `Godot_FrustumCull_UpdateCamera(Camera3D*)` | Extract 6 frustum planes from camera; reset per-frame stats. |
+| `Godot_FrustumCull_TestAABB(AABB)` | Return true if AABB intersects or is inside frustum. |
+| `Godot_FrustumCull_TestSphere(Vector3, float)` | Return true if sphere intersects or is inside frustum. |
+| `Godot_FrustumCull_GetStats(int*, int*)` | Retrieve per-frame tested/culled counters. |
+| `Godot_FrustumCull_Shutdown()` | Release internal state. |
+
+### Implementation details
+- **Plane extraction:** Combined view-projection matrix (proj × view) →
+  Gribb/Hartmann method for left/right/bottom/top/near/far planes, each
+  normalised.
+- **AABB test:** "p-vertex" method — for each plane, pick the AABB corner
+  most in the direction of the plane normal.  If that vertex is behind the
+  plane, the box is entirely outside.
+- **Sphere test:** Signed distance from centre to each plane; if
+  distance < −radius for any plane, sphere is outside.
+- **Stats:** Per-frame counters (`tested`, `culled`) reset by
+  `UpdateCamera()`, queried via `GetStats()`.
+
+### MoHAARunner Integration Required
+In `update_entities()`, for each entity:
+1. Compute entity AABB from model bounds + position.
+2. Call `Godot_FrustumCull_TestAABB(aabb)`.
+3. If false, skip mesh creation/update for that entity.
+
+### Files created
+- `code/godot/godot_frustum_cull.h`
+- `code/godot/godot_frustum_cull.cpp`
