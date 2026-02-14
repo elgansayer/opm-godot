@@ -175,6 +175,83 @@ These are real bugs that were shipped and required multiple fix iterations. Lear
 | Wrong/missing textures on static models | `get_shader_texture()` used the shader name directly as a file path (e.g. `textures/mohdm1/wall_brick`). But MOHAA shader names are abstract identifiers — the actual texture path is in the `.shader` definition's stage `map` directive (e.g. `textures/mohdm1/wall_brick_d.tga`). | **Always trace `R_FindShader()`'s resolution pipeline.** Shader name ≠ texture file path. Must look up shader definition stages. |
 | `Godot_Renderer_RegisterShader` didn't exist | The stub renderer had `GR_RegisterShader` (internal, called by engine paths like `RE_RegisterShaderNoMip`) but no public accessor for Godot-side code to register shaders. Static model loading needed to register TIKI surface shaders but had no API to do so. | **When adding Godot-side features that need renderer services, check whether the accessor API exists.** If not, implement it — don't work around it. |
 | Custom `.shader` tokeniser missed definitions | `godot_shader_props.cpp` used hand-written `read_token()`, `skip_ws()`, `skip_line()` that didn't handle `//` comments, `/* */` blocks, or quoted strings identically to the engine. Shader definitions were silently mis-parsed or skipped, causing wrong textures. | **Never write custom parsing/tokenising functions.** The engine's `COM_ParseExt()`, `SkipRestOfLine()`, `COM_Compress()` are linked and handle all edge cases. Declare them via `extern "C"` and use them directly. |
+| `surfaceParm trans` forced alpha blending on opaque surfaces | `godot_shader_props.cpp` treated `surfaceParm trans` as a runtime transparency flag, setting `SHADER_ALPHA_BLEND`. This prevented the post-parse stage blendFunc analysis from running (it only ran when `transparency == SHADER_OPAQUE`). Result: any shader with `surfaceParm trans` (walls, buildings, floors — very common in MOHAA) rendered as alpha-blended, causing see-through surfaces. | **`surfaceParm` keywords are BSP compiler flags (Q3MAP), NOT runtime rendering directives.** Transparency is determined solely by stage `blendFunc`. See the Q3A Shader Manual reference below. |
+| Default `CULL_DISABLED` on entity/static model materials | Entity skeletal models and static TIKI models defaulted to `CULL_DISABLED` (show both sides). Most models lack `.shader` definitions, so `apply_shader_props_to_material()` never overrode the default. Back faces were visible, causing see-through/ghostly appearance. | **MOHAA's renderer default is `CT_FRONT_SIDED` = Godot `CULL_BACK`.** Always default materials to `CULL_BACK`. Only set `CULL_DISABLED` when the shader definition explicitly says `cull none`/`cull twosided`. |
+
+## Q3A Shader Manual — Key Rendering Rules
+
+**Reference:** https://icculus.org/gtkradiant/documentation/Q3AShader_Manual/
+
+The Q3A Shader Manual is the authoritative reference for how id Tech 3 shaders work. MOHAA/OpenMoHAA extends this system but follows the same core rules. Key rules that directly affect our Godot rendering:
+
+### Keyword classification: compile-time vs runtime
+
+| Category | Keywords | When processed | Affects rendering? |
+|----------|----------|----------------|--------------------|
+| **Q3MAP (compile-time only)** | `surfaceParm *`, `q3map_*`, `tessSize` | BSP compilation | **NO** — changes require map rebuild, ignored by renderer |
+| **General (runtime)** | `cull`, `sort`, `deformVertexes`, `fogparms`, `skyParms`, `nopicmip`, `nomipmaps`, `polygonOffset`, `portal` | Renderer at load time | Yes |
+| **Stage-specific (runtime)** | `map`, `blendFunc`, `rgbGen`, `alphaGen`, `alphaFunc`, `tcMod`, `tcGen`, `depthWrite`, `depthFunc`, `detail` | Renderer per-stage | Yes |
+
+**Critical rule:** `surfaceParm` keywords (including `trans`, `nolightmap`, `noimpact`, `nomarks`, etc.) are Q3MAP directives. They tell the BSP compiler about surface properties for vis, lighting, and physics. They do **NOT** affect how the renderer draws the surface at runtime. Never use `surfaceParm` to determine transparency or cull mode.
+
+### Transparency determination (SortNewShader logic)
+
+Transparency is determined **solely** by stage `blendFunc`:
+
+1. **No blendFunc on first stage** → shader is **opaque** (sort order = `opaque` = 3)
+2. **`blendFunc add`** → additive blending (`GL_ONE GL_ONE`)
+3. **`blendFunc filter`** → multiplicative (`GL_DST_COLOR GL_ZERO`) — used for lightmap modulation, NOT transparency
+4. **`blendFunc blend`** → alpha blending (`GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA`)
+5. **`alphaFunc GT0/LT128/GE128`** → alpha-test (hard cutoff, not smooth blending)
+
+**Standard opaque lightmapped pattern** (most common in MOHAA):
+```
+textures/foo/bar
+{
+    surfaceparm trans     // ← Q3MAP ONLY — does NOT make this transparent!
+    {
+        map $lightmap
+        rgbGen identity
+    }
+    {
+        map textures/foo/bar.tga
+        blendFunc filter   // ← filter = GL_DST_COLOR GL_ZERO = lightmap modulation = OPAQUE
+    }
+}
+```
+Despite `surfaceParm trans`, this shader is **opaque** because the first non-lightmap stage's blendFunc is `filter` (multiplicative lightmap modulation).
+
+### Cull mode rules
+
+- **Default:** `cull front` (Q3 terminology) = show front faces, cull back faces = Godot `CULL_BACK`
+- **`cull back`** = show back faces, cull front = Godot `CULL_FRONT`
+- **`cull none` / `cull disable` / `cull twosided`** = show both sides = Godot `CULL_DISABLED`
+
+**Note on Q3 cull terminology:** "cull front" means "the front side is the visible side" (back faces are culled), NOT "cull the front faces". This is confusing but matches the source code: `CT_FRONT_SIDED` → `glCullFace(GL_BACK)`.
+
+### Sort order
+
+| Value | Name | Usage |
+|-------|------|-------|
+| 1 | portal | Portal/mirror surfaces |
+| 2 | sky | Skybox (drawn after opaque) |
+| 3 | **opaque** | Default for shaders without blendFunc |
+| 6 | banner | Transparent, close to walls |
+| 8 | underwater | Behind normal transparent surfaces |
+| 9 | **additive** | Default for shaders WITH blendFunc |
+| 16 | nearest | Always in front (muzzle flashes, blobs) |
+
+### Shader stage rendering pipeline
+
+Each stage is a separate rendering pass. The outputs combine cumulatively:
+
+```
+Stage 0: map $lightmap → writes to framebuffer (initial lighting data)
+Stage 1: map textures/foo.tga + blendFunc filter → modulates with framebuffer
+Stage 2: map textures/foo_glow.tga + blendFunc add → adds glow on top
+```
+
+Our Godot-side renderer flattens multi-stage shaders into a single `StandardMaterial3D`. The first non-lightmap stage's `map` directive provides the albedo texture. Blend mode and transparency come from that stage's `blendFunc`.
 
 ## Renderer Parity Reference
 
