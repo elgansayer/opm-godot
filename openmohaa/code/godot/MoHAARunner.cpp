@@ -342,6 +342,9 @@ MoHAARunner::MoHAARunner() {
 
 MoHAARunner::~MoHAARunner() {
     if (initialized) {
+#ifdef HAS_WEATHER_MODULE
+        Godot_Weather_Shutdown();
+#endif
         Com_Shutdown();
         /* Mark zone allocator as shut down.  Global C++ destructors
            (e.g. ~con_arrayset for Event::commandList) run after this
@@ -604,6 +607,9 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+#ifdef HAS_WEATHER_MODULE
+            Godot_Weather_Shutdown();
+#endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -642,7 +648,7 @@ void MoHAARunner::check_world_load() {
 
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
-        Godot_Weather_Init();
+        Godot_Weather_Init(game_world);
 #endif
 
     } else {
@@ -3322,7 +3328,9 @@ void MoHAARunner::_process(double delta) {
     Godot_Music_Update(delta);
 #endif
 #ifdef HAS_WEATHER_MODULE
-    Godot_Weather_Update(delta);
+    if (camera) {
+        Godot_Weather_Update(camera->get_global_position(), delta);
+    }
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Update(delta);

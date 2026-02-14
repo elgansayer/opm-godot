@@ -67,6 +67,41 @@ int Godot_Weather_GetState(void);
  */
 float Godot_Weather_GetDensity(void);
 
+/*
+ * Rain particle speed in engine units (default 2048).
+ */
+float Godot_Weather_GetSpeed(void);
+
+/*
+ * Speed randomisation factor in engine units (default 512).
+ */
+int Godot_Weather_GetSpeedVary(void);
+
+/*
+ * Horizontal wind slant factor (default 50).
+ */
+int Godot_Weather_GetSlant(void);
+
+/*
+ * Rain streak length in engine units (default 90).
+ */
+float Godot_Weather_GetLength(void);
+
+/*
+ * Rain streak width in engine units (default 1).
+ */
+float Godot_Weather_GetWidth(void);
+
+/*
+ * Minimum render distance in engine units (default 512).
+ */
+float Godot_Weather_GetMinDist(void);
+
+/*
+ * Current rain shader path (or "" if none set).
+ */
+const char *Godot_Weather_GetShaderName(void);
+
 #ifdef __cplusplus
 }
 #endif
