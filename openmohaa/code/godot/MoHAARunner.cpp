@@ -2135,6 +2135,13 @@ void MoHAARunner::update_terrain_marks() {
 void MoHAARunner::update_shadow_blobs() {
     if (!game_world) return;
 
+    // RF_ flag constants used for shadow filtering
+    static const int RF_DONTDRAW = 0x80;   // (1<<7)
+    static const int RF_SHADOW   = 0x800;  // (1<<11)
+    static const float SHADOW_DISTANCE = 96.0f;  // id units — max downward trace
+    static const float SHADOW_Z_OFFSET = 0.5f;   // id units — lift above ground to avoid z-fighting
+    static const int SHADOW_CIRCLE_SEGMENTS = 8;
+
     int ent_count = Godot_Renderer_GetEntityCount();
 
     // First pass: count entities that need shadow blobs
@@ -2145,8 +2152,7 @@ void MoHAARunner::update_shadow_blobs() {
         unsigned char rgba[4];
         int reType = Godot_Renderer_GetEntity(i, origin, nullptr, nullptr,
                                                &hModel, &entityNumber, rgba, &renderfx);
-        // RF_SHADOW = (1<<11) = 0x800
-        if (reType != 0 /* RT_MODEL */ || !(renderfx & 0x800) || (renderfx & 0x80))
+        if (reType != 0 /* RT_MODEL */ || !(renderfx & RF_SHADOW) || (renderfx & RF_DONTDRAW))
             continue;
         shadow_count++;
     }
@@ -2182,8 +2188,6 @@ void MoHAARunner::update_shadow_blobs() {
 
     // Second pass: project shadow blobs
     int shadow_idx = 0;
-    static const float SHADOW_DISTANCE = 96.0f; // id units — max downward trace
-    static const int SHADOW_CIRCLE_SEGMENTS = 8;
 
     for (int i = 0; i < ent_count && shadow_idx < shadow_count; i++) {
         float origin[3], axis[9], scale = 1.0f;
@@ -2191,7 +2195,7 @@ void MoHAARunner::update_shadow_blobs() {
         unsigned char rgba[4];
         int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
                                                &hModel, &entityNumber, rgba, &renderfx);
-        if (reType != 0 /* RT_MODEL */ || !(renderfx & 0x800) || (renderfx & 0x80))
+        if (reType != 0 /* RT_MODEL */ || !(renderfx & RF_SHADOW) || (renderfx & RF_DONTDRAW))
             continue;
 
         MeshInstance3D *mi = shadow_blob_meshes[shadow_idx];
@@ -2206,7 +2210,7 @@ void MoHAARunner::update_shadow_blobs() {
         // oriented horizontally (in XY plane, Z is up in id space)
         float points[SHADOW_CIRCLE_SEGMENTS][3];
         for (int s = 0; s < SHADOW_CIRCLE_SEGMENTS; s++) {
-            float angle = (float)s / (float)SHADOW_CIRCLE_SEGMENTS * 2.0f * 3.14159265f;
+            float angle = (float)s / (float)SHADOW_CIRCLE_SEGMENTS * 2.0f * (float)M_PI;
             points[s][0] = origin[0] + cosf(angle) * blobRadius;
             points[s][1] = origin[1] + sinf(angle) * blobRadius;
             points[s][2] = origin[2];
@@ -2263,8 +2267,8 @@ void MoHAARunner::update_shadow_blobs() {
             int count = fragNumPoints[f];
             for (int v = 0; v < count; v++) {
                 float *pt = &pointBuffer[(first + v) * 3];
-                // Offset slightly upward to avoid z-fighting (0.5 id units)
-                gPos.set(vertOffset + v, id_to_godot_position(pt[0], pt[1], pt[2] + 0.5f));
+                // Offset slightly upward to avoid z-fighting
+                gPos.set(vertOffset + v, id_to_godot_position(pt[0], pt[1], pt[2] + SHADOW_Z_OFFSET));
                 gCol.set(vertOffset + v, Color(0.0f, 0.0f, 0.0f, alpha));
             }
             // Fan triangulation for this fragment
