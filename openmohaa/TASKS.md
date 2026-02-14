@@ -1909,7 +1909,7 @@ All `renderfx` flags used by MOHAA entities (from `code/qcommon/q_shared.h`):
 | `RF_INVISIBLE` | 1<<25 | 0x2000000 | ❌ | Invisible, only negative lights affect — not implemented |
 | `RF_ALWAYSDRAW` | 1<<26 | 0x4000000 | ❌ | Always draw regardless of PVS — not implemented |
 
-**Note:** MoHAARunner line 1635 references `RF_ALPHAFADE = 0x0400` but this flag does not exist in the engine headers. The value 0x0400 actually corresponds to `RF_DETAIL` (distance LOD culling). This check is functionally harmless since the primary alpha detection (`rgba[3] < 255`) works correctly.
+**Note (fixed in this audit):** MoHAARunner line 1635 previously referenced a non-existent `RF_ALPHAFADE = 0x0400` flag. The value 0x0400 actually corresponds to `RF_DETAIL` (1<<10, distance LOD culling). The incorrect comment has been corrected and the dead `renderfx & 0x0400` check removed from the `has_alpha` detection. Alpha transparency still works correctly via `rgba[3] < 255`.
 
 ---
 
