@@ -3548,7 +3548,7 @@ bool MoHAARunner::is_hud_visible() const {
 void MoHAARunner::update_input_routing() {
     if (!initialized) return;
 
-    bool overlay_active = Godot_Client_IsAnyOverlayActive() != 0;
+    bool overlay_active = Godot_Client_IsAnyOverlayActive();
     int sv_state = Godot_GetServerState();
     bool in_map = (sv_state == 3);  // SS_GAME
 
