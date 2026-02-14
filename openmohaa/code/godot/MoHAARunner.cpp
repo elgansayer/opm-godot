@@ -1640,15 +1640,12 @@ void MoHAARunner::update_entities() {
 
         // ── Phase 63+64: Entity lighting — lightgrid + dynamic lights ──
         // Sample lighting at the appropriate position (handle RF_LIGHTING_ORIGIN)
-        float light_sample_pos[3];
+        // Initialize to render origin as safe default
+        float light_sample_pos[3] = { origin[0], origin[1], origin[2] };
+
         if (renderfx & RF_LIGHTING_ORIGIN) {
             // Use lightingOrigin instead of render origin for lighting
             Godot_Renderer_GetEntityLightingOrigin(i, light_sample_pos);
-        } else {
-            // Use standard render origin for lighting
-            light_sample_pos[0] = origin[0];
-            light_sample_pos[1] = origin[1];
-            light_sample_pos[2] = origin[2];
         }
 
         // Combined lightgrid + dynamic lights (max 4 dlights per entity)
