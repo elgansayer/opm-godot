@@ -253,6 +253,97 @@ Stage 2: map textures/foo_glow.tga + blendFunc add → adds glow on top
 
 Our Godot-side renderer flattens multi-stage shaders into a single `StandardMaterial3D`. The first non-lightmap stage's `map` directive provides the albedo texture. Blend mode and transparency come from that stage's `blendFunc`.
 
+## MOHAA Shader Extensions
+
+**Additional reference:** https://graphics.stanford.edu/courses/cs448-00-spring/q3ashader_manual.pdf (MOHAATools-provided manual)
+
+MOHAA extends the Q3A shader system with ~70+ additional keywords. The real renderer parses these in `renderergl1/tr_shader.c`. Our `godot_shader_props.cpp` parser handles a subset; unrecognised keywords are safely skipped (via `SkipRestOfLine`).
+
+### Conditional shader blocks (`#if` / `#if_not` / `#else` / `#endif`)
+
+MOHAA's most significant shader extension. Allows conditional shader content based on runtime cvars:
+```
+textures/foo/bar
+{
+    #if separate_env
+    {
+        map textures/foo/bar_env.tga
+        tcGen environmentmodel
+        blendFunc add
+    }
+    #else
+    {
+        map textures/foo/bar_detail.tga
+        blendFunc filter
+    }
+    #endif
+}
+```
+**Conditions:** `separate_env` (true if `r_textureDetails != 0`), literal `0`/`false`, literal `1`/`true`. `#if_not` inverts the result.
+
+**Our parser:** Currently treats the condition as `false` — skips to `#else` branch (or `#endif` if no `#else`). This is the safe default matching engine behaviour with `r_textureDetails == 0`.
+
+### MOHAA-specific general (top-level) directives
+
+| Keyword | Parameters | Purpose | Our parser |
+|---------|-----------|---------|------------|
+| `portalsky` | none | Portal sky shader (`SS_PORTALSKY`) | Partial (sets `is_sky`) |
+| `spritegen` | `parallel`\|`parallel_oriented`\|`parallel_upright`\|`oriented` | Billboard sprite type | Recognised, skipped |
+| `spritescale` | `<float>` | Sprite scale factor | Recognised, skipped |
+| `force32bit` | none | Force 32-bit image loading | Recognised, no-op |
+| `noMerge` | none | Prevent surface merging optimisation | Recognised, no-op |
+
+### Additional `sort` values (MOHAA-specific)
+
+| Value | Name | Usage |
+|-------|------|-------|
+| 5 | `decal` | Decal surfaces (between opaque and banner) |
+| 7 | `seeThrough` | See-through surfaces (between banner and underwater) |
+
+### Additional `deformVertexes` subtypes
+
+| Keyword | Parameters | Purpose |
+|---------|-----------|---------|
+| `lightglow` | none | Light glow effect deformation |
+| `flap` | `s`\|`t` `<spread>` `<waveform>` `[min max]` | Flap deformation on S or T texture axis |
+
+### MOHAA surface material types (`surfaceParm`)
+
+These are Q3MAP compile-time flags stored in `surfaceFlags` — used for **impact effects** (bullet sparks, footstep sounds, decal selection), NOT for rendering. The Godot side can read these from BSP surface data to select appropriate effects:
+
+`fence`, `weaponclip`, `vehicleclip`, `ladder`, `paper`, `wood`, `metal`, `rock`, `dirt`, `grill`, `grass`, `mud`, `puddle`, `glass`, `gravel`, `sand`, `foliage`, `snow`, `carpet`, `castshadow`, `nodamage`
+
+### MOHAA-specific stage-level directives
+
+| Category | Keywords | Purpose | Our parser |
+|----------|----------|---------|------------|
+| **Multi-texture** | `nextBundle [add]` | Multi-texture pass separator (multi-texture unit) | **Yes** |
+| **Stage conditionals** | `ifCvar <name> <value>`, `ifCvarnot <name> <value>` | Activate/deactivate stage based on cvar | No |
+| **Image loading** | `normalmap <file>`, `clampmapx <file>`, `clampmapy <file>`, `animMapOnce`, `animMapPhase` | Extended image directives | Partial |
+| **blendFunc** | `alphaadd` = `GL_SRC_ALPHA GL_ONE` | Alpha-modulated additive blend | **Yes** |
+| **alphaFunc** | `LT_FOLIAGE1`, `GE_FOLIAGE1`, `LT_FOLIAGE2`, `GE_FOLIAGE2` | Foliage-specific alpha test thresholds | No |
+| **Depth/colour** | `nofog`, `noDepthTest`, `nodepthwrite`/`nodepthmask`, `nocolorwrite`/`nocolormask`, `depthmask` (alias for depthwrite) | Extended render state control | No |
+
+### MOHAA-specific `rgbGen` / `alphaGen` types
+
+**rgbGen additions:** `colorwave (r g b) <wave>`, `global`, `lightingGrid`, `lightingSpherical`, `static`, `sCoord`/`tCoord`, `dot`/`oneMinusDot`, `fromentity` (alias for `entity`), `fromclient` (alias for `vertex`), `oneMinusVertex`
+
+**alphaGen additions:** `global`, `distFade [near range]`, `oneMinusDistFade`, `tikiDistFade`, `oneMinusTikiDistFade`, `dot [min max]`, `oneMinusDot`, `dotView [min max]`, `oneMinusDotView`, `heightFade [min max]`, `lightingSpecular [maxAlpha x y z]`, `skyAlpha`, `oneMinusSkyAlpha`, `sCoord`/`tCoord`, `fromentity`, `fromclient`, `oneMinusFromClient`
+
+### MOHAA-specific `tcGen` / `tcMod` types
+
+**tcGen:** `environmentmodel` (handled), `sunreflection`
+
+**tcMod additions:**
+- `offset <s> <t> [randS] [randT]` — static UV offset
+- `parallax <rateS> <rateT>` — view-dependent UV parallax
+- `macro <scaleS> <scaleT>` — macro-scale UV (stored as 1/value)
+- `wavetrans <waveform>` / `wavetrant <waveform>` — wave UV on S/T axis
+- `bulge <base> <amp> <freq> <phase>` — UV bulge transform
+- `scroll`/`rotate` support `fromEntity` sentinel (speed read from entity at runtime)
+- `scroll` extended: `<s> <t> [randS] [randT]` — random offset added to scroll
+- `rotate` extended: `<speed> [start] [coef]` — rotation with offset and coefficient
+
 ## Renderer Parity Reference
 
 The stub renderer (`godot_renderer.c`) replaces `renderergl1/`. The real renderer does **far more than rendering** — it manages shaders, models, images, fonts, marks, and static model initialisation. Our stub must capture or replicate every piece of data that downstream Godot code needs.
