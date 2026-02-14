@@ -916,6 +916,12 @@ void Sentient::AddItem(Item *object)
 
 void Sentient::RemoveItem(Item *object)
 {
+#ifdef GODOT_GDEXTENSION
+    // Fixed: object could be NULL if caller doesn't validate.
+    if (!object) {
+        return;
+    }
+#endif
     if (!inventory.IndexOfObject(object->entnum)) {
         return;
     }
@@ -938,6 +944,12 @@ void Sentient::RemoveWeapons(void)
         int     entnum = inventory.ObjectAt(i);
         Weapon *item   = (Weapon *)G_GetEntity(entnum);
 
+#ifdef GODOT_GDEXTENSION
+        // Fixed: G_GetEntity can return NULL for stale entity numbers.
+        if (!item) {
+            continue;
+        }
+#endif
         if (item->IsSubclassOfWeapon()) {
             item->Delete();
         }
@@ -950,6 +962,11 @@ Weapon *Sentient::GetWeapon(int index)
         int     entnum = inventory.ObjectAt(i);
         Weapon *item   = (Weapon *)G_GetEntity(entnum);
 
+#ifdef GODOT_GDEXTENSION
+        if (!item) {
+            continue;
+        }
+#endif
         if (item->IsSubclassOfWeapon()) {
             if (!index) {
                 return item;
@@ -972,6 +989,12 @@ Item *Sentient::FindItemByExternalName(const char *itemname)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+#ifdef GODOT_GDEXTENSION
+        // Fixed: G_GetEntity can return NULL for stale entity numbers.
+        if (!item) {
+            continue;
+        }
+#endif
         if (!Q_stricmp(item->getName(), itemname)) {
             return item;
         }
@@ -996,6 +1019,11 @@ Item *Sentient::FindItemByModelname(const char *mdl)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+#ifdef GODOT_GDEXTENSION
+        if (!item) {
+            continue;
+        }
+#endif
         if (!Q_stricmp(item->model, tmpmdl)) {
             return item;
         }
@@ -1014,6 +1042,11 @@ Item *Sentient::FindItemByClassName(const char *classname)
     for (i = 1; i <= num; i++) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
         assert(item);
+#ifdef GODOT_GDEXTENSION
+        if (!item) {
+            continue;
+        }
+#endif
         if (!Q_stricmp(item->edict->entname, classname)) {
             return item;
         }
@@ -1050,6 +1083,12 @@ void Sentient::FreeInventory(void)
     num = inventory.NumObjects();
     for (i = num; i > 0; i--) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+#ifdef GODOT_GDEXTENSION
+        // Fixed: G_GetEntity can return NULL for stale entity numbers.
+        if (!item) {
+            continue;
+        }
+#endif
         item->Delete();
     }
     inventory.ClearObjectList();
@@ -2004,6 +2043,12 @@ void Sentient::DropInventoryItems(void)
     num = inventory.NumObjects();
     for (i = num; i >= 1; i--) {
         item = (Item *)G_GetEntity(inventory.ObjectAt(i));
+#ifdef GODOT_GDEXTENSION
+        // Fixed: G_GetEntity can return NULL for stale entity numbers.
+        if (!item) {
+            continue;
+        }
+#endif
         // Added in 2.30
         //  Force drop the item when specified
         if (m_bForceDropWeapon && item->IsSubclassOfWeapon()) {
