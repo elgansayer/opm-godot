@@ -219,6 +219,7 @@ static float   gr_fov_y            = 73.74f;
 static int     gr_renderWidth      = 1280;
 static int     gr_renderHeight     = 720;
 static float   gr_farplane_distance = 0.0f;
+static float   gr_farplane_bias     = 0.0f;
 static float   gr_farplane_color[3] = { 0.0f, 0.0f, 0.0f };
 static qboolean gr_farplane_cull    = qfalse;
 static qboolean gr_hasNewFrame     = qfalse;
@@ -748,6 +749,7 @@ static void GR_RenderScene( const refdef_t *fd )
     gr_renderHeight = fd->height;
 
     gr_farplane_distance = fd->farplane_distance;
+    gr_farplane_bias = fd->farplane_bias;
     VectorCopy( fd->farplane_color, gr_farplane_color );
     gr_farplane_cull = fd->farplane_cull;
 
@@ -2128,9 +2130,10 @@ void Godot_Renderer_GetRenderSize( int *w, int *h )
     if ( h ) *h = gr_renderHeight;
 }
 
-void Godot_Renderer_GetFarplane( float *distance, float *color, int *cull )
+void Godot_Renderer_GetFarplane( float *distance, float *bias, float *color, int *cull )
 {
     if ( distance ) *distance = gr_farplane_distance;
+    if ( bias ) *bias = gr_farplane_bias;
     if ( color ) {
         color[0] = gr_farplane_color[0];
         color[1] = gr_farplane_color[1];
@@ -2440,6 +2443,17 @@ const char *Godot_Renderer_GetShaderName( int handle )
 int Godot_Renderer_GetShaderCount( void )
 {
     return gr_numShaders;
+}
+
+/* Public shader registration — callable from MoHAARunner.cpp (C++ side).
+ * Wraps the internal GR_RegisterShader so that Godot code can register
+ * shader names into the shader table and receive a valid handle for use
+ * with get_shader_texture().  Mirrors R_FindShader usage in the real
+ * renderer (e.g. R_InitStaticModels registers each static model surface
+ * shader via R_FindShader). */
+int Godot_Renderer_RegisterShader( const char *name )
+{
+    return (int)GR_RegisterShader( name );
 }
 
 void Godot_Renderer_GetVidSize( int *w, int *h )

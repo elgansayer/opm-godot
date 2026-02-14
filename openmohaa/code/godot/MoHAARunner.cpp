@@ -29,6 +29,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include <unordered_set>
 #include <setjmp.h>
 
 // From register_types.cpp — track engine lifecycle across module boundary
@@ -89,7 +90,7 @@ extern "C" {
     void Godot_Renderer_GetViewAxis(float *out);
     void Godot_Renderer_GetFov(float *fov_x, float *fov_y);
     void Godot_Renderer_GetRenderSize(int *w, int *h);
-    void Godot_Renderer_GetFarplane(float *distance, float *color, int *cull);
+    void Godot_Renderer_GetFarplane(float *distance, float *bias, float *color, int *cull);
     const char *Godot_Renderer_GetWorldMapName(void);
     int  Godot_Renderer_IsWorldMapLoaded(void);
 
@@ -125,6 +126,7 @@ extern "C" {
                                  float *color, int *shader);
     const char *Godot_Renderer_GetShaderName(int handle);
     int  Godot_Renderer_GetShaderCount(void);
+    int  Godot_Renderer_RegisterShader(const char *name);
     void Godot_Renderer_GetVidSize(int *w, int *h);
     /* Phase 52 remap uses Godot_Renderer_GetShaderRemap declared below */
 
@@ -495,11 +497,11 @@ void MoHAARunner::setup_3d_scene() {
     env->set_ambient_light_color(Color(0.3, 0.3, 0.3));
     env->set_ambient_light_energy(0.5);
 
-    // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
-    // MOHAA uses 2x overbright on lightmaps. Godot's Reinhardt tonemap
-    // with slight exposure boost approximates the GL1 appearance.
-    env->set_tonemapper(Environment::TONE_MAPPER_REINHARDT);
-    env->set_tonemap_exposure(1.2);
+    // Phase 81: MOHAA's GL1 renderer has no tonemapping — it outputs
+    // texture × lightmap directly to the framebuffer.  Use LINEAR
+    // tonemapper with exposure 1.0 to avoid any colour distortion.
+    env->set_tonemapper(Environment::TONE_MAPPER_LINEAR);
+    env->set_tonemap_exposure(1.0);
     env->set_tonemap_white(1.0);
     world_env->set_environment(env);
     game_world->add_child(world_env);
@@ -559,22 +561,34 @@ void MoHAARunner::update_camera() {
 
     // ── Far plane (fog distance) ──
     float fp_dist = 0.0f;
+    float fp_bias = 0.0f;
     float fp_color[3] = {0, 0, 0};
     int   fp_cull = 0;
-    Godot_Renderer_GetFarplane(&fp_dist, fp_color, &fp_cull);
+    Godot_Renderer_GetFarplane(&fp_dist, &fp_bias, fp_color, &fp_cull);
     if (fp_dist > 0.0f) {
         camera->set_far((double)(fp_dist * MOHAA_UNIT_SCALE));
 
-        // ── Fog rendering (Phase 14) ──
-        // MOHAA farplane_color + farplane_distance define linear distance fog.
-        // Approximate with Godot's exponential fog: density ≈ 2.3 / distance
-        // gives ~90% fog at the far plane.
+        // ── Fog rendering ──
+        // MOHAA uses GL_LINEAR fog: FOG_START = farplane_bias,
+        // FOG_END = farplane_distance.  Godot 4.2 only has exponential
+        // density fog (no depth_begin/depth_end).  We approximate the
+        // linear [bias, distance] range with a conservative density:
+        //   density = 1.0 / (distance_metres)
+        // This gives ~63% fog at the far plane and ~16% at the bias
+        // point.  The trade-off (some fog before the bias point) is
+        // unavoidable with exponential-only fog, but far better than
+        // the old 2.3/dist formula which produced 90% fog at the far
+        // plane and ~34% at the bias point — making distant geometry
+        // appear fully white.
         Ref<Environment> env = world_env->get_environment();
         if (env.is_valid()) {
             float fog_dist = fp_dist * MOHAA_UNIT_SCALE;
+            if (fog_dist < 1.0f) fog_dist = 1.0f;
+            // Conservative density: ~63% fog at far plane, ~16% at bias
+            float density = 1.0f / fog_dist;
             env->set_fog_enabled(true);
             env->set_fog_light_color(Color(fp_color[0], fp_color[1], fp_color[2]));
-            env->set_fog_density(2.3f / fog_dist);
+            env->set_fog_density(density);
             env->set_fog_sky_affect(1.0f);
         }
     } else {
@@ -827,72 +841,35 @@ void MoHAARunner::load_static_models() {
         mi->set_name(String("SM_") + String::num_int64(i));
         mi->set_mesh(cached->mesh);
 
-        // Apply shader textures to each surface
+        // Apply shader textures to each surface.
+        // Mirrors R_InitStaticModels: register each surface shader via
+        // RegisterShader, then use the returned handle for texture lookup
+        // through the standard get_shader_texture pipeline.
         for (int s = 0; s < (int)cached->surfaces.size(); s++) {
             Ref<StandardMaterial3D> mat;
             mat.instantiate();
             mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
 
+            /* Static models use lightgrid (CGEN_LIGHTING_GRID) in the
+             * real renderer, not dynamic lights.  Set UNSHADED to prevent
+             * Godot's sun + ambient from double-lighting them. */
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+
             const String &shader_name = cached->surfaces[s].shader_name;
             bool found_tex = false;
 
             if (!shader_name.is_empty()) {
-                // First try the renderer's shader table (shader may already
-                // be registered from other engine paths).
-                int shaderCount = Godot_Renderer_GetShaderCount();
-                for (int sh = 1; sh < shaderCount; sh++) {
-                    const char *sn = Godot_Renderer_GetShaderName(sh);
-                    if (sn && shader_name == String(sn)) {
-                        Ref<ImageTexture> tex = get_shader_texture(sh);
-                        if (tex.is_valid()) {
-                            mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                            found_tex = true;
-                        }
-                        break;
-                    }
-                }
-
-                // If not found in shader table, load texture directly from
-                // VFS by name.  Static model shaders are registered by the
-                // GL renderer's R_InitStaticModels via R_FindShader, which
-                // our stub renderer doesn't call — so we load them here.
-                if (!found_tex) {
-                    CharString cs = shader_name.ascii();
-                    const char *name = cs.get_data();
-                    const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
-                    for (int ext_i = 0; !found_tex && extensions[ext_i]; ext_i++) {
-                        char path[256];
-                        snprintf(path, sizeof(path), "%s%s", name, extensions[ext_i]);
-                        void *buf = NULL;
-                        long len = Godot_VFS_ReadFile(path, &buf);
-                        if (len > 0 && buf) {
-                            PackedByteArray pba;
-                            pba.resize(len);
-                            memcpy(pba.ptrw(), buf, len);
-                            Godot_VFS_FreeFile(buf);
-                            buf = NULL;
-
-                            Ref<Image> img;
-                            img.instantiate();
-                            Error err;
-                            const uint8_t *data = pba.ptr();
-                            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
-                                err = img->load_jpg_from_buffer(pba);
-                            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
-                                err = img->load_png_from_buffer(pba);
-                            } else {
-                                err = img->load_tga_from_buffer(pba);
-                                if (err != OK) err = img->load_jpg_from_buffer(pba);
-                            }
-                            if (err == OK && !img->is_empty()) {
-                                Ref<ImageTexture> tex;
-                                tex.instantiate();
-                                tex->set_image(img);
-                                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                                found_tex = true;
-                            }
-                        }
-                        if (buf) Godot_VFS_FreeFile(buf);
+                // Register the shader into the renderer's shader table
+                // (same as R_FindShader in R_InitStaticModels), then use the
+                // handle with get_shader_texture() for the standard texture
+                // loading path.
+                CharString cs = shader_name.ascii();
+                int shaderHandle = Godot_Renderer_RegisterShader(cs.get_data());
+                if (shaderHandle > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(shaderHandle);
+                    if (tex.is_valid()) {
+                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                        found_tex = true;
                     }
                 }
             }
@@ -1340,6 +1317,12 @@ void MoHAARunner::update_entities() {
                 // by batches_to_array_mesh() — no override needed.
             } else if (!bmesh.is_valid()) {
                 // Brush model mesh not available — skip display
+                static std::unordered_set<int> logged_missing_bmodels;
+                if (logged_missing_bmodels.find(subIdx) == logged_missing_bmodels.end()) {
+                    logged_missing_bmodels.insert(subIdx);
+                    UtilityFunctions::print(String("[MoHAA] Entity brush model *") +
+                        String::num_int64(subIdx) + " has no mesh — hiding entity");
+                }
                 mi->set_visible(false);
                 continue;
             }
@@ -1372,20 +1355,26 @@ void MoHAARunner::update_entities() {
                         mat.instantiate();
                         mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
 
+                        /* Entities use lightgrid (CGEN_LIGHTING_GRID) in the
+                         * real renderer.  Set UNSHADED to prevent Godot's
+                         * dynamic lights from double-lighting them. */
+                        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+
                         const String &shader_name = cached->surfaces[s].shader_name;
                         bool found_tex = false;
 
                         if (!shader_name.is_empty()) {
-                            int shaderCount = Godot_Renderer_GetShaderCount();
-                            for (int sh = 1; sh < shaderCount; sh++) {
-                                const char *sn = Godot_Renderer_GetShaderName(sh);
-                                if (sn && shader_name == String(sn)) {
-                                    Ref<ImageTexture> tex = get_shader_texture(sh);
-                                    if (tex.is_valid()) {
-                                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                                        found_tex = true;
-                                    }
-                                    break;
+                            // Register the shader first (like static models do),
+                            // then look up the texture via the standard pipeline.
+                            // Without registration, dynamic entity shaders may not
+                            // be in the renderer's shader table yet.
+                            CharString cs = shader_name.ascii();
+                            int shaderHandle = Godot_Renderer_RegisterShader(cs.get_data());
+                            if (shaderHandle > 0) {
+                                Ref<ImageTexture> tex = get_shader_texture(shaderHandle);
+                                if (tex.is_valid()) {
+                                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                                    found_tex = true;
                                 }
                             }
                         }
@@ -2321,48 +2310,85 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         return Ref<ImageTexture>();
     }
 
-    // Try loading via VFS — try .tga then .jpg extensions
+    // ── Determine the actual texture image path(s) to try ──
+    // Mirrors R_FindShader: first look up the shader definition in parsed
+    // .shader script files.  If a definition exists, the first non-lightmap
+    // stage's "map" directive gives the real texture path.  If no definition
+    // is found, try using the shader name itself as a texture file path
+    // (the fallback R_FindShader uses for implicit shaders).
+    const char *texture_paths[4] = { NULL, NULL, NULL, NULL };
+    int num_texture_paths = 0;
+
+    const GodotShaderProps *sp = Godot_ShaderProps_Find(name);
+    if (sp && sp->stage_count > 0) {
+        /* Select the best diffuse texture: skip lightmap, $whiteimage,
+         * and environment map stages (tcGen environment = reflections).
+         * Fall back to the first non-lightmap stage if only env stages exist. */
+        const char *fallback = NULL;
+        for (int st = 0; st < sp->stage_count && num_texture_paths == 0; st++) {
+            if (sp->stages[st].isLightmap) continue;
+            if (!sp->stages[st].map[0]) continue;
+            if (strcmp(sp->stages[st].map, "$lightmap") == 0) continue;
+            if (strcmp(sp->stages[st].map, "$whiteimage") == 0) continue;
+            if (!fallback) fallback = sp->stages[st].map;
+            if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
+            texture_paths[num_texture_paths++] = sp->stages[st].map;
+        }
+        if (num_texture_paths == 0 && fallback) {
+            texture_paths[num_texture_paths++] = fallback;
+        }
+    }
+
+    // Always also try the shader name itself (works for implicit shaders
+    // where the name IS the texture path without extension)
+    if (num_texture_paths == 0 || strcmp(texture_paths[0], name) != 0) {
+        texture_paths[num_texture_paths++] = name;
+    }
+
+    // ── Try loading each candidate path via VFS ──
     Ref<ImageTexture> tex;
     const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
 
-    for (int ext_i = 0; extensions[ext_i]; ext_i++) {
-        char path[128];
-        snprintf(path, sizeof(path), "%s%s", name, extensions[ext_i]);
+    for (int tp = 0; tp < num_texture_paths && tex.is_null(); tp++) {
+        for (int ext_i = 0; extensions[ext_i]; ext_i++) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s%s", texture_paths[tp], extensions[ext_i]);
 
-        void *buf = NULL;
-        long len = Godot_VFS_ReadFile(path, &buf);
-        if (len > 0 && buf) {
-            PackedByteArray pba;
-            pba.resize(len);
-            memcpy(pba.ptrw(), buf, len);
-            Godot_VFS_FreeFile(buf);
-            buf = NULL;
+            void *buf = NULL;
+            long len = Godot_VFS_ReadFile(path, &buf);
+            if (len > 0 && buf) {
+                PackedByteArray pba;
+                pba.resize(len);
+                memcpy(pba.ptrw(), buf, len);
+                Godot_VFS_FreeFile(buf);
+                buf = NULL;
 
-            Ref<Image> img;
-            img.instantiate();
-            Error err;
+                Ref<Image> img;
+                img.instantiate();
+                Error err;
 
-            // Detect format by extension or magic bytes
-            const uint8_t *data = pba.ptr();
-            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
-                err = img->load_jpg_from_buffer(pba);
-            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
-                err = img->load_png_from_buffer(pba);
-            } else {
-                // Try TGA
-                err = img->load_tga_from_buffer(pba);
-                if (err != OK) {
+                // Detect format by magic bytes
+                const uint8_t *data = pba.ptr();
+                if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
                     err = img->load_jpg_from_buffer(pba);
+                } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
+                    err = img->load_png_from_buffer(pba);
+                } else {
+                    // Try TGA first, then JPEG
+                    err = img->load_tga_from_buffer(pba);
+                    if (err != OK) {
+                        err = img->load_jpg_from_buffer(pba);
+                    }
+                }
+
+                if (err == OK && !img->is_empty()) {
+                    img->generate_mipmaps();
+                    tex = ImageTexture::create_from_image(img);
+                    break;
                 }
             }
-
-            if (err == OK && !img->is_empty()) {
-                tex.instantiate();
-                tex->set_image(img);
-                break;
-            }
+            if (buf) Godot_VFS_FreeFile(buf);
         }
-        if (buf) Godot_VFS_FreeFile(buf);
     }
 
     shader_textures[shader_handle] = tex;

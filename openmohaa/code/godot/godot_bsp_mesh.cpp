@@ -527,13 +527,26 @@ static BezierVert bezier_eval(const bsp_drawvert_t *ctrl[3][3], float s, float t
             // Texture UVs
             result.uv  += Vector2(cv->st[0], cv->st[1]) * w;
             result.lm_uv += Vector2(cv->lightmap[0], cv->lightmap[1]) * w;
-            // Vertex colour
-            result.col += Color(
-                cv->color[0] / 255.0f,
-                cv->color[1] / 255.0f,
-                cv->color[2] / 255.0f,
-                cv->color[3] / 255.0f
-            ) * w;
+            // Vertex colour — apply overbright shift per control point
+            // (matching R_ColorShiftLightingBytesAlpha at load time)
+            {
+                int vr = cv->color[0] << 1;
+                int vg = cv->color[1] << 1;
+                int vb = cv->color[2] << 1;
+                if ((vr | vg | vb) > 255) {
+                    int vmax = vr > vg ? vr : vg;
+                    vmax = vmax > vb ? vmax : vb;
+                    vr = vr * 255 / vmax;
+                    vg = vg * 255 / vmax;
+                    vb = vb * 255 / vmax;
+                }
+                result.col += Color(
+                    vr / 255.0f,
+                    vg / 255.0f,
+                    vb / 255.0f,
+                    cv->color[3] / 255.0f
+                ) * w;
+            }
         }
     }
 
@@ -659,53 +672,103 @@ static Ref<ImageTexture> load_texture(const char *shader_name) {
     auto it = s_texture_cache.find(key);
     if (it != s_texture_cache.end()) return it->second;
 
-    // Strip any existing extension from the shader name
-    char base[256];
-    strncpy(base, shader_name, sizeof(base) - 5);
-    base[sizeof(base) - 5] = '\0';
-    int blen = (int)strlen(base);
-
-    // Remove extension if present (.tga, .jpg, .bmp, etc.)
-    if (blen > 4 && base[blen - 4] == '.') {
-        base[blen - 4] = '\0';
-        blen -= 4;
+    // ── Step 1: Look up .shader definition to find the real texture path ──
+    // Mirrors R_FindShader: the shader name may be an abstract identifier.
+    // The actual texture file path lives in the first non-lightmap stage's
+    // "map" directive within the .shader definition.
+    const char *texture_path = shader_name;  // fallback: use shader name as path
+    const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
+    if (sp && sp->stage_count > 0) {
+        /* Select the best diffuse texture from the shader stages.
+         * Q3 shaders can have multiple stages: lightmap, environment map,
+         * diffuse texture.  We want the actual diffuse texture, skipping:
+         *   - Lightmap stages ($lightmap)
+         *   - Environment map stages (tcGen environment)
+         *   - $whiteimage special textures
+         * If only environment/lightmap stages exist, fall back to the
+         * first non-lightmap stage. */
+        const char *fallback_path = nullptr;
+        for (int st = 0; st < sp->stage_count; st++) {
+            if (sp->stages[st].isLightmap) continue;
+            if (!sp->stages[st].map[0]) continue;
+            if (strcmp(sp->stages[st].map, "$lightmap") == 0) continue;
+            if (strcmp(sp->stages[st].map, "$whiteimage") == 0) continue;
+            /* Remember first valid non-lightmap texture as fallback */
+            if (!fallback_path) fallback_path = sp->stages[st].map;
+            /* Skip environment map stages — these are reflections, not
+             * the actual diffuse texture */
+            if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
+            texture_path = sp->stages[st].map;
+            break;
+        }
+        /* If we only skipped env stages, use the first valid one */
+        if (texture_path == shader_name && fallback_path) {
+            texture_path = fallback_path;
+        }
     }
 
-    // Extensions to try in order (matching engine behaviour)
-    static const char *extensions[] = { ".jpg", ".tga", nullptr };
+    // ── Step 2: Try loading the texture from VFS with extension probing ──
+    // Try the resolved texture_path first, then fall back to shader_name
+    // if they differ (handles both defined and implicit shaders).
+    const char *candidates[3] = { texture_path, nullptr, nullptr };
+    if (strcmp(texture_path, shader_name) != 0) {
+        candidates[1] = shader_name;  // also try the raw name as fallback
+    }
 
-    for (int e = 0; extensions[e]; e++) {
-        char path[264];
-        snprintf(path, sizeof(path), "%s%s", base, extensions[e]);
+    for (int c = 0; candidates[c]; c++) {
+        // Strip any existing extension from the candidate path
+        char base[256];
+        strncpy(base, candidates[c], sizeof(base) - 5);
+        base[sizeof(base) - 5] = '\0';
+        int blen = (int)strlen(base);
 
-        void *raw = nullptr;
-        long len = Godot_VFS_ReadFile(path, &raw);
-        if (len <= 0 || !raw) continue;
-
-        // Build PackedByteArray from raw data
-        PackedByteArray buf;
-        buf.resize(len);
-        memcpy(buf.ptrw(), raw, len);
-        Godot_VFS_FreeFile(raw);
-
-        // Try loading via Godot's Image class
-        Ref<Image> img;
-        img.instantiate();
-        Error err;
-
-        if (extensions[e][1] == 'j') {
-            err = img->load_jpg_from_buffer(buf);
-        } else {
-            err = img->load_tga_from_buffer(buf);
+        // Remove extension if present (.tga, .jpg, .bmp, etc.)
+        if (blen > 4 && base[blen - 4] == '.') {
+            base[blen - 4] = '\0';
+            blen -= 4;
         }
 
-        if (err == OK && img->get_width() > 0 && img->get_height() > 0) {
-            // Generate mipmaps for better rendering quality
-            img->generate_mipmaps();
+        // Extensions to try in order (matching engine: no ext, .tga, .jpg, .png)
+        static const char *extensions[] = { "", ".tga", ".jpg", ".png", nullptr };
 
-            Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
-            s_texture_cache[key] = tex;
-            return tex;
+        for (int e = 0; extensions[e]; e++) {
+            char path[264];
+            snprintf(path, sizeof(path), "%s%s", base, extensions[e]);
+
+            void *raw = nullptr;
+            long len = Godot_VFS_ReadFile(path, &raw);
+            if (len <= 0 || !raw) continue;
+
+            // Build PackedByteArray from raw data
+            PackedByteArray buf;
+            buf.resize(len);
+            memcpy(buf.ptrw(), raw, len);
+            Godot_VFS_FreeFile(raw);
+
+            // Detect format by magic bytes (more robust than extension)
+            Ref<Image> img;
+            img.instantiate();
+            Error err = ERR_FILE_UNRECOGNIZED;
+            const uint8_t *data = buf.ptr();
+
+            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
+                err = img->load_jpg_from_buffer(buf);
+            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
+                err = img->load_png_from_buffer(buf);
+            } else {
+                // TGA has no reliable magic — try TGA first, then JPG
+                err = img->load_tga_from_buffer(buf);
+                if (err != OK) {
+                    err = img->load_jpg_from_buffer(buf);
+                }
+            }
+
+            if (err == OK && img->get_width() > 0 && img->get_height() > 0) {
+                img->generate_mipmaps();
+                Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
+                s_texture_cache[key] = tex;
+                return tex;
+            }
         }
     }
 
@@ -743,14 +806,23 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
         uint8_t *dst = rgba.ptrw();
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
-            // Light-shift: mimic R_ColorShiftLightingBytes with overbrightBits=1
+            // Light-shift: exact match of R_ColorShiftLightingBytes
+            // with overbrightBits=1 (shift by 1 = multiply by 2).
+            // CRITICAL: normalize by max component instead of clamping!
+            // Simple clamping (if r>255 r=255) causes bright pixels to
+            // trend towards white, losing hue information. The engine
+            // preserves hue by dividing all channels by the maximum.
             int r = src[p * 3 + 0] << 1;
             int g = src[p * 3 + 1] << 1;
             int b = src[p * 3 + 2] << 1;
-            // Clamp and normalise
-            if (r > 255) r = 255;
-            if (g > 255) g = 255;
-            if (b > 255) b = 255;
+
+            if ((r | g | b) > 255) {
+                int max = r > g ? r : g;
+                max = max > b ? max : b;
+                r = r * 255 / max;
+                g = g * 255 / max;
+                b = b * 255 / max;
+            }
 
             dst[p * 4 + 0] = (uint8_t)r;
             dst[p * 4 + 1] = (uint8_t)g;
@@ -813,7 +885,7 @@ static bool is_tool_shader(const char *name) {
  * ================================================================ */
 
 static Ref<ArrayMesh> batches_to_array_mesh(
-    std::unordered_map<int, ShaderBatch> &batches,
+    std::unordered_map<int64_t, ShaderBatch> &batches,
     int *out_tex_loaded = nullptr,
     int *out_tex_failed = nullptr)
 {
@@ -868,6 +940,12 @@ static Ref<ArrayMesh> batches_to_array_mesh(
         mat.instantiate();
         mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
 
+        /* BSP world geometry uses baked lightmaps for all lighting.
+         * Set UNSHADED so Godot's dynamic lights (DirectionalLight3D,
+         * ambient) don't add a second layer of lighting on top of the
+         * lightmap detail texture, which would wash surfaces white. */
+        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+
         bool has_texture = false;
         if (batch.shader_name) {
             Ref<ImageTexture> tex = load_texture(batch.shader_name);
@@ -877,6 +955,9 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                 tex_ok++;
             } else {
                 tex_bad++;
+                UtilityFunctions::print(String("[BSP] Missing texture for shader: '") +
+                    batch.shader_name + "' (batch " + String::num_int64(surface_idx) +
+                    ", " + String::num_int64((int)batch.positions.size()) + " verts)");
             }
 
             // Apply shader transparency / cull from .shader definitions
@@ -960,7 +1041,7 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
                              const bsp_drawvert_t *verts, int num_verts,
                              const int32_t *indices, int num_indices,
                              const bsp_shader_t *shaders, int num_shaders,
-                             std::unordered_map<int, ShaderBatch> &batches,
+                             std::unordered_map<int64_t, ShaderBatch> &batches,
                              int &skipped_nodraw, int &skipped_sky)
 {
     // Skip unsupported surface types
@@ -987,8 +1068,14 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (surf->numIndexes <= 0) return false;
     }
 
-    // Get or create batch
-    ShaderBatch &batch = batches[surf->shaderNum];
+    // Get or create batch — keyed by (shaderNum, lightmapNum) so surfaces
+    // with the same shader but different lightmap pages get separate batches.
+    // This is critical: BSP surfaces reference specific lightmap pages, and
+    // their lightmap UVs point into that specific 128×128 atlas.  Using the
+    // wrong lightmap produces completely wrong lighting.
+    int64_t batch_key = ((int64_t)(uint32_t)surf->shaderNum << 32)
+                      | (int64_t)(uint32_t)(surf->lightmapNum + 2);
+    ShaderBatch &batch = batches[batch_key];
     if (!batch.shader_name && surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
         batch.shader_name = shaders[surf->shaderNum].shader;
         batch.surface_flags = shaders[surf->shaderNum].surfaceFlags;
@@ -996,8 +1083,6 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (shaders[surf->shaderNum].surfaceFlags & SURF_NOLIGHTMAP) {
             batch.nolightmap = true;
         }
-    }
-    if (batch.lightmap_num < 0 && surf->lightmapNum >= 0) {
         batch.lightmap_num = surf->lightmapNum;
     }
 
@@ -1016,9 +1101,24 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         batch.normals.push_back(id_to_godot_dir(dv->normal));
         batch.uvs.push_back(Vector2(dv->st[0], dv->st[1]));
         batch.lm_uvs.push_back(Vector2(dv->lightmap[0], dv->lightmap[1]));
-        batch.colors.push_back(Color(
-            dv->color[0] / 255.0f, dv->color[1] / 255.0f,
-            dv->color[2] / 255.0f, dv->color[3] / 255.0f));
+        /* Apply overbright shift to vertex colours, matching
+         * R_ColorShiftLightingBytesAlpha (tr_bsp.c).  The engine
+         * applies this to ALL BSP vertex colours during loading. */
+        {
+            int vr = dv->color[0] << 1;
+            int vg = dv->color[1] << 1;
+            int vb = dv->color[2] << 1;
+            if ((vr | vg | vb) > 255) {
+                int vmax = vr > vg ? vr : vg;
+                vmax = vmax > vb ? vmax : vb;
+                vr = vr * 255 / vmax;
+                vg = vg * 255 / vmax;
+                vb = vb * 255 / vmax;
+            }
+            batch.colors.push_back(Color(
+                vr / 255.0f, vg / 255.0f,
+                vb / 255.0f, dv->color[3] / 255.0f));
+        }
     }
 
     for (int i = 0; i < surf->numIndexes; i++) {
@@ -1393,8 +1493,12 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
     }
 
-    // ── 5. Accumulate world surfaces into per-shader batches ──
-    std::unordered_map<int, ShaderBatch> batches;
+    // ── 5. Accumulate world surfaces into per-(shader, lightmap) batches ──
+    // Each batch groups surfaces that share both the same shader AND the
+    // same lightmap page.  This ensures each surface gets the correct
+    // lightmap atlas — different surfaces with the same shader may reference
+    // different 128×128 lightmap pages.
+    std::unordered_map<int64_t, ShaderBatch> batches;
 
     int skipped_nodraw = 0;
     int skipped_type   = 0;
@@ -1509,12 +1613,14 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             // Skip patches with invalid lightmap scale
             if (patch->lmapScale == 0) continue;
 
-            // Get or create shader batch
-            ShaderBatch &batch = batches[patch->iShader];
+            // Get or create shader batch — keyed by (shader, lightmap) like
+            // BSP surfaces, so terrain patches with different lightmap pages
+            // get separate materials.
+            int64_t terrain_key = ((int64_t)(uint32_t)patch->iShader << 32)
+                                | (int64_t)(uint32_t)((int)patch->iLightMap + 2);
+            ShaderBatch &batch = batches[terrain_key];
             if (!batch.shader_name) {
                 batch.shader_name = sh->shader;
-            }
-            if (batch.lightmap_num < 0 && patch->iLightMap > 0) {
                 batch.lightmap_num = (int)patch->iLightMap;
             }
 
@@ -1640,7 +1746,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             int first = bsp_models[m].firstSurface;
             int count = bsp_models[m].numSurfaces;
 
-            std::unordered_map<int, ShaderBatch> bm_batches;
+            std::unordered_map<int64_t, ShaderBatch> bm_batches;
             int bm_skip_nd = 0, bm_skip_sky = 0;
 
             for (int si = first; si < first + count && si < num_surfaces; si++) {
@@ -1652,8 +1758,22 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             }
 
             if (!bm_batches.empty()) {
-                s_brush_models[m - 1] = batches_to_array_mesh(bm_batches);
+                int bm_tex_ok = 0, bm_tex_bad = 0;
+                s_brush_models[m - 1] = batches_to_array_mesh(bm_batches, &bm_tex_ok, &bm_tex_bad);
                 bmodels_built++;
+                if (bm_tex_bad > 0) {
+                    UtilityFunctions::print(String("[BSP] Brush sub-model *") +
+                        String::num_int64(m) + ": " +
+                        String::num_int64((int)bm_batches.size()) + " batches, " +
+                        String::num_int64(bm_tex_ok) + " tex ok, " +
+                        String::num_int64(bm_tex_bad) + " tex MISSING");
+                }
+            } else {
+                UtilityFunctions::print(String("[BSP] Brush sub-model *") +
+                    String::num_int64(m) + " has 0 visible batches (" +
+                    String::num_int64(count) + " surfaces, " +
+                    String::num_int64(bm_skip_nd) + " nodraw, " +
+                    String::num_int64(bm_skip_sky) + " sky)");
             }
         }
 

@@ -1,11 +1,21 @@
-/* godot_shader_props.cpp — MOHAA .shader file parser for transparency properties
+/* godot_shader_props.cpp — MOHAA .shader file parser
  *
- * Reads scripts/shaderlist.txt from the engine VFS, loads each listed
- * .shader file, and extracts transparency-related directives:
- *   - alphaFunc GT0 / LT128 / GE128
- *   - blendFunc blend / add / filter / GL_SRC_ALPHA ...
- *   - surfaceparm trans
- *   - cull none / front / twosided / disable
+ * Scans ALL .shader files in scripts/ via FS_ListFiles (mirroring the real
+ * engine's ScanAndLoadShaderFiles) and extracts shader properties into
+ * GodotShaderProps structs for Godot-side material creation.
+ *
+ * This parser uses the engine's own COM_ParseExt() tokeniser (from
+ * code/qcommon/q_shared.c) to guarantee identical parsing behaviour with
+ * the real renderer's tr_shader.c.  The control flow mirrors ParseShader()
+ * and ParseStage() exactly, writing into our lighter-weight structs instead
+ * of the renderer's internal shader_t / shaderStage_t.
+ *
+ * The loading process mirrors ScanAndLoadShaderFiles():
+ *   1. FS_ListFiles("scripts", ".shader") to find all shader files
+ *   2. Load each file via VFS
+ *   3. Concatenate into one large buffer (reverse order, like the engine)
+ *   4. COM_Compress() to strip comments and normalise whitespace
+ *   5. Walk through with COM_ParseExt() parsing shader definitions
  *
  * Results cached in an unordered_map for O(1) lookup by shader name.
  */
@@ -14,6 +24,7 @@
 
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -23,11 +34,26 @@
 using namespace godot;
 
 /* ===================================================================
- *  VFS accessor — extern "C" linkage to engine
+ *  Engine function declarations — extern "C" linkage
+ *
+ *  These are all defined in code/qcommon/q_shared.c and linked into
+ *  our monolithic .so.  We declare them here rather than including
+ *  engine headers to avoid macro/type conflicts with godot-cpp.
  * ================================================================ */
 extern "C" {
+    /* VFS accessors (godot_vfs_accessors.c) */
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
     void Godot_VFS_FreeFile(void *buffer);
+    char **Godot_VFS_ListFiles(const char *directory, const char *extension, int *out_count);
+    void Godot_VFS_FreeFileList(char **list);
+
+    /* Engine tokeniser (q_shared.c) — qboolean is typedef int */
+    char *COM_ParseExt(char **data_p, int allowLineBreaks);
+    void  SkipRestOfLine(char **data);
+    int   COM_Compress(char *data_p);
+    int   Q_stricmp(const char *s1, const char *s2);
+    int   Q_stricmpn(const char *s1, const char *s2, unsigned long n);
+    void  Q_strncpyz(char *dest, const char *src, unsigned long destsize);
 }
 
 /* ===================================================================
@@ -36,710 +62,928 @@ extern "C" {
 static std::unordered_map<std::string, GodotShaderProps> s_shader_props;
 
 /* ===================================================================
- *  String helpers
+ *  Classification helpers
  * ================================================================ */
 
-/* Case-insensitive string comparison for shader keywords */
-static bool str_ieq(const char *a, const char *b) {
-    while (*a && *b) {
-        if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
-            return false;
-        a++;
-        b++;
-    }
-    return *a == *b;
-}
-
-/* Skip whitespace (not newlines) */
-static const char *skip_ws(const char *p) {
-    while (*p == ' ' || *p == '\t') p++;
-    return p;
-}
-
-/* Read next whitespace-delimited token into buf, return pointer past it */
-static const char *read_token(const char *p, char *buf, int bufsize) {
-    p = skip_ws(p);
-    int i = 0;
-    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
-           *p != '{' && *p != '}' && i < bufsize - 1) {
-        buf[i++] = *p++;
-    }
-    buf[i] = '\0';
-    return p;
-}
-
-/* Skip to end of line */
-static const char *skip_line(const char *p) {
-    while (*p && *p != '\n') p++;
-    if (*p == '\n') p++;
-    return p;
-}
-
-/* Skip whitespace including newlines */
-static const char *skip_all_ws(const char *p) {
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    return p;
-}
-
-/* ===================================================================
- *  Shader parser
- *
- *  MOHAA shader files follow the Quake 3 .shader format:
- *
- *    shader/name
- *    {
- *        surfaceparm trans
- *        cull none
- *        {
- *            map textures/foo.tga
- *            blendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA
- *            alphaFunc GE128
- *        }
- *    }
- *
- *  We extract properties from both the outer block (surfaceparm, cull)
- *  and inner stage blocks (blendFunc, alphaFunc).  We only need the
- *  properties from the FIRST stage for transparency classification.
- * ================================================================ */
-
-/* Classify blendFunc from src/dst tokens */
+/* Classify blendFunc from src/dst tokens into our transparency enum */
 static GodotShaderTransparency classify_blend(const char *src, const char *dst) {
     /* Shorthand forms */
-    if (str_ieq(src, "blend"))  return SHADER_ALPHA_BLEND;
-    if (str_ieq(src, "add"))    return SHADER_ADDITIVE;
-    if (str_ieq(src, "filter")) return SHADER_MULTIPLICATIVE;
+    if (!Q_stricmp(src, "blend"))   return SHADER_ALPHA_BLEND;
+    if (!Q_stricmp(src, "add"))     return SHADER_ADDITIVE;
+    if (!Q_stricmp(src, "filter"))  return SHADER_MULTIPLICATIVE;
 
     /* Full GL_* forms */
-    if (str_ieq(src, "GL_SRC_ALPHA") && str_ieq(dst, "GL_ONE_MINUS_SRC_ALPHA"))
+    if (!Q_stricmp(src, "GL_SRC_ALPHA") && !Q_stricmp(dst, "GL_ONE_MINUS_SRC_ALPHA"))
         return SHADER_ALPHA_BLEND;
-    if (str_ieq(src, "GL_ONE") && str_ieq(dst, "GL_ONE"))
+    if (!Q_stricmp(src, "GL_ONE") && !Q_stricmp(dst, "GL_ONE"))
         return SHADER_ADDITIVE;
-    if (str_ieq(src, "GL_DST_COLOR") && str_ieq(dst, "GL_ZERO"))
+    if (!Q_stricmp(src, "GL_DST_COLOR") && !Q_stricmp(dst, "GL_ZERO"))
         return SHADER_MULTIPLICATIVE;
-    /* GL_ONE GL_ZERO = opaque (default) */
-    if (str_ieq(src, "GL_ONE") && str_ieq(dst, "GL_ZERO"))
+    if (!Q_stricmp(src, "GL_ONE") && !Q_stricmp(dst, "GL_ZERO"))
         return SHADER_OPAQUE;
-    /* GL_ZERO GL_SRC_COLOR = filter (alternate form) */
-    if (str_ieq(src, "GL_ZERO") && str_ieq(dst, "GL_SRC_COLOR"))
+    if (!Q_stricmp(src, "GL_ZERO") && !Q_stricmp(dst, "GL_SRC_COLOR"))
         return SHADER_MULTIPLICATIVE;
 
     /* Anything with GL_SRC_ALPHA as source is alpha-blended */
-    if (str_ieq(src, "GL_SRC_ALPHA"))
+    if (!Q_stricmp(src, "GL_SRC_ALPHA"))
         return SHADER_ALPHA_BLEND;
     /* GL_ONE as source with non-ONE dest is likely additive */
-    if (str_ieq(src, "GL_ONE"))
+    if (!Q_stricmp(src, "GL_ONE"))
         return SHADER_ADDITIVE;
 
     /* Default: treat as alpha blend if we can't classify */
     return SHADER_ALPHA_BLEND;
 }
 
-/* Phase 66–72: Parse a GL blend factor token into MohaaBlendFactor enum */
+/* Classify transparency from stored per-stage blend factors.
+ * Called post-parse to determine overall shader transparency
+ * from stage 0's blend function (matching Q3's SortNewShader logic:
+ * if stage 0 has no blendFunc → opaque, regardless of later stages). */
+static GodotShaderTransparency classify_blend_factors(MohaaBlendFactor src,
+                                                       MohaaBlendFactor dst)
+{
+    if (src == BLEND_SRC_ALPHA && dst == BLEND_ONE_MINUS_SRC_ALPHA)
+        return SHADER_ALPHA_BLEND;
+    if (src == BLEND_ONE && dst == BLEND_ONE)
+        return SHADER_ADDITIVE;
+    if (src == BLEND_DST_COLOR && dst == BLEND_ZERO)
+        return SHADER_MULTIPLICATIVE;
+    if (src == BLEND_ONE && dst == BLEND_ZERO)
+        return SHADER_OPAQUE;
+    if (src == BLEND_ZERO && dst == BLEND_SRC_COLOR)
+        return SHADER_MULTIPLICATIVE;
+    if (src == BLEND_SRC_ALPHA)
+        return SHADER_ALPHA_BLEND;
+    if (src == BLEND_ONE)
+        return SHADER_ADDITIVE;
+    return SHADER_ALPHA_BLEND;
+}
+
+/* Parse a GL blend factor token into MohaaBlendFactor enum */
 static MohaaBlendFactor parse_blend_factor(const char *tok) {
-    if (str_ieq(tok, "GL_ONE"))                    return BLEND_ONE;
-    if (str_ieq(tok, "GL_ZERO"))                   return BLEND_ZERO;
-    if (str_ieq(tok, "GL_SRC_ALPHA"))              return BLEND_SRC_ALPHA;
-    if (str_ieq(tok, "GL_ONE_MINUS_SRC_ALPHA"))    return BLEND_ONE_MINUS_SRC_ALPHA;
-    if (str_ieq(tok, "GL_DST_COLOR"))              return BLEND_DST_COLOR;
-    if (str_ieq(tok, "GL_SRC_COLOR"))              return BLEND_SRC_COLOR;
-    if (str_ieq(tok, "GL_ONE_MINUS_DST_COLOR"))    return BLEND_ONE_MINUS_DST_COLOR;
-    if (str_ieq(tok, "GL_ONE_MINUS_SRC_COLOR"))    return BLEND_ONE_MINUS_SRC_COLOR;
-    if (str_ieq(tok, "GL_DST_ALPHA"))              return BLEND_DST_ALPHA;
-    if (str_ieq(tok, "GL_ONE_MINUS_DST_ALPHA"))    return BLEND_ONE_MINUS_DST_ALPHA;
+    if (!Q_stricmp(tok, "GL_ONE"))                    return BLEND_ONE;
+    if (!Q_stricmp(tok, "GL_ZERO"))                   return BLEND_ZERO;
+    if (!Q_stricmp(tok, "GL_SRC_ALPHA"))              return BLEND_SRC_ALPHA;
+    if (!Q_stricmp(tok, "GL_ONE_MINUS_SRC_ALPHA"))    return BLEND_ONE_MINUS_SRC_ALPHA;
+    if (!Q_stricmp(tok, "GL_DST_COLOR"))              return BLEND_DST_COLOR;
+    if (!Q_stricmp(tok, "GL_SRC_COLOR"))              return BLEND_SRC_COLOR;
+    if (!Q_stricmp(tok, "GL_ONE_MINUS_DST_COLOR"))    return BLEND_ONE_MINUS_DST_COLOR;
+    if (!Q_stricmp(tok, "GL_ONE_MINUS_SRC_COLOR"))    return BLEND_ONE_MINUS_SRC_COLOR;
+    if (!Q_stricmp(tok, "GL_DST_ALPHA"))              return BLEND_DST_ALPHA;
+    if (!Q_stricmp(tok, "GL_ONE_MINUS_DST_ALPHA"))    return BLEND_ONE_MINUS_DST_ALPHA;
     return BLEND_ONE;
 }
 
-/* Phase 66–72: Parse a wave function name into MohaaWaveFunc enum */
+/* Parse a wave function name into MohaaWaveFunc enum */
 static MohaaWaveFunc parse_wave_func(const char *tok) {
-    if (str_ieq(tok, "sin"))                return WAVE_SIN;
-    if (str_ieq(tok, "triangle"))           return WAVE_TRIANGLE;
-    if (str_ieq(tok, "square"))             return WAVE_SQUARE;
-    if (str_ieq(tok, "sawtooth"))           return WAVE_SAWTOOTH;
-    if (str_ieq(tok, "inversesawtooth"))    return WAVE_INVERSE_SAWTOOTH;
+    if (!Q_stricmp(tok, "sin"))                return WAVE_SIN;
+    if (!Q_stricmp(tok, "triangle"))           return WAVE_TRIANGLE;
+    if (!Q_stricmp(tok, "square"))             return WAVE_SQUARE;
+    if (!Q_stricmp(tok, "sawtooth"))           return WAVE_SAWTOOTH;
+    if (!Q_stricmp(tok, "inversesawtooth"))    return WAVE_INVERSE_SAWTOOTH;
     return WAVE_SIN;
 }
 
-/* Parse a single shader definition starting after the opening '{' */
-static void parse_shader_body(const char *p, const char *end, GodotShaderProps *props) {
-    int brace_depth = 1;
-    int stage_index = -1;  /* -1 = not in a stage, >= 0 = current stage index */
-    bool first_stage = true;
+/* ===================================================================
+ *  parse_stage — mirrors renderergl1/tr_shader.c::ParseStage()
+ *
+ *  Called after the opening '{' of a stage block has been consumed.
+ *  Reads tokens until the matching '}' is found.
+ * ================================================================ */
+static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
+                         bool first_stage)
+{
+    char *token;
+    int cntBundle = 0;  /* Tracks which texture bundle we're in (mirrors tr_shader.c).
+                         * Bundle 0 = primary (diffuse) texture.
+                         * Bundle 1+ = secondary (usually $lightmap) via nextBundle.
+                         * stg->map always holds the bundle-0 texture path. */
 
-    char token[256];
+    MohaaShaderStage *stg = nullptr;
+    if (stage_index >= 0 && stage_index < MOHAA_SHADER_STAGE_MAX) {
+        stg = &props->stages[stage_index];
+        memset(stg, 0, sizeof(MohaaShaderStage));
+        stg->blendSrc = BLEND_ONE;
+        stg->blendDst = BLEND_ZERO;
+        stg->alphaConst = 1.0f;
+        stg->rgbConst[0] = 1.0f;
+        stg->rgbConst[1] = 1.0f;
+        stg->rgbConst[2] = 1.0f;
+        props->stage_count = stage_index + 1;
+        props->num_stages = props->stage_count;
+    }
 
-    while (p < end && brace_depth > 0) {
-        p = skip_all_ws(p);
-        if (p >= end) break;
-
-        /* Handle comments */
-        if (p[0] == '/' && p[1] == '/') {
-            p = skip_line(p);
-            continue;
-        }
-
-        /* Track brace depth */
-        if (*p == '{') {
-            brace_depth++;
-            if (brace_depth == 2) {
-                /* Entering a new stage block */
-                stage_index = props->stage_count;
-                if (stage_index < MOHAA_SHADER_STAGE_MAX) {
-                    /* Zero-initialise the new stage */
-                    memset(&props->stages[stage_index], 0, sizeof(MohaaShaderStage));
-                    props->stages[stage_index].blendSrc = BLEND_ONE;
-                    props->stages[stage_index].blendDst = BLEND_ZERO;
-                    props->stages[stage_index].alphaConst = 1.0f;
-                    props->stages[stage_index].rgbConst[0] = 1.0f;
-                    props->stages[stage_index].rgbConst[1] = 1.0f;
-                    props->stages[stage_index].rgbConst[2] = 1.0f;
-                    props->stage_count++;
-                }
-                props->num_stages = props->stage_count;
-            }
-            p++;
-            continue;
-        }
-        if (*p == '}') {
-            if (brace_depth == 2) {
-                /* Closing a stage */
-                stage_index = -1;
-                first_stage = false;
-            }
-            brace_depth--;
-            p++;
-            continue;
-        }
-
-        /* Read directive */
-        p = read_token(p, token, sizeof(token));
+    while (1) {
+        token = COM_ParseExt(text, 1 /* qtrue */);
         if (!token[0]) {
-            p = skip_line(p);
+            break;
+        }
+        if (token[0] == '}') {
+            break;
+        }
+
+        /* ── nextBundle — MOHAA multi-texture pass separator ──
+         * Mirrors tr_shader.c:1675.  Increments the texture bundle index.
+         * After nextBundle, subsequent "map" directives apply to the next
+         * texture unit (typically the lightmap).  We must NOT overwrite
+         * stg->map (which holds the bundle-0 diffuse texture path). */
+        if (!Q_stricmp(token, "nextBundle") || !Q_stricmp(token, "nextbundle"))
+        {
+            /* Optional parameter: "add" for GL_ADD multitexture env,
+             * otherwise GL_MODULATE (mirrors engine). */
+            token = COM_ParseExt(text, 0 /* qfalse — same line only */);
+            /* token may be "add" or empty — we don't need the value. */
+            cntBundle++;
             continue;
         }
 
-        /* Pointer to the current stage (or NULL if overflowed) */
-        MohaaShaderStage *stg = (brace_depth == 2 && stage_index >= 0 && stage_index < MOHAA_SHADER_STAGE_MAX)
-                           ? &props->stages[stage_index] : nullptr;
-
-        /* ── Outer block directives (brace_depth == 1) ── */
-        if (brace_depth == 1) {
-            if (str_ieq(token, "surfaceparm")) {
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "trans")) {
-                    /* Mark as potentially transparent (will be upgraded
-                       to ALPHA_BLEND if no explicit alphaFunc/blendFunc) */
-                    if (props->transparency == SHADER_OPAQUE)
-                        props->transparency = SHADER_ALPHA_BLEND;
-                } else if (str_ieq(token, "portal")) {
-                    props->is_portal = true;
-                } else if (str_ieq(token, "sky")) {
-                    props->is_sky = true;
-                } else if (str_ieq(token, "nolightmap")) {
-                    props->no_lightmap = true;
-                }
-            } else if (str_ieq(token, "cull")) {
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "none") || str_ieq(token, "twosided") ||
-                    str_ieq(token, "disable")) {
-                    props->cull = SHADER_CULL_NONE;
-                } else if (str_ieq(token, "front")) {
-                    props->cull = SHADER_CULL_FRONT;
+        /* ── map <name> ── */
+        /* Mirrors ParseStage's handling of "map", "clampmap", "clampmapx", "clampmapy" */
+        if (!Q_stricmp(token, "map") || !Q_stricmpn(token, "clampmap", 8))
+        {
+            bool is_clamp = Q_stricmp(token, "map") != 0;
+            token = COM_ParseExt(text, 0 /* qfalse */);
+            if (stg) {
+                if (cntBundle == 0) {
+                    /* Bundle 0: primary (diffuse) texture */
+                    Q_strncpyz(stg->map, token, sizeof(stg->map));
+                    if (is_clamp)
+                        stg->isClampMap = true;
+                    if (!Q_stricmp(token, "$lightmap"))
+                        stg->isLightmap = true;
                 } else {
-                    props->cull = SHADER_CULL_BACK;
+                    /* Bundle 1+: secondary texture (usually lightmap).
+                     * Don't overwrite stg->map — keep the diffuse path.
+                     * If this bundle is $lightmap, the stage is a combined
+                     * diffuse+lightmap multi-texture pass, NOT a pure
+                     * lightmap stage (isLightmap stays false). */
                 }
-            } else if (str_ieq(token, "skyParms")) {
-                /* skyParms <envBasename> <cloudHeight> <innerBox>
-                 * e.g. skyParms env/m5l2 512 - */
-                char env_basename[64];
-                p = read_token(p, env_basename, sizeof(env_basename));
-                if (env_basename[0] && !str_ieq(env_basename, "-")) {
-                    strncpy(props->sky_env, env_basename, sizeof(props->sky_env) - 1);
-                    props->sky_env[sizeof(props->sky_env) - 1] = '\0';
-                }
-                props->is_sky = true;
-            } else if (str_ieq(token, "deformVertexes") || str_ieq(token, "deformvertexes")) {
-                /* Phase 63: deformVertexes <type> ... */
-                p = read_token(p, token, sizeof(token));
-                props->has_deform = true;
-                if (str_ieq(token, "wave")) {
-                    props->deform_type = 0;
-                    char div_v[64], func[64], base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, div_v, sizeof(div_v));
-                    p = read_token(p, func, sizeof(func));  /* sin/triangle/square/sawtooth */
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    props->deform_div = (float)atof(div_v);
-                    props->deform_base = (float)atof(base_v);
-                    props->deform_amplitude = (float)atof(amp);
-                    props->deform_phase = (float)atof(phase);
-                    props->deform_frequency = (float)atof(freq);
-                } else if (str_ieq(token, "bulge")) {
-                    props->deform_type = 1;
-                    char bw[64], bh[64], bs[64];
-                    p = read_token(p, bw, sizeof(bw));
-                    p = read_token(p, bh, sizeof(bh));
-                    p = read_token(p, bs, sizeof(bs));
-                    props->deform_base = (float)atof(bw);
-                    props->deform_amplitude = (float)atof(bh);
-                    props->deform_frequency = (float)atof(bs);
-                } else if (str_ieq(token, "move")) {
-                    props->deform_type = 2;
-                    /* move <x> <y> <z> <func> <base> <amp> <phase> <freq> */
-                    char mx[64], my[64], mz[64], func[64], base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, mx, sizeof(mx));
-                    p = read_token(p, my, sizeof(my));
-                    p = read_token(p, mz, sizeof(mz));
-                    p = read_token(p, func, sizeof(func));
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    props->deform_base = (float)atof(base_v);
-                    props->deform_amplitude = (float)atof(amp);
-                    props->deform_phase = (float)atof(phase);
-                    props->deform_frequency = (float)atof(freq);
-                } else if (str_ieq(token, "autosprite")) {
-                    props->deform_type = 3;
-                } else if (str_ieq(token, "autosprite2")) {
-                    props->deform_type = 4;
-                }
-            } else if (str_ieq(token, "sort")) {
-                /* Phase 67: sort hint */
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "portal")) props->sort_key = 1;
-                else if (str_ieq(token, "sky")) props->sort_key = 2;
-                else if (str_ieq(token, "opaque")) props->sort_key = 3;
-                else if (str_ieq(token, "banner")) props->sort_key = 6;
-                else if (str_ieq(token, "underwater")) props->sort_key = 8;
-                else if (str_ieq(token, "additive")) props->sort_key = 9;
-                else if (str_ieq(token, "nearest")) props->sort_key = 16;
-                else props->sort_key = atoi(token);
-            } else if (str_ieq(token, "nomipmaps")) {
-                /* Phase 68 */
-                props->no_mipmaps = true;
-            } else if (str_ieq(token, "nopicmip")) {
-                /* Phase 68 */
-                props->no_picmip = true;
-            } else if (str_ieq(token, "fogParms") || str_ieq(token, "fogparms")) {
-                /* Phase 70: fogParms ( <r> <g> <b> ) <distance> */
-                p = skip_ws(p);
-                if (*p == '(') p++;
-                char rv[64], gv[64], bv[64], dv[64];
-                p = read_token(p, rv, sizeof(rv));
-                p = read_token(p, gv, sizeof(gv));
-                p = read_token(p, bv, sizeof(bv));
-                p = skip_ws(p);
-                if (*p == ')') p++;
-                p = read_token(p, dv, sizeof(dv));
-                props->has_fog = true;
-                props->fog_color[0] = (float)atof(rv);
-                props->fog_color[1] = (float)atof(gv);
-                props->fog_color[2] = (float)atof(bv);
-                props->fog_distance = (float)atof(dv);
             }
         }
-
-        /* ── Stage directives (brace_depth == 2) ── */
-        if (brace_depth == 2) {
-            if (str_ieq(token, "map") || str_ieq(token, "clampMap") || str_ieq(token, "clampmap")) {
-                /* Phase 66: per-stage map / clampMap */
-                char map_name[64];
-                p = read_token(p, map_name, sizeof(map_name));
+        /* ── alphaFunc <func> ── */
+        else if (!Q_stricmp(token, "alphaFunc"))
+        {
+            token = COM_ParseExt(text, 0);
+            props->transparency = SHADER_ALPHA_TEST;
+            float thresh = 0.5f;
+            if (!Q_stricmp(token, "GT0"))
+                thresh = 0.01f;
+            props->alpha_threshold = thresh;
+            if (stg) {
+                stg->hasAlphaFunc = true;
+                stg->alphaFuncThreshold = thresh;
+            }
+        }
+        /* ── blendFunc <srcFactor> <dstFactor> | blend | add | filter | alphaadd ── */
+        /* Per-stage blend data is recorded here; overall shader transparency
+         * is determined post-parse from stage 0's blend (matching Q3's
+         * SortNewShader: if stage 0 has no blendFunc → opaque). */
+        else if (!Q_stricmp(token, "blendfunc") || !Q_stricmp(token, "blendFunc"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "blend") || !Q_stricmp(token, "add") ||
+                !Q_stricmp(token, "filter") || !Q_stricmp(token, "alphaadd"))
+            {
+                /* Shorthand form — record per-stage blend factors */
                 if (stg) {
-                    strncpy(stg->map, map_name, sizeof(stg->map) - 1);
-                    stg->map[sizeof(stg->map) - 1] = '\0';
-                    if (str_ieq(token, "clampMap") || str_ieq(token, "clampmap"))
-                        stg->isClampMap = true;
-                    if (str_ieq(map_name, "$lightmap"))
-                        stg->isLightmap = true;
+                    stg->hasBlendFunc = true;
+                    if (!Q_stricmp(token, "blend")) {
+                        stg->blendSrc = BLEND_SRC_ALPHA;
+                        stg->blendDst = BLEND_ONE_MINUS_SRC_ALPHA;
+                    } else if (!Q_stricmp(token, "add")) {
+                        stg->blendSrc = BLEND_ONE;
+                        stg->blendDst = BLEND_ONE;
+                    } else if (!Q_stricmp(token, "filter")) {
+                        stg->blendSrc = BLEND_DST_COLOR;
+                        stg->blendDst = BLEND_ZERO;
+                    } else if (!Q_stricmp(token, "alphaadd")) {
+                        stg->blendSrc = BLEND_SRC_ALPHA;
+                        stg->blendDst = BLEND_ONE;
+                    }
                 }
-            } else if (str_ieq(token, "alphaFunc")) {
-                p = read_token(p, token, sizeof(token));
-                props->transparency = SHADER_ALPHA_TEST;
-                float thresh = 0.5f;
-                if (str_ieq(token, "GT0")) {
-                    thresh = 0.01f;
-                }
-                props->alpha_threshold = thresh;
+            }
+            else
+            {
+                /* Full form: blendFunc GL_SRC GL_DST */
+                char src_tok[64];
+                Q_strncpyz(src_tok, token, sizeof(src_tok));
+                token = COM_ParseExt(text, 0);
                 if (stg) {
-                    stg->hasAlphaFunc = true;
-                    stg->alphaFuncThreshold = thresh;
+                    stg->hasBlendFunc = true;
+                    stg->blendSrc = parse_blend_factor(src_tok);
+                    stg->blendDst = parse_blend_factor(token);
                 }
-            } else if (str_ieq(token, "blendFunc")) {
-                char src_tok[64], dst_tok[64];
-                p = read_token(p, src_tok, sizeof(src_tok));
-                dst_tok[0] = '\0';
+            }
+        }
+        /* ── animMap / animMapOnce / animMapPhase <freq> [phase] <tex1> ... <texN> ── */
+        /* Mirrors ParseStage's animMap handling */
+        else if (!Q_stricmp(token, "animMap") || !Q_stricmp(token, "animMapOnce") ||
+                 !Q_stricmp(token, "animMapPhase"))
+        {
+            bool phased = !Q_stricmp(token, "animMapPhase");
 
-                /* Check for shorthand forms (single token: blend/add/filter) */
-                if (str_ieq(src_tok, "blend") || str_ieq(src_tok, "add") ||
-                    str_ieq(src_tok, "filter")) {
-                    GodotShaderTransparency t = classify_blend(src_tok, "");
-                    if (props->transparency != SHADER_ALPHA_TEST)
-                        props->transparency = t;
-                    /* Phase 66: per-stage blend factors for shorthand */
-                    if (stg) {
-                        stg->hasBlendFunc = true;
-                        if (str_ieq(src_tok, "blend")) {
-                            stg->blendSrc = BLEND_SRC_ALPHA;
-                            stg->blendDst = BLEND_ONE_MINUS_SRC_ALPHA;
-                        } else if (str_ieq(src_tok, "add")) {
-                            stg->blendSrc = BLEND_ONE;
-                            stg->blendDst = BLEND_ONE;
-                        } else if (str_ieq(src_tok, "filter")) {
-                            stg->blendSrc = BLEND_DST_COLOR;
-                            stg->blendDst = BLEND_ZERO;
-                        }
-                    }
-                } else {
-                    /* Full form: blendFunc GL_SRC GL_DST */
-                    p = read_token(p, dst_tok, sizeof(dst_tok));
-                    GodotShaderTransparency t = classify_blend(src_tok, dst_tok);
-                    if (props->transparency != SHADER_ALPHA_TEST)
-                        props->transparency = t;
-                    /* Phase 66: per-stage blend factors */
-                    if (stg) {
-                        stg->hasBlendFunc = true;
-                        stg->blendSrc = parse_blend_factor(src_tok);
-                        stg->blendDst = parse_blend_factor(dst_tok);
-                    }
+            token = COM_ParseExt(text, 0);
+            float freq = (float)atof(token);
+
+            if (phased) {
+                token = COM_ParseExt(text, 0);
+                /* phase value — not stored in our struct yet */
+            }
+
+            if (first_stage) {
+                props->animmap_freq = freq;
+                props->has_animmap = true;
+                props->animmap_num_frames = 0;
+            }
+
+            int frame_count = 0;
+            while (1) {
+                token = COM_ParseExt(text, 0);
+                if (!token[0])
+                    break;
+                if (first_stage && frame_count < 8) {
+                    Q_strncpyz(props->animmap_frames[frame_count], token, 64);
+                    props->animmap_num_frames = frame_count + 1;
                 }
-            } else if (str_ieq(token, "animMap") || str_ieq(token, "animmap")) {
-                /* Phase 61/68: animMap <freq> <tex1> <tex2> ... */
-                char freq_val[64];
-                p = read_token(p, freq_val, sizeof(freq_val));
-                float freq = (float)atof(freq_val);
-
-                /* Backward compat: populate flat fields from first stage */
-                if (first_stage) {
-                    props->animmap_freq = freq;
-                    props->has_animmap = true;
-                    props->animmap_num_frames = 0;
+                if (stg && frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES) {
+                    Q_strncpyz(stg->animMapFrames[frame_count], token, 64);
                 }
-
-                int frame_count = 0;
-                /* Read texture names until end of line */
-                while (frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES) {
-                    p = skip_ws(p);
-                    if (!*p || *p == '\n' || *p == '\r') break;
-                    char frame_name[64];
-                    p = read_token(p, frame_name, sizeof(frame_name));
-                    if (!frame_name[0]) break;
-
-                    /* Backward compat: flat fields */
-                    if (first_stage && frame_count < 8) {
-                        strncpy(props->animmap_frames[frame_count], frame_name, 63);
-                        props->animmap_frames[frame_count][63] = '\0';
-                        props->animmap_num_frames = frame_count + 1;
-                    }
-
-                    /* Per-stage data */
-                    if (stg && frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES) {
-                        strncpy(stg->animMapFrames[frame_count], frame_name, 63);
-                        stg->animMapFrames[frame_count][63] = '\0';
-                    }
-                    frame_count++;
-                }
-                if (stg) {
-                    stg->animMapFreq = freq;
-                    stg->animMapFrameCount = frame_count;
-                }
-            } else if (str_ieq(token, "tcGen") || str_ieq(token, "tcgen")) {
-                /* Phase 62/67/72: tcGen */
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "environment") || str_ieq(token, "environmentmodel")) {
+                frame_count++;
+            }
+            if (stg) {
+                stg->animMapFreq = freq;
+                stg->animMapFrameCount = (frame_count < MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES)
+                                         ? frame_count : MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES;
+            }
+        }
+        /* ── tcGen <type> ── */
+        /* In the engine, tcGen is per-bundle (stage->bundle[cntBundle].tcGen).
+         * Only record it for bundle 0 — the primary texture unit.
+         * We still consume parameters for all bundles to keep the parser
+         * position correct. */
+        else if (!Q_stricmp(token, "tcGen") || !Q_stricmp(token, "tcgen"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "environment") || !Q_stricmp(token, "environmentmodel"))
+            {
+                if (cntBundle == 0) {
                     if (first_stage) props->tcgen_environment = true;
                     if (stg) stg->tcGen = STAGE_TCGEN_ENVIRONMENT;
-                } else if (str_ieq(token, "lightmap")) {
-                    /* Phase 72: tcGen lightmap — use UV2 */
-                    if (stg) {
-                        stg->tcGen = STAGE_TCGEN_LIGHTMAP;
-                        stg->isLightmap = true;
-                    }
-                } else if (str_ieq(token, "vector")) {
-                    /* Phase 72: tcGen vector ( sx sy sz ) ( tx ty tz ) */
-                    if (stg) stg->tcGen = STAGE_TCGEN_VECTOR;
-                    p = skip_ws(p);
-                    if (*p == '(') p++;
-                    char v0[64], v1[64], v2[64];
-                    p = read_token(p, v0, sizeof(v0));
-                    p = read_token(p, v1, sizeof(v1));
-                    p = read_token(p, v2, sizeof(v2));
-                    p = skip_ws(p);
-                    if (*p == ')') p++;
-                    if (stg) {
-                        stg->tcGenVecS[0] = (float)atof(v0);
-                        stg->tcGenVecS[1] = (float)atof(v1);
-                        stg->tcGenVecS[2] = (float)atof(v2);
-                    }
-                    p = skip_ws(p);
-                    if (*p == '(') p++;
-                    p = read_token(p, v0, sizeof(v0));
-                    p = read_token(p, v1, sizeof(v1));
-                    p = read_token(p, v2, sizeof(v2));
-                    p = skip_ws(p);
-                    if (*p == ')') p++;
-                    if (stg) {
-                        stg->tcGenVecT[0] = (float)atof(v0);
-                        stg->tcGenVecT[1] = (float)atof(v1);
-                        stg->tcGenVecT[2] = (float)atof(v2);
-                    }
                 }
-                /* tcGen base is the default — no action needed */
-            } else if (str_ieq(token, "rgbGen") || str_ieq(token, "rgbgen")) {
-                /* Phase 64/71: rgbGen */
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "identity")) {
-                    if (first_stage) props->rgbgen_type = 0;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY;
-                } else if (str_ieq(token, "identityLighting")) {
-                    if (first_stage) props->rgbgen_type = 0;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY_LIGHTING;
-                } else if (str_ieq(token, "vertex") || str_ieq(token, "exactVertex")) {
-                    if (first_stage) props->rgbgen_type = 1;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_VERTEX;
-                } else if (str_ieq(token, "lightingDiffuse")) {
-                    if (first_stage) props->rgbgen_type = 1;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_LIGHTING_DIFFUSE;
-                } else if (str_ieq(token, "wave")) {
-                    char func[64], base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, func, sizeof(func));
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    if (first_stage) {
-                        props->rgbgen_type = 2;
-                        props->rgbgen_wave_base  = (float)atof(base_v);
-                        props->rgbgen_wave_amp   = (float)atof(amp);
-                        props->rgbgen_wave_phase = (float)atof(phase);
-                        props->rgbgen_wave_freq  = (float)atof(freq);
-                    }
-                    if (stg) {
-                        stg->rgbGen = STAGE_RGBGEN_WAVE;
-                        stg->rgbWave.func      = parse_wave_func(func);
-                        stg->rgbWave.base      = (float)atof(base_v);
-                        stg->rgbWave.amplitude = (float)atof(amp);
-                        stg->rgbWave.phase     = (float)atof(phase);
-                        stg->rgbWave.frequency = (float)atof(freq);
-                    }
-                } else if (str_ieq(token, "entity")) {
-                    if (first_stage) props->rgbgen_type = 3;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_ENTITY;
-                } else if (str_ieq(token, "oneMinusEntity")) {
-                    if (first_stage) props->rgbgen_type = 3;
-                    if (stg) stg->rgbGen = STAGE_RGBGEN_ONE_MINUS_ENTITY;
-                } else if (str_ieq(token, "const") || str_ieq(token, "constant")) {
-                    /* const ( r g b ) */
-                    p = skip_ws(p);
-                    if (*p == '(') p++;
-                    char rv[64], gv[64], bv[64];
-                    p = read_token(p, rv, sizeof(rv));
-                    p = read_token(p, gv, sizeof(gv));
-                    p = read_token(p, bv, sizeof(bv));
-                    p = skip_ws(p);
-                    if (*p == ')') p++;
-                    if (first_stage) {
-                        props->rgbgen_type = 4;
-                        props->rgbgen_const[0] = (float)atof(rv);
-                        props->rgbgen_const[1] = (float)atof(gv);
-                        props->rgbgen_const[2] = (float)atof(bv);
-                    }
-                    if (stg) {
-                        stg->rgbGen = STAGE_RGBGEN_CONST;
-                        stg->rgbConst[0] = (float)atof(rv);
-                        stg->rgbConst[1] = (float)atof(gv);
-                        stg->rgbConst[2] = (float)atof(bv);
-                    }
+            }
+            else if (!Q_stricmp(token, "lightmap"))
+            {
+                if (cntBundle == 0 && stg) {
+                    stg->tcGen = STAGE_TCGEN_LIGHTMAP;
+                    stg->isLightmap = true;
                 }
-            } else if (str_ieq(token, "alphaGen") || str_ieq(token, "alphagen")) {
-                /* Phase 65/71: alphaGen */
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "identity")) {
-                    if (first_stage) props->alphagen_type = 0;
-                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_IDENTITY;
-                } else if (str_ieq(token, "vertex")) {
-                    if (first_stage) props->alphagen_type = 1;
-                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_VERTEX;
-                } else if (str_ieq(token, "wave")) {
-                    char func[64], base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, func, sizeof(func));
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    if (first_stage) {
-                        props->alphagen_type = 2;
-                        props->alphagen_wave_base  = (float)atof(base_v);
-                        props->alphagen_wave_amp   = (float)atof(amp);
-                        props->alphagen_wave_phase = (float)atof(phase);
-                        props->alphagen_wave_freq  = (float)atof(freq);
-                    }
-                    if (stg) {
-                        stg->alphaGen = STAGE_ALPHAGEN_WAVE;
-                        stg->alphaWave.func      = parse_wave_func(func);
-                        stg->alphaWave.base      = (float)atof(base_v);
-                        stg->alphaWave.amplitude = (float)atof(amp);
-                        stg->alphaWave.phase     = (float)atof(phase);
-                        stg->alphaWave.frequency = (float)atof(freq);
-                    }
-                } else if (str_ieq(token, "entity")) {
-                    if (first_stage) props->alphagen_type = 3;
-                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_ENTITY;
-                } else if (str_ieq(token, "oneMinusEntity")) {
-                    if (first_stage) props->alphagen_type = 3;
-                    if (stg) stg->alphaGen = STAGE_ALPHAGEN_ONE_MINUS_ENTITY;
-                } else if (str_ieq(token, "portal")) {
-                    char dist_v[64];
-                    p = read_token(p, dist_v, sizeof(dist_v));
-                    if (stg) {
-                        stg->alphaGen = STAGE_ALPHAGEN_PORTAL;
-                        stg->alphaPortalDist = (float)atof(dist_v);
-                    }
-                } else if (str_ieq(token, "const") || str_ieq(token, "constant")) {
-                    char av[64];
-                    p = read_token(p, av, sizeof(av));
-                    if (first_stage) {
-                        props->alphagen_type = 4;
-                        props->alphagen_const = (float)atof(av);
-                    }
-                    if (stg) {
-                        stg->alphaGen = STAGE_ALPHAGEN_CONST;
-                        stg->alphaConst = (float)atof(av);
-                    }
-                }
-            } else if (str_ieq(token, "tcMod") || str_ieq(token, "tcmod")) {
-                /* Phase 36/66: Parse tcMod directives for UV animation */
-                p = read_token(p, token, sizeof(token));
-                if (str_ieq(token, "scroll")) {
-                    char sval[64], tval[64];
-                    p = read_token(p, sval, sizeof(sval));
-                    p = read_token(p, tval, sizeof(tval));
-                    if (first_stage) {
-                        props->tcmod_scroll_s = (float)atof(sval);
-                        props->tcmod_scroll_t = (float)atof(tval);
-                        props->has_tcmod = true;
-                    }
-                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
-                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
-                        tm->type = TCMOD_SCROLL;
-                        tm->params[0] = (float)atof(sval);
-                        tm->params[1] = (float)atof(tval);
-                    }
-                } else if (str_ieq(token, "rotate")) {
-                    char rval[64];
-                    p = read_token(p, rval, sizeof(rval));
-                    if (first_stage) {
-                        props->tcmod_rotate = (float)atof(rval);
-                        props->has_tcmod = true;
-                    }
-                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
-                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
-                        tm->type = TCMOD_ROTATE;
-                        tm->params[0] = (float)atof(rval);
-                    }
-                } else if (str_ieq(token, "scale")) {
-                    char sval[64], tval[64];
-                    p = read_token(p, sval, sizeof(sval));
-                    p = read_token(p, tval, sizeof(tval));
-                    if (first_stage) {
-                        props->tcmod_scale_s = (float)atof(sval);
-                        props->tcmod_scale_t = (float)atof(tval);
-                        props->has_tcmod = true;
-                    }
-                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
-                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
-                        tm->type = TCMOD_SCALE;
-                        tm->params[0] = (float)atof(sval);
-                        tm->params[1] = (float)atof(tval);
-                    }
-                } else if (str_ieq(token, "turb")) {
-                    /* turb <base> <amplitude> <phase> <freq> */
-                    char base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    if (first_stage) {
-                        props->tcmod_turb_amp  = (float)atof(amp);
-                        props->tcmod_turb_freq = (float)atof(freq);
-                        props->has_tcmod = true;
-                    }
-                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
-                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
-                        tm->type = TCMOD_TURB;
-                        tm->params[0] = (float)atof(base_v);
-                        tm->params[1] = (float)atof(amp);
-                        tm->params[2] = (float)atof(phase);
-                        tm->params[3] = (float)atof(freq);
-                    }
-                } else if (str_ieq(token, "stretch")) {
-                    /* tcMod stretch <func> <base> <amp> <phase> <freq> */
-                    char func[64], base_v[64], amp[64], phase[64], freq[64];
-                    p = read_token(p, func, sizeof(func));
-                    p = read_token(p, base_v, sizeof(base_v));
-                    p = read_token(p, amp, sizeof(amp));
-                    p = read_token(p, phase, sizeof(phase));
-                    p = read_token(p, freq, sizeof(freq));
-                    if (first_stage) {
-                        props->has_tcmod_stretch = true;
-                        props->tcmod_stretch_base  = (float)atof(base_v);
-                        props->tcmod_stretch_amp   = (float)atof(amp);
-                        props->tcmod_stretch_phase = (float)atof(phase);
-                        props->tcmod_stretch_freq  = (float)atof(freq);
-                        props->has_tcmod = true;
-                    }
-                    if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
-                        MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
-                        tm->type = TCMOD_STRETCH;
-                        tm->wave.func      = parse_wave_func(func);
-                        tm->wave.base      = (float)atof(base_v);
-                        tm->wave.amplitude = (float)atof(amp);
-                        tm->wave.phase     = (float)atof(phase);
-                        tm->wave.frequency = (float)atof(freq);
-                    }
+            }
+            else if (!Q_stricmp(token, "vector"))
+            {
+                /* ( sx sy sz ) ( tx ty tz ) — always consume parameters */
+                token = COM_ParseExt(text, 0);
+                if (token[0] == '(') token = COM_ParseExt(text, 0);
+                float sx = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float sy = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float sz = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                if (token[0] == ')') token = COM_ParseExt(text, 0);
+                if (token[0] == '(') token = COM_ParseExt(text, 0);
+                float tx = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float ty = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float tz = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                /* skip closing ) if present */
+
+                if (cntBundle == 0 && stg) {
+                    stg->tcGen = STAGE_TCGEN_VECTOR;
+                    stg->tcGenVecS[0] = sx; stg->tcGenVecS[1] = sy; stg->tcGenVecS[2] = sz;
+                    stg->tcGenVecT[0] = tx; stg->tcGenVecT[1] = ty; stg->tcGenVecT[2] = tz;
                 }
             }
         }
-
-        p = skip_line(p);
+        /* ── rgbGen <type> ── */
+        else if (!Q_stricmp(token, "rgbGen") || !Q_stricmp(token, "rgbgen"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "identity"))
+            {
+                if (first_stage) props->rgbgen_type = 0;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY;
+            }
+            else if (!Q_stricmp(token, "identityLighting"))
+            {
+                if (first_stage) props->rgbgen_type = 0;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY_LIGHTING;
+            }
+            else if (!Q_stricmp(token, "vertex") || !Q_stricmp(token, "exactVertex"))
+            {
+                if (first_stage) props->rgbgen_type = 1;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_VERTEX;
+            }
+            else if (!Q_stricmp(token, "lightingDiffuse"))
+            {
+                if (first_stage) props->rgbgen_type = 1;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_LIGHTING_DIFFUSE;
+            }
+            else if (!Q_stricmp(token, "wave"))
+            {
+                char func_tok[64];
+                token = COM_ParseExt(text, 0);
+                Q_strncpyz(func_tok, token, sizeof(func_tok));
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+                if (first_stage) {
+                    props->rgbgen_type = 2;
+                    props->rgbgen_wave_base  = base;
+                    props->rgbgen_wave_amp   = amp;
+                    props->rgbgen_wave_phase = phase;
+                    props->rgbgen_wave_freq  = freq;
+                }
+                if (stg) {
+                    stg->rgbGen = STAGE_RGBGEN_WAVE;
+                    stg->rgbWave.func      = parse_wave_func(func_tok);
+                    stg->rgbWave.base      = base;
+                    stg->rgbWave.amplitude = amp;
+                    stg->rgbWave.phase     = phase;
+                    stg->rgbWave.frequency = freq;
+                }
+            }
+            else if (!Q_stricmp(token, "entity"))
+            {
+                if (first_stage) props->rgbgen_type = 3;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_ENTITY;
+            }
+            else if (!Q_stricmp(token, "oneMinusEntity"))
+            {
+                if (first_stage) props->rgbgen_type = 3;
+                if (stg) stg->rgbGen = STAGE_RGBGEN_ONE_MINUS_ENTITY;
+            }
+            else if (!Q_stricmp(token, "const") || !Q_stricmp(token, "constant"))
+            {
+                /* const ( r g b ) */
+                token = COM_ParseExt(text, 0);
+                if (token[0] == '(') token = COM_ParseExt(text, 0);
+                float r = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float g = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float b = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                /* skip closing ) if present */
+                if (first_stage) {
+                    props->rgbgen_type = 4;
+                    props->rgbgen_const[0] = r;
+                    props->rgbgen_const[1] = g;
+                    props->rgbgen_const[2] = b;
+                }
+                if (stg) {
+                    stg->rgbGen = STAGE_RGBGEN_CONST;
+                    stg->rgbConst[0] = r;
+                    stg->rgbConst[1] = g;
+                    stg->rgbConst[2] = b;
+                }
+            }
+        }
+        /* ── alphaGen <type> ── */
+        else if (!Q_stricmp(token, "alphaGen") || !Q_stricmp(token, "alphagen"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "identity"))
+            {
+                if (first_stage) props->alphagen_type = 0;
+                if (stg) stg->alphaGen = STAGE_ALPHAGEN_IDENTITY;
+            }
+            else if (!Q_stricmp(token, "vertex"))
+            {
+                if (first_stage) props->alphagen_type = 1;
+                if (stg) stg->alphaGen = STAGE_ALPHAGEN_VERTEX;
+            }
+            else if (!Q_stricmp(token, "wave"))
+            {
+                char func_tok[64];
+                token = COM_ParseExt(text, 0);
+                Q_strncpyz(func_tok, token, sizeof(func_tok));
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+                if (first_stage) {
+                    props->alphagen_type = 2;
+                    props->alphagen_wave_base  = base;
+                    props->alphagen_wave_amp   = amp;
+                    props->alphagen_wave_phase = phase;
+                    props->alphagen_wave_freq  = freq;
+                }
+                if (stg) {
+                    stg->alphaGen = STAGE_ALPHAGEN_WAVE;
+                    stg->alphaWave.func      = parse_wave_func(func_tok);
+                    stg->alphaWave.base      = base;
+                    stg->alphaWave.amplitude = amp;
+                    stg->alphaWave.phase     = phase;
+                    stg->alphaWave.frequency = freq;
+                }
+            }
+            else if (!Q_stricmp(token, "entity"))
+            {
+                if (first_stage) props->alphagen_type = 3;
+                if (stg) stg->alphaGen = STAGE_ALPHAGEN_ENTITY;
+            }
+            else if (!Q_stricmp(token, "oneMinusEntity"))
+            {
+                if (first_stage) props->alphagen_type = 3;
+                if (stg) stg->alphaGen = STAGE_ALPHAGEN_ONE_MINUS_ENTITY;
+            }
+            else if (!Q_stricmp(token, "portal"))
+            {
+                token = COM_ParseExt(text, 0);
+                if (stg) {
+                    stg->alphaGen = STAGE_ALPHAGEN_PORTAL;
+                    stg->alphaPortalDist = (float)atof(token);
+                }
+            }
+            else if (!Q_stricmp(token, "const") || !Q_stricmp(token, "constant"))
+            {
+                token = COM_ParseExt(text, 0);
+                if (first_stage) {
+                    props->alphagen_type = 4;
+                    props->alphagen_const = (float)atof(token);
+                }
+                if (stg) {
+                    stg->alphaGen = STAGE_ALPHAGEN_CONST;
+                    stg->alphaConst = (float)atof(token);
+                }
+            }
+        }
+        /* ── tcMod <type> ── */
+        else if (!Q_stricmp(token, "tcMod") || !Q_stricmp(token, "tcmod"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "scroll"))
+            {
+                token = COM_ParseExt(text, 0);
+                float s = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float t = (float)atof(token);
+                if (first_stage) {
+                    props->tcmod_scroll_s = s;
+                    props->tcmod_scroll_t = t;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_SCROLL;
+                    tm->params[0] = s;
+                    tm->params[1] = t;
+                }
+            }
+            else if (!Q_stricmp(token, "rotate"))
+            {
+                token = COM_ParseExt(text, 0);
+                float r = (float)atof(token);
+                if (first_stage) {
+                    props->tcmod_rotate = r;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_ROTATE;
+                    tm->params[0] = r;
+                }
+            }
+            else if (!Q_stricmp(token, "scale"))
+            {
+                token = COM_ParseExt(text, 0);
+                float s = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float t = (float)atof(token);
+                if (first_stage) {
+                    props->tcmod_scale_s = s;
+                    props->tcmod_scale_t = t;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_SCALE;
+                    tm->params[0] = s;
+                    tm->params[1] = t;
+                }
+            }
+            else if (!Q_stricmp(token, "turb"))
+            {
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+                if (first_stage) {
+                    props->tcmod_turb_amp  = amp;
+                    props->tcmod_turb_freq = freq;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_TURB;
+                    tm->params[0] = base;
+                    tm->params[1] = amp;
+                    tm->params[2] = phase;
+                    tm->params[3] = freq;
+                }
+            }
+            else if (!Q_stricmp(token, "stretch"))
+            {
+                char func_tok[64];
+                token = COM_ParseExt(text, 0);
+                Q_strncpyz(func_tok, token, sizeof(func_tok));
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+                if (first_stage) {
+                    props->has_tcmod_stretch = true;
+                    props->tcmod_stretch_base  = base;
+                    props->tcmod_stretch_amp   = amp;
+                    props->tcmod_stretch_phase = phase;
+                    props->tcmod_stretch_freq  = freq;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_STRETCH;
+                    tm->wave.func      = parse_wave_func(func_tok);
+                    tm->wave.base      = base;
+                    tm->wave.amplitude = amp;
+                    tm->wave.phase     = phase;
+                    tm->wave.frequency = freq;
+                }
+            }
+            else
+            {
+                /* Unknown tcMod variant — skip remaining parameters */
+                SkipRestOfLine(text);
+            }
+        }
+        /* ── Unknown stage directive — skip remaining parameters on this line ── */
+        else
+        {
+            SkipRestOfLine(text);
+        }
     }
 }
 
-/* Parse all shader definitions in a shader file text buffer */
-static int parse_shader_file(const char *text, int text_len) {
-    const char *p = text;
-    const char *end = text + text_len;
-    int count = 0;
-    char shader_name[256];
+/* ===================================================================
+ *  parse_shader — mirrors renderergl1/tr_shader.c::ParseShader()
+ *
+ *  Called after the opening '{' of a shader definition has been consumed.
+ *  Reads outer directives and stage blocks until the matching '}' is found.
+ * ================================================================ */
+static void parse_shader(char **text, GodotShaderProps *props)
+{
+    char *token;
+    int stage_idx = 0;
+    bool first_stage = true;
 
-    while (p < end) {
-        /* Skip whitespace and comments */
-        p = skip_all_ws(p);
-        if (p >= end) break;
+    while (1) {
+        token = COM_ParseExt(text, 1 /* qtrue — cross line boundaries */);
+        if (!token[0]) {
+            break;
+        }
 
-        if (p[0] == '/' && p[1] == '/') {
-            p = skip_line(p);
+        /* End of shader definition */
+        if (token[0] == '}') {
+            break;
+        }
+
+        /* Stage definition — opening brace */
+        if (token[0] == '{') {
+            parse_stage(text, props, stage_idx, first_stage);
+            if (stage_idx == 0) first_stage = false;
+            stage_idx++;
             continue;
         }
 
-        /* Read shader name */
-        p = read_token(p, shader_name, sizeof(shader_name));
-        if (!shader_name[0]) {
-            p = skip_line(p);
+        /* ── Outer directives ── */
+
+        /* Skip qer_ prefixed editor-only directives (mirrors ParseShader) */
+        if (!Q_stricmpn(token, "qer", 3)) {
+            SkipRestOfLine(text);
+            continue;
+        }
+        /* Skip q3map_ prefixed compile-only directives (mirrors ParseShader) */
+        if (!Q_stricmpn(token, "q3map", 5)) {
+            SkipRestOfLine(text);
             continue;
         }
 
-        /* Find opening brace */
-        p = skip_all_ws(p);
-        if (p >= end || *p != '{') {
-            p = skip_line(p);
+        if (!Q_stricmp(token, "surfaceParm") || !Q_stricmp(token, "surfaceparm"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "trans")) {
+                if (props->transparency == SHADER_OPAQUE)
+                    props->transparency = SHADER_ALPHA_BLEND;
+            } else if (!Q_stricmp(token, "portal")) {
+                props->is_portal = true;
+            } else if (!Q_stricmp(token, "sky")) {
+                props->is_sky = true;
+            } else if (!Q_stricmp(token, "nolightmap")) {
+                props->no_lightmap = true;
+            }
+        }
+        else if (!Q_stricmp(token, "cull"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "none") || !Q_stricmp(token, "twosided") ||
+                !Q_stricmp(token, "disable")) {
+                props->cull = SHADER_CULL_NONE;
+            } else if (!Q_stricmp(token, "front")) {
+                props->cull = SHADER_CULL_FRONT;
+            } else if (!Q_stricmp(token, "back") || !Q_stricmp(token, "backside") ||
+                       !Q_stricmp(token, "backsided")) {
+                props->cull = SHADER_CULL_BACK;
+            } else {
+                props->cull = SHADER_CULL_BACK;
+            }
+        }
+        else if (!Q_stricmp(token, "skyParms") || !Q_stricmp(token, "skyparms"))
+        {
+            /* skyParms <envBasename> <cloudHeight> <innerBox> */
+            token = COM_ParseExt(text, 0);
+            if (token[0] && Q_stricmp(token, "-")) {
+                Q_strncpyz(props->sky_env, token, sizeof(props->sky_env));
+            }
+            props->is_sky = true;
+            SkipRestOfLine(text);
+        }
+        else if (!Q_stricmp(token, "deformVertexes") || !Q_stricmp(token, "deformvertexes"))
+        {
+            token = COM_ParseExt(text, 0);
+            props->has_deform = true;
+            if (!Q_stricmp(token, "wave"))
+            {
+                props->deform_type = 0;
+                token = COM_ParseExt(text, 0);
+                props->deform_div = (float)atof(token);
+                COM_ParseExt(text, 0); /* wave func name — not stored */
+                token = COM_ParseExt(text, 0);
+                props->deform_base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_amplitude = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_frequency = (float)atof(token);
+            }
+            else if (!Q_stricmp(token, "bulge"))
+            {
+                props->deform_type = 1;
+                token = COM_ParseExt(text, 0);
+                props->deform_base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_amplitude = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_frequency = (float)atof(token);
+            }
+            else if (!Q_stricmp(token, "move"))
+            {
+                props->deform_type = 2;
+                COM_ParseExt(text, 0); /* x */
+                COM_ParseExt(text, 0); /* y */
+                COM_ParseExt(text, 0); /* z */
+                COM_ParseExt(text, 0); /* wave func */
+                token = COM_ParseExt(text, 0);
+                props->deform_base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_amplitude = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                props->deform_frequency = (float)atof(token);
+            }
+            else if (!Q_stricmp(token, "autosprite"))
+            {
+                props->deform_type = 3;
+            }
+            else if (!Q_stricmp(token, "autosprite2"))
+            {
+                props->deform_type = 4;
+            }
+            else
+            {
+                SkipRestOfLine(text);
+            }
+        }
+        else if (!Q_stricmp(token, "sort"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (!Q_stricmp(token, "portal"))          props->sort_key = 1;
+            else if (!Q_stricmp(token, "sky"))        props->sort_key = 2;
+            else if (!Q_stricmp(token, "opaque"))     props->sort_key = 3;
+            else if (!Q_stricmp(token, "banner"))     props->sort_key = 6;
+            else if (!Q_stricmp(token, "underwater")) props->sort_key = 8;
+            else if (!Q_stricmp(token, "additive"))   props->sort_key = 9;
+            else if (!Q_stricmp(token, "nearest"))    props->sort_key = 16;
+            else props->sort_key = atoi(token);
+        }
+        else if (!Q_stricmp(token, "nomipmaps"))
+        {
+            props->no_mipmaps = true;
+        }
+        else if (!Q_stricmp(token, "nopicmip"))
+        {
+            props->no_picmip = true;
+        }
+        else if (!Q_stricmp(token, "fogParms") || !Q_stricmp(token, "fogparms"))
+        {
+            /* fogParms ( <r> <g> <b> ) <distance>
+             * Note: COM_ParseExt does NOT treat ( ) as single-char tokens
+             * like { }, so they appear as part of the next token.  Use the
+             * engine's pattern: try to parse a vector. */
+            token = COM_ParseExt(text, 0);
+            if (token[0] == '(') token = COM_ParseExt(text, 0);
+            float r = (float)atof(token);
+            token = COM_ParseExt(text, 0);
+            float g = (float)atof(token);
+            token = COM_ParseExt(text, 0);
+            float b = (float)atof(token);
+            token = COM_ParseExt(text, 0);
+            if (token[0] == ')') token = COM_ParseExt(text, 0);
+            float dist = (float)atof(token);
+            props->has_fog = true;
+            props->fog_color[0] = r;
+            props->fog_color[1] = g;
+            props->fog_color[2] = b;
+            props->fog_distance = dist;
+        }
+        /* ── Known directives that we recognise but don't store ── */
+        else if (!Q_stricmp(token, "polygonOffset") ||
+                 !Q_stricmp(token, "entityMergable") ||
+                 !Q_stricmp(token, "noMerge") ||
+                 !Q_stricmp(token, "force32bit"))
+        {
+            /* No parameters to skip */
+        }
+        else if (!Q_stricmp(token, "portal"))
+        {
+            props->is_portal = true;
+        }
+        else if (!Q_stricmp(token, "portalsky"))
+        {
+            props->is_sky = true;
+        }
+        else if (!Q_stricmp(token, "spritegen") ||
+                 !Q_stricmp(token, "spritescale") ||
+                 !Q_stricmp(token, "light") ||
+                 !Q_stricmp(token, "tesssize") ||
+                 !Q_stricmp(token, "clampTime"))
+        {
+            SkipRestOfLine(text);
+        }
+        /* ── MOHAA #if / #else / #endif conditional blocks ── */
+        else if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
+        {
+            /* For now, treat the condition as false: skip to #else or #endif.
+             * This matches the engine's behaviour when the condition evaluates
+             * to false (e.g. #if separate_env with r_textureDetails == 0). */
+            int nested = 1;
+            while (nested > 0) {
+                token = COM_ParseExt(text, 1);
+                if (!token[0]) break;
+                if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
+                    nested++;
+                else if (!Q_stricmp(token, "#endif"))
+                    nested--;
+                else if (!Q_stricmp(token, "#else") && nested == 1) {
+                    /* Take the else branch */
+                    break;
+                }
+            }
+        }
+        else if (!Q_stricmp(token, "#else"))
+        {
+            /* We were in the true branch — skip to #endif */
+            int nested = 1;
+            while (nested > 0) {
+                token = COM_ParseExt(text, 1);
+                if (!token[0]) break;
+                if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
+                    nested++;
+                else if (!Q_stricmp(token, "#endif"))
+                    nested--;
+            }
+        }
+        else if (!Q_stricmp(token, "#endif"))
+        {
+            /* Nothing to do */
+        }
+        /* ── Unknown outer directive — skip the rest of the line ── */
+        else
+        {
+            SkipRestOfLine(text);
+        }
+    }
+}
+
+/* ===================================================================
+ *  Public API
+ * ================================================================ */
+
+void Godot_ShaderProps_Load() {
+    s_shader_props.clear();
+
+    /* ── Scan ALL .shader files in scripts/ (mirrors ScanAndLoadShaderFiles) ── */
+    int numFiles = 0;
+    char **fileList = Godot_VFS_ListFiles("scripts", ".shader", &numFiles);
+    if (!fileList || numFiles <= 0) {
+        UtilityFunctions::print("[ShaderProps] WARNING: no shader files found");
+        return;
+    }
+
+    /* ── Load all shader file buffers ── */
+    struct ShaderBuf { char *data; long len; };
+    std::vector<ShaderBuf> buffers;
+    buffers.reserve(numFiles);
+    long total_len = 0;
+
+    for (int i = 0; i < numFiles; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "scripts/%s", fileList[i]);
+
+        void *raw = nullptr;
+        long len = Godot_VFS_ReadFile(path, &raw);
+        if (len <= 0 || !raw) continue;
+
+        buffers.push_back({(char *)raw, len});
+        total_len += len;
+    }
+
+    int files_loaded = (int)buffers.size();
+
+    /* ── Concatenate into one large buffer (mirrors ScanAndLoadShaderFiles) ──
+     * The engine concatenates in reverse order so that files loaded later
+     * appear earlier in the buffer.  With first-definition-wins, this gives
+     * later pk3 files higher priority — matching the engine's behaviour. */
+    char *big_buf = (char *)malloc(total_len + files_loaded * 2 + 1);
+    if (!big_buf) {
+        for (auto &b : buffers) Godot_VFS_FreeFile(b.data);
+        Godot_VFS_FreeFileList(fileList);
+        return;
+    }
+    big_buf[0] = '\0';
+
+    for (int i = (int)buffers.size() - 1; i >= 0; i--) {
+        strcat(big_buf, "\n");
+        strncat(big_buf, buffers[i].data, buffers[i].len);
+        Godot_VFS_FreeFile(buffers[i].data);
+    }
+
+    Godot_VFS_FreeFileList(fileList);
+
+    /* ── Strip comments and compress whitespace (mirrors engine) ── */
+    COM_Compress(big_buf);
+
+    /* ── Parse all shader definitions ──
+     * This mirrors FindShadersInShaderText() + the per-shader parse path. */
+    char *p = big_buf;
+    int total_defs = 0;
+
+    while (1) {
+        char *token = COM_ParseExt(&p, 1 /* qtrue */);
+        if (!token[0]) break;
+
+        /* token is the shader name.
+         * COM_ParseExt returns a pointer to a static buffer — copy it. */
+        char shader_name[256];
+        Q_strncpyz(shader_name, token, sizeof(shader_name));
+
+        /* Expect opening brace */
+        token = COM_ParseExt(&p, 1);
+        if (token[0] != '{') {
+            /* Malformed shader — skip */
             continue;
         }
-        p++; /* skip '{' */
 
-        /* Initialise properties */
+        /* Initialise properties with defaults */
         GodotShaderProps props = {};
         props.transparency = SHADER_OPAQUE;
         props.alpha_threshold = 0.5f;
@@ -750,20 +994,68 @@ static int parse_shader_file(const char *text, int text_len) {
         props.alphagen_const = 1.0f;
         props.rgbgen_const[0] = props.rgbgen_const[1] = props.rgbgen_const[2] = 1.0f;
 
-        /* Parse body */
-        parse_shader_body(p, end, &props);
+        /* Parse the shader body (reads until matching '}') */
+        parse_shader(&p, &props);
 
-        /* Skip to matching close brace */
-        int depth = 1;
-        while (p < end && depth > 0) {
-            if (*p == '{') depth++;
-            else if (*p == '}') depth--;
-            p++;
+        /* ── Post-parse transparency classification ──
+         * Match Q3's SortNewShader logic: check the first non-lightmap
+         * stage's blendFunc.  If it has no blendFunc (GL_ONE/GL_ZERO),
+         * the shader is opaque regardless of later stages.
+         *
+         * Extended: also skip tcGen environment stages (reflections) to
+         * find the actual diffuse stage.  This handles 3-stage glass
+         * shaders: env map → alpha-blended window → lightmap.
+         *
+         * Only override if transparency isn't already set by alphaFunc
+         * or surfaceparm trans (which run during parsing). */
+        if (props.transparency == SHADER_OPAQUE && props.stage_count > 0) {
+            /* Detect whether a lightmap stage exists */
+            bool has_lightmap_stage = false;
+            for (int s = 0; s < props.stage_count; s++) {
+                if (props.stages[s].isLightmap) {
+                    has_lightmap_stage = true;
+                    break;
+                }
+            }
+
+            /* Find the first non-lightmap, non-environment stage with
+             * a blendFunc — this is the best candidate for transparency
+             * classification.  Fall back to the first non-lightmap stage
+             * with a blendFunc if no better candidate exists. */
+            int best = -1;
+            int fallback_nl = -1;
+            for (int s = 0; s < props.stage_count; s++) {
+                if (props.stages[s].isLightmap) continue;
+                if (!props.stages[s].hasBlendFunc) {
+                    /* First non-lightmap stage with no blendFunc: if it's
+                     * not an environment stage, the shader is opaque
+                     * (standard Q3 rule). If it IS env, skip and continue. */
+                    if (props.stages[s].tcGen != STAGE_TCGEN_ENVIRONMENT) {
+                        break;  /* Opaque — stop searching */
+                    }
+                    continue;
+                }
+                /* Has blendFunc */
+                if (fallback_nl < 0) fallback_nl = s;
+                if (props.stages[s].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
+                best = s;
+                break;
+            }
+            if (best < 0) best = fallback_nl;
+
+            if (best >= 0) {
+                MohaaBlendFactor bs = props.stages[best].blendSrc;
+                MohaaBlendFactor bd = props.stages[best].blendDst;
+                bool is_filter = (bs == BLEND_DST_COLOR && bd == BLEND_ZERO) ||
+                                 (bs == BLEND_ZERO && bd == BLEND_SRC_COLOR);
+                if (has_lightmap_stage && is_filter) {
+                    /* Multi-pass lightmap → stays OPAQUE */
+                } else {
+                    props.transparency = classify_blend_factors(bs, bd);
+                }
+            }
         }
 
-        /* Store result — only if shader has non-default properties */
-        /* Actually, store all parsed shaders so we can distinguish
-         * "shader not found" from "shader is opaque" */
         /* Lowercase the name for consistent lookup */
         std::string key(shader_name);
         for (auto &c : key) c = tolower((unsigned char)c);
@@ -771,71 +1063,16 @@ static int parse_shader_file(const char *text, int text_len) {
         /* Don't overwrite — first definition wins (matches engine behaviour) */
         if (s_shader_props.find(key) == s_shader_props.end()) {
             s_shader_props[key] = props;
-            count++;
+            total_defs++;
         }
     }
 
-    return count;
-}
-
-/* ===================================================================
- *  Public API
- * ================================================================ */
-
-void Godot_ShaderProps_Load() {
-    s_shader_props.clear();
-
-    /* ── Read shaderlist.txt ── */
-    void *list_raw = nullptr;
-    long list_len = Godot_VFS_ReadFile("scripts/shaderlist.txt", &list_raw);
-
-    std::vector<std::string> shader_files;
-
-    if (list_len > 0 && list_raw) {
-        const char *p = (const char *)list_raw;
-        const char *end = p + list_len;
-        char name[256];
-
-        while (p < end) {
-            p = skip_all_ws(p);
-            if (p >= end) break;
-
-            /* Read shader file basename */
-            int i = 0;
-            while (p < end && *p != '\n' && *p != '\r' && *p != ' ' &&
-                   *p != '\t' && i < 255) {
-                name[i++] = *p++;
-            }
-            name[i] = '\0';
-            p = skip_line(p);
-
-            if (name[0] && name[0] != '/' && name[0] != '#') {
-                shader_files.push_back(std::string("scripts/") + name + ".shader");
-            }
-        }
-        Godot_VFS_FreeFile(list_raw);
-    }
-
-    /* ── Parse each shader file ── */
-    int total_defs = 0;
-    int files_loaded = 0;
-
-    for (const auto &path : shader_files) {
-        void *raw = nullptr;
-        long len = Godot_VFS_ReadFile(path.c_str(), &raw);
-        if (len <= 0 || !raw) continue;
-
-        int n = parse_shader_file((const char *)raw, (int)len);
-        total_defs += n;
-        files_loaded++;
-
-        Godot_VFS_FreeFile(raw);
-    }
+    free(big_buf);
 
     UtilityFunctions::print(String("[ShaderProps] Loaded ") +
-                            String::num_int64(files_loaded) + " shader files, " +
-                            String::num_int64(total_defs) + " definitions. " +
-                            String::num_int64(shader_files.size()) + " listed.");
+                            String::num_int64(files_loaded) + " shader files (" +
+                            String::num_int64(numFiles) + " found), " +
+                            String::num_int64(total_defs) + " definitions.");
 }
 
 void Godot_ShaderProps_Unload() {

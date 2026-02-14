@@ -95,6 +95,141 @@ See `openmohaa/TASKS.md` for the full phase-by-phase implementation log with tec
 1. **No fallbacks.** Always aim for 1:1 parity with MOHAA/OpenMoHAA. If the original engine does something a particular way, replicate that behaviour exactly. Never substitute a "good enough" approximation when the correct implementation is achievable.
 2. **No shortcuts.** Implement everything fully. If a function, accessor, or subsystem is missing (e.g. `Godot_Renderer_RegisterShader`), implement it properly rather than working around its absence. The codebase must grow correctly, not accumulate workarounds.
 3. **Put the effort in.** Do what is necessary, not what is easy. Study the original engine code (`renderergl1/`, `client/`, `fgame/`, `skeletor/`, etc.) to understand the correct behaviour, then replicate it faithfully on the Godot side. One-off hacks that bypass the established architecture (shader table, model table, VFS, accessor layer) are not acceptable.
+4. **Reuse engine functions — never rewrite them.** The monolithic build links the full engine (`code/qcommon/`, `code/fgame/`, `code/script/`, `code/tiki/`, `code/skeletor/`, etc.). All utility functions from those modules are available at link time. **Always use them** instead of writing custom replacements. Key examples:
+   - **Tokeniser:** Use `COM_ParseExt()`, `SkipRestOfLine()`, `COM_Compress()` from `q_shared.c` — never write custom `read_token()`, `skip_ws()`, `skip_line()` functions.
+   - **String comparison:** Use `Q_stricmp()`, `Q_stricmpn()`, `Q_strncpyz()` — never write custom `str_ieq()` or use `strcasecmp()`.
+   - **Math:** Use `VectorCopy()`, `VectorScale()`, `AngleVectors()`, `LerpAngle()` from `q_math.c` — never reimplement vector/angle operations.
+   - **Memory:** Use `Z_Malloc()`/`Z_Free()` for engine-lifetime allocations, `Hunk_AllocateTempMemory()` for frame-temporary data — never use raw `malloc`/`free` for data that participates in engine lifecycle.
+   - **VFS:** Use `FS_ReadFile()`, `FS_FreeFile()`, `FS_ListFiles()` (via the accessor layer) — never use `fopen`/`std::ifstream`.
+   - **Model/TIKI:** Use `TIKI_RegisterTikiFlags()`, `TIKI_GetSkelAnimFrame()`, `TIKI_GetLocalChannel()` — never rewrite bone transforms or animation evaluation.
+   
+   Since Godot C++ files cannot `#include` engine headers directly (macro/type conflicts with godot-cpp), declare the needed engine functions via `extern "C"` blocks in the `.cpp` file. This gives access to the engine's battle-tested implementations without header coupling. If an engine function's signature is unclear, check `q_shared.h`, `qcommon.h`, or the relevant module header — do not guess or write a substitute.
+
+### Mandatory research-before-code workflow
+**Every feature implementation or bug fix MUST follow this workflow.** No exceptions.
+
+#### Step 1: Trace the original engine code path
+Before writing a single line of Godot glue code, **read the original engine implementation** in `renderergl1/`, `client/`, `fgame/`, `cgame/`, `server/`, `qcommon/`, `skeletor/`, or `tiki/`. Understand:
+- What functions are called and in what order
+- What data structures are populated and what fields matter
+- What side effects occur (shader registration, memory allocation, state changes)
+- What the caller expects to receive (return values, buffer contents, populated structs)
+
+**Example:** Before implementing static model rendering on the Godot side, you must read `renderergl1/tr_staticmodels.cpp::R_InitStaticModels()` to discover that it:
+1. Registers shaders via `R_FindShader()` for each TIKI surface
+2. Computes bind-pose vertices via `TIKI_GetSkelAnimFrame()` + bone matrix transforms
+3. Allocates `pStaticXyz`/`pStaticNormal`/`pStaticTexCoords` arrays
+4. Uses `TIKI_GetLocalChannel()` for multi-mesh bone remapping
+
+Without reading this, you'd miss that `pStaticXyz` is NULL because our stub renderer never calls `R_InitStaticModels()`, and attempts to read those arrays produce garbage.
+
+#### Step 2: Identify the full data pipeline
+Map the complete data flow from engine source to Godot rendering:
+```
+Engine function → what data it produces → how our stub captures it → how MoHAARunner consumes it
+```
+
+**Example for shaders:**
+```
+R_FindShader(name)
+  → looks up .shader script definition (hashTable lookup)
+  → parses stages[].map to find actual texture file paths
+  → loads texture image from VFS
+  → returns shader_t* with index
+
+Our equivalent must:
+  1. GR_RegisterShader(name) → assigns handle in gr_shaders[] table
+  2. get_shader_texture(handle) → looks up shader name
+     → calls Godot_ShaderProps_Find(name) to get parsed .shader definition
+     → reads stages[].map for the actual texture path (NOT the shader name!)
+     → loads texture via VFS using that path
+```
+
+If any step is missing or simplified, textures will be wrong or absent.
+
+#### Step 3: Verify stub completeness
+Our stub renderer (`godot_renderer.c`) provides no-op implementations of `refexport_t`. When the real renderer does **computation** (not just rendering), our stub must replicate that computation or expose it via an accessor. Key cases:
+
+| Real renderer function | What it computes | Our stub must... |
+|------------------------|------------------|------------------|
+| `R_InitStaticModels()` | Bind-pose vertices, shader registration | Provide accessor for `TIKI_GetSkelAnimFrame` + bone transforms; register shaders via `GR_RegisterShader` |
+| `R_FindShader()` | Shader script → texture path resolution | `GR_RegisterShader` + `Godot_ShaderProps_Find` for stage map lookup |
+| `RE_RegisterModel()` | TIKI loading, model table population | `GR_RegisterModelInternal()` — already done |
+| `R_LoadWorldMap()` / `RE_LoadWorldMap()` | BSP parsing, lightmap upload, surface shader assignment | `godot_bsp_mesh.cpp` BSP parser — already done |
+
+**If a no-op stub silently returns zero/NULL and the caller needs real data, you have a bug.** Always check what the real renderer computes.
+
+#### Step 4: Implement, don't work around
+If the correct implementation requires a new accessor, buffer, or function — create it. Never:
+- Use a shader name as a file path when the shader definition maps to a different texture
+- Skip a computation step because "it usually works without it"
+- Return dummy data from a stub when the caller needs real values
+- Comment out a function call because it crashes (fix the crash instead)
+
+### Known footguns — things that went wrong before
+These are real bugs that were shipped and required multiple fix iterations. Learn from them:
+
+| Bug | Root cause | Lesson |
+|-----|-----------|--------|
+| Giant random meshes covering the map | `pStaticXyz` was NULL — stub renderer never calls `R_InitStaticModels()` which computes bind-pose vertices. `Godot_Skel_GetSurfaceVertices` returned success with uninitialised malloc'd data. | **Never trust that engine-internal data is populated.** The stub renderer skips all computation. If the Godot side needs data that the real renderer computes, implement the computation via an accessor. |
+| Wrong/missing textures on static models | `get_shader_texture()` used the shader name directly as a file path (e.g. `textures/mohdm1/wall_brick`). But MOHAA shader names are abstract identifiers — the actual texture path is in the `.shader` definition's stage `map` directive (e.g. `textures/mohdm1/wall_brick_d.tga`). | **Always trace `R_FindShader()`'s resolution pipeline.** Shader name ≠ texture file path. Must look up shader definition stages. |
+| `Godot_Renderer_RegisterShader` didn't exist | The stub renderer had `GR_RegisterShader` (internal, called by engine paths like `RE_RegisterShaderNoMip`) but no public accessor for Godot-side code to register shaders. Static model loading needed to register TIKI surface shaders but had no API to do so. | **When adding Godot-side features that need renderer services, check whether the accessor API exists.** If not, implement it — don't work around it. |
+| Custom `.shader` tokeniser missed definitions | `godot_shader_props.cpp` used hand-written `read_token()`, `skip_ws()`, `skip_line()` that didn't handle `//` comments, `/* */` blocks, or quoted strings identically to the engine. Shader definitions were silently mis-parsed or skipped, causing wrong textures. | **Never write custom parsing/tokenising functions.** The engine's `COM_ParseExt()`, `SkipRestOfLine()`, `COM_Compress()` are linked and handle all edge cases. Declare them via `extern "C"` and use them directly. |
+
+## Renderer Parity Reference
+
+The stub renderer (`godot_renderer.c`) replaces `renderergl1/`. The real renderer does **far more than rendering** — it manages shaders, models, images, fonts, marks, and static model initialisation. Our stub must capture or replicate every piece of data that downstream Godot code needs.
+
+### What `R_FindShader()` actually does (tr_shader.c:3355)
+This is the single most important function to understand. It is called hundreds of times per map load.
+
+```
+R_FindShader(name, lightmapIndex, mipRawImage, picmip, wrapx, wrapy)
+  1. Strip file extension from name
+  2. Hash lookup in shader text table (parsed from .shader files)
+  3. If shader definition found:
+     a. Parse stages (map directives, blend modes, tcMod, alpha, etc.)
+     b. Each stage's "map" directive = actual texture file path
+     c. Load texture images from VFS
+     d. Create shader_t with stages[], image pointers, sort order
+  4. If no shader definition found:
+     a. Try loading name + ".tga" / ".jpg" / ".png" from VFS
+     b. Create implicit shader with single diffuse stage
+  5. Return shader_t* (never NULL — returns defaultShader on failure)
+```
+
+**Our Godot-side equivalent must mirror steps 2–4:**
+- `GR_RegisterShader(name)` → assigns handle in `gr_shaders[]`
+- `Godot_ShaderProps_Find(name)` → step 2 (shader definition lookup)
+- `stages[].map` → step 3b (actual texture path)
+- VFS load with extension probing → step 4a (image loading)
+
+### What `R_InitStaticModels()` actually does (tr_staticmodels.cpp:40)
+Called once per map load after BSP parsing. Our code must replicate its effects:
+
+```
+R_InitStaticModels()
+  For each static model in the BSP:
+    1. Resolve TIKI path (prepend "models/" if needed)
+    2. Register TIKI via ri.TIKI_RegisterTikiFlags()
+    3. For each surface: R_FindShader(surf->shader[k]) → hShader[k]
+    4. ri.TIKI_GetSkelAnimFrame() → bone transforms (bind pose)
+    5. For each mesh/surface:
+       a. Allocate pStaticXyz, pStaticNormal, pStaticTexCoords
+       b. For each vertex: read skelWeight_t, transform by bone matrix
+       c. Multi-mesh: TIKI_GetLocalChannel() for bone remapping
+```
+
+If the Godot side tries to read `surf->pStaticXyz` without step 5, it gets NULL or garbage.
+
+### Stub function audit checklist
+When adding or modifying stub renderer functions, verify:
+
+- [ ] **Does the real function compute data?** If yes, our stub must produce equivalent data or provide an accessor.
+- [ ] **Does the caller check the return value?** If yes, return a valid handle/pointer, not 0/NULL.
+- [ ] **Does the function register resources?** (shaders, models, images) If yes, populate our tables.
+- [ ] **Does the function have side effects?** (setting globals, queueing events) If yes, replicate them.
+- [ ] **Is the data consumed on the Godot side?** If yes, verify the Godot-side reader matches the stub's output format.
 
 ## Critical Patterns
 
