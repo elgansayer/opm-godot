@@ -1871,3 +1871,22 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 263: Multiplayer Server Browser + Hosting ✅
+
+Wired the engine's existing GameSpy master server query and server hosting into Godot-accessible functions via C accessors and GDScript-callable methods.
+
+### Implementation details:
+- **`godot_multiplayer_accessors.c/.h`** — C accessor layer exposing `Godot_MP_ConnectToServer()`, `Godot_MP_Disconnect()`, `Godot_MP_HostServer()`, `Godot_MP_RefreshServerList()`, `Godot_MP_RefreshLAN()`, `Godot_MP_GetServerCount()`
+- **MoHAARunner methods** — `host_server(map, maxplayers, gametype)`, `refresh_server_list()`, `refresh_lan()`, `get_server_count()` bound to GDScript via ClassDB
+- Existing `connect_to_server()` and `disconnect_from_server()` updated to route through accessor layer
+- Uses `Cbuf_ExecuteText(EXEC_APPEND, ...)` to queue engine commands for connect, disconnect, host, and server list refresh
+- Server count reads `cls.numlocalservers` from client state via accessor
+
+### Files created (Phase 263):
+- `code/godot/godot_multiplayer_accessors.c`
+- `code/godot/godot_multiplayer_accessors.h`
+
+### Files modified (Phase 263):
+- `code/godot/MoHAARunner.h` — added `host_server`, `refresh_server_list`, `refresh_lan`, `get_server_count` declarations + `HAS_MULTIPLAYER_MODULE` guard
+- `code/godot/MoHAARunner.cpp` — added new method implementations and bind_method entries

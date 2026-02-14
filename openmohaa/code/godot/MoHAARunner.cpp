@@ -408,6 +408,12 @@ void MoHAARunner::_bind_methods() {
     godot::ClassDB::bind_method(godot::D_METHOD("connect_to_server", "address"), &MoHAARunner::connect_to_server);
     godot::ClassDB::bind_method(godot::D_METHOD("disconnect_from_server"), &MoHAARunner::disconnect_from_server);
 
+    // Multiplayer server browser + hosting (Phase 263)
+    godot::ClassDB::bind_method(godot::D_METHOD("host_server", "map", "maxplayers", "gametype"), &MoHAARunner::host_server);
+    godot::ClassDB::bind_method(godot::D_METHOD("refresh_server_list"), &MoHAARunner::refresh_server_list);
+    godot::ClassDB::bind_method(godot::D_METHOD("refresh_lan"), &MoHAARunner::refresh_lan);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_server_count"), &MoHAARunner::get_server_count);
+
     // Settings helpers (Phases 267-270)
     godot::ClassDB::bind_method(godot::D_METHOD("set_audio_volume", "master", "music", "dialog"), &MoHAARunner::set_audio_volume);
     godot::ClassDB::bind_method(godot::D_METHOD("set_video_fullscreen", "fullscreen"), &MoHAARunner::set_video_fullscreen);
@@ -3829,15 +3835,56 @@ void MoHAARunner::start_server(const godot::String &p_map, const godot::String &
 
 void MoHAARunner::connect_to_server(const godot::String &p_address) {
     if (!initialized) return;
+#ifdef HAS_MULTIPLAYER_MODULE
+    Godot_MP_ConnectToServer(p_address.utf8().get_data());
+#else
     godot::CharString addr = p_address.utf8();
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "connect %s\n", addr.get_data());
     Cbuf_AddText(cmd);
+#endif
 }
 
 void MoHAARunner::disconnect_from_server() {
     if (!initialized) return;
+#ifdef HAS_MULTIPLAYER_MODULE
+    Godot_MP_Disconnect();
+#else
     Cbuf_AddText("disconnect\n");
+#endif
+}
+
+// ──────────────────────────────────────────────
+//  Multiplayer server browser + hosting (Phase 263)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::host_server(const godot::String &p_map, int maxplayers, int gametype) {
+    if (!initialized) return;
+#ifdef HAS_MULTIPLAYER_MODULE
+    Godot_MP_HostServer(p_map.utf8().get_data(), maxplayers, gametype);
+#endif
+}
+
+void MoHAARunner::refresh_server_list() {
+    if (!initialized) return;
+#ifdef HAS_MULTIPLAYER_MODULE
+    Godot_MP_RefreshServerList();
+#endif
+}
+
+void MoHAARunner::refresh_lan() {
+    if (!initialized) return;
+#ifdef HAS_MULTIPLAYER_MODULE
+    Godot_MP_RefreshLAN();
+#endif
+}
+
+int MoHAARunner::get_server_count() const {
+#ifdef HAS_MULTIPLAYER_MODULE
+    return Godot_MP_GetServerCount();
+#else
+    return 0;
+#endif
 }
 
 // ──────────────────────────────────────────────
