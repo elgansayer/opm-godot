@@ -2123,3 +2123,27 @@ All cvars are read via thin C accessor functions (`godot_debug_render_accessors.
 1. **In `_ready()`:** Call `Godot_DebugRender_Init(this)` after 3D scene setup.
 2. **In `_process()`:** Call `Godot_DebugRender_Update(delta)` each frame.
 3. **In destructor/map unload:** Call `Godot_DebugRender_Shutdown()`.
+
+## Phase 241-242: Animation Events ✅
+- [x] **Task 241.1:** Created C accessor layer (`godot_animation_event_accessors.cpp`) for TIKI animation event data — reads `dtikianimdef_t` / `dtikicmd_t` structures via `dtiki_t *` pointer, exposing animation count, aliases, event count, and per-event frame number + type + parameters.
+- [x] **Task 241.2:** Created animation event dispatcher (`godot_animation_events.cpp`) with per-entity tracking state — detects animation changes, fires ENTRY/EXIT/EVERY/frame events, handles animation looping (frame wrap to 0).
+- [x] **Task 242.1:** Event type classification: `sound`, `footstep`, `effect`/`tagspawn`, `bodyfall` — mapped to typed constants for downstream handlers.
+- [x] **Task 242.2:** Fired-event output queue (`godot_anim_fired_event_t[256]`) with accessor API — MoHAARunner can drain per frame and route to audio/VFX systems.
+
+### Key technical details (Phases 241-242):
+- TIKI frame constants: `TIKI_FRAME_ENTRY` (-3), `TIKI_FRAME_EXIT` (-2), `TIKI_FRAME_EVERY` (-1), `TIKI_FRAME_FIRST` (0+)
+- Server commands are indexed first, then client commands, in a flat event index space
+- Per-entity state tracks: current_anim, last_fired_frame, entry_fired, tiki_ptr — detects animation transitions and fires exit→entry sequence
+- Loop handling: when current_frame < last_fired_frame, fires remaining events from old cycle tail then new cycle head
+
+### Files created (Phases 241-242):
+- `code/godot/godot_animation_events.h` — public API header
+- `code/godot/godot_animation_event_accessors.cpp` — C accessor for TIKI animation event data
+- `code/godot/godot_animation_events.cpp` — animation event dispatcher with per-entity tracking
+
+### MoHAARunner Integration Required (Phases 241-242):
+1. **In `_ready()`:** Call `Godot_AnimEvents_Init()` after `Com_Init()`.
+2. **In `update_entities()`:** For each animated entity, call `Godot_AnimEvents_Fire(entity_index, tikiPtr, anim_index, current_frame, pos)`.
+3. **After entity update:** Call `Godot_AnimEvents_GetFiredCount()` / `Godot_AnimEvents_GetFiredEvents()` to drain the queue — route sound events to the audio pipeline, effect events to VFX, footstep events to surface-type lookup + audio.
+4. **After draining:** Call `Godot_AnimEvents_ClearFired()`.
+5. **In shutdown:** Call `Godot_AnimEvents_Shutdown()`.
