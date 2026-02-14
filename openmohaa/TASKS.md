@@ -2323,3 +2323,23 @@ Audited player movement physics (`bg_pmove.cpp`, `bg_slidemove.cpp`, `bg_public.
 - The `gi.trace` function pointer used by all weapon trace calls is valid throughout the game's lifetime — set once by `GetGameAPI()` and never cleared until `G_ShutdownGame()`
 - No `gi.Malloc`/`gi.Free` calls exist in weapon files — C++ `new`/`delete` used instead, managed by the class system's memory pool
 - No new accessor files needed — weapon state is entirely server-side game logic, not read by MoHAARunner
+
+## Phase 88: Hit Detection & Damage Audit ✅
+- [x] **Task 88.1:** Hitscan traces — `G_Trace()` (two overloads in `g_utils.cpp`) properly delegates to `gi.trace()` function pointer, which is assigned to `SV_Trace` in `sv_game.c`. Entity results mapped via `g_entities[trace.entityNum]` with NULL checks.
+- [x] **Task 88.2:** Bullet traces — `BulletAttack()` (`weaputils.cpp`) performs hitscan with penetration via `G_Trace()` calls, supports wood/metal pass-through, tracer visuals, and per-bullet location-based damage.
+- [x] **Task 88.3:** Melee traces — `MeleeAttack()` (`weaputils.cpp`) uses `G_Trace()` for world-blocking check then `G_TraceEntities()` for entity sweeps, properly filters by `takedamage`.
+- [x] **Task 88.4:** Radius damage — `RadiusDamage()` (`weaputils.cpp`) enumerates entities via `findradius()`, performs per-target `G_SightTrace()` LOS checks, applies linear distance falloff, and reduces self-damage to 90%.
+- [x] **Task 88.5:** Location-based damage — `hitloc_t` enum defines 19 body zones (head, torso, limbs); `Sentient::ArmorDamage()` applies per-location multipliers from `m_fDamageMultipliers[]` array (e.g. head=5.0×, limbs=0.5–0.8×).
+- [x] **Task 88.6:** MOD types — 30 means-of-death constants (MOD_NONE through MOD_LANDMINE) with string table in `g_utils.cpp`; `MOD_string_to_int()` provides lookup.
+- [x] **Task 88.7:** Damage pipeline — `Entity::Damage()` queues `EV_Damage` → `Entity::DamageEvent()` processes damage, checks immunity, deducts health → fires `EV_Killed` (health ≤ 0) or `EV_Pain` (alive). `Sentient::ArmorDamage()` applies location multipliers and armour reduction.
+- [x] **Task 88.8:** Death handling — `Player::Killed()` sets death state, fires pain event for death anim, calls `Obituary()` for kill feed, sets respawn timer (1–2s in DM). NPC death via `Entity::Killed()` virtual dispatch.
+- [x] **Task 88.9:** `#ifdef` verification — No `#ifdef DEDICATED` or `#ifdef GODOT_GDEXTENSION` guards exist in the damage pipeline (`entity.cpp`, `sentient.cpp`, `player.cpp`, `weaputils.cpp`, `g_utils.cpp`). None are needed: the entire pipeline operates through the `gi` function-pointer interface which `sv_game.c` initialises unconditionally before game code runs.
+- [x] **Task 88.10:** Function pointer safety — `gi.trace`, `gi.pointcontents`, `gi.AreaEntities`, `gi.SightTrace` all assigned in `SV_InitGameProgs()` (`sv_game.c`) before `GetGameAPI()` returns. No NULL pointer risk during normal gameplay.
+- [x] **Task 88.11:** Accessor assessment — No `godot_game_damage.h` accessor needed. The damage system runs entirely server-side via `gi` function pointers; `MoHAARunner.cpp` does not read damage state.
+
+### Key technical details (Phase 88):
+- **No code changes required.** The hit detection and damage pipeline is fully functional under the GDExtension build.
+- Damage flow: `BulletAttack()`/`MeleeAttack()`/`RadiusDamage()` → `Entity::Damage()` → `EV_Damage` → `DamageEvent()`/`ArmorDamage()` → health deduction → `EV_Killed`/`EV_Pain`
+- All trace functions (`G_Trace`, `G_SightTrace`, `G_TraceEntities`) use the `gi` interface which bridges to the server's `SV_Trace` (collision detection via BSP/CM system)
+- `g_entities[]` array indexing for trace results is bounds-safe (ENTITYNUM_NONE check)
+- The `gi_Malloc_Safe`/`gi_Free_Safe` wrappers in `g_main.h` are not needed in the damage pipeline (no allocator calls in hot damage path)
