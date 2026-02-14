@@ -40,6 +40,7 @@ struct ImpactParticle {
     Vector3         velocity;
     float           lifetime;       /* remaining seconds */
     float           max_lifetime;   /* total seconds (for alpha fade) */
+    float           gravity_scale;  /* per-template gravity multiplier */
     bool            active;
 };
 
@@ -217,6 +218,7 @@ void Godot_Impact_Init(Node3D *parent) {
         s_particles[i].velocity     = Vector3();
         s_particles[i].lifetime     = 0.0f;
         s_particles[i].max_lifetime = 0.0f;
+        s_particles[i].gravity_scale = 1.0f;
         s_particles[i].active       = false;
     }
 
@@ -269,6 +271,7 @@ void Godot_Impact_Spawn(ImpactSurfaceType type,
                                               tmpl.spread_angle);
         p.lifetime     = tmpl.particle_lifetime * (0.7f + randf() * 0.6f);
         p.max_lifetime = p.lifetime;
+        p.gravity_scale = tmpl.gravity_scale;
         p.active       = true;
 
         if (p.node) {
@@ -352,8 +355,8 @@ void Godot_Impact_Update(float delta) {
             continue;
         }
 
-        /* Apply gravity */
-        p.velocity.y -= GRAVITY_ACCEL * delta;
+        /* Apply gravity (scaled per surface template) */
+        p.velocity.y -= GRAVITY_ACCEL * p.gravity_scale * delta;
 
         /* Move */
         if (p.node) {
