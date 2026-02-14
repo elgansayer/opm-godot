@@ -86,29 +86,35 @@ static const surfaceTypeInfo_t g_surfaceTypes[NUM_SURFACE_TYPES] = {
 
 // ── Inline helpers ─────────────────────────────────────────────────
 
+// Return the full surfaceTypeInfo_t for a masked SURF_* flag.
+// Uses a switch for O(1) lookup on the hot path.
+static inline const surfaceTypeInfo_t *SurfaceFlag_GetInfo(int surfaceFlag)
+{
+    switch (surfaceFlag) {
+    case SURF_PAPER:   return &g_surfaceTypes[SURF_TYPE_PAPER];
+    case SURF_WOOD:    return &g_surfaceTypes[SURF_TYPE_WOOD];
+    case SURF_METAL:   return &g_surfaceTypes[SURF_TYPE_METAL];
+    case SURF_ROCK:    return &g_surfaceTypes[SURF_TYPE_ROCK];
+    case SURF_DIRT:    return &g_surfaceTypes[SURF_TYPE_DIRT];
+    case SURF_GRILL:   return &g_surfaceTypes[SURF_TYPE_GRILL];
+    case SURF_GRASS:   return &g_surfaceTypes[SURF_TYPE_GRASS];
+    case SURF_MUD:     return &g_surfaceTypes[SURF_TYPE_MUD];
+    case SURF_PUDDLE:  return &g_surfaceTypes[SURF_TYPE_PUDDLE];
+    case SURF_GLASS:   return &g_surfaceTypes[SURF_TYPE_GLASS];
+    case SURF_GRAVEL:  return &g_surfaceTypes[SURF_TYPE_GRAVEL];
+    case SURF_SAND:    return &g_surfaceTypes[SURF_TYPE_SAND];
+    case SURF_FOLIAGE: return &g_surfaceTypes[SURF_TYPE_FOLIAGE];
+    case SURF_SNOW:    return &g_surfaceTypes[SURF_TYPE_SNOW];
+    case SURF_CARPET:  return &g_surfaceTypes[SURF_TYPE_CARPET];
+    default:           return &g_surfaceTypes[SURF_TYPE_NONE];
+    }
+}
+
 // Convert a masked SURF_* flag (already ANDed with MASK_SURF_TYPE)
 // to the compact surfaceType_t enum.
 static inline surfaceType_t SurfaceFlag_ToType(int surfaceFlag)
 {
-    int i;
-    for (i = 1; i < NUM_SURFACE_TYPES; i++) {
-        if (g_surfaceTypes[i].flag == surfaceFlag) {
-            return g_surfaceTypes[i].type;
-        }
-    }
-    return SURF_TYPE_NONE;
-}
-
-// Return the full surfaceTypeInfo_t for a masked SURF_* flag.
-static inline const surfaceTypeInfo_t *SurfaceFlag_GetInfo(int surfaceFlag)
-{
-    int i;
-    for (i = 1; i < NUM_SURFACE_TYPES; i++) {
-        if (g_surfaceTypes[i].flag == surfaceFlag) {
-            return &g_surfaceTypes[i];
-        }
-    }
-    return &g_surfaceTypes[SURF_TYPE_NONE];
+    return SurfaceFlag_GetInfo(surfaceFlag)->type;
 }
 
 // Return the sound-alias suffix for a masked SURF_* flag.

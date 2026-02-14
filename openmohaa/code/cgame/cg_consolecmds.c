@@ -262,9 +262,9 @@ static void CG_PrintSurfaceProperties(int iSurfaceFlags)
 
 static void CG_PrintSurfaceType(int iSurfType)
 {
-    surfaceType_t type = SurfaceFlag_ToType(iSurfType & MASK_SURF_TYPE);
-    if (type != SURF_TYPE_NONE) {
-        cgi.Printf("%s", SurfaceFlag_ToName(iSurfType & MASK_SURF_TYPE));
+    const surfaceTypeInfo_t *info = SurfaceFlag_GetInfo(iSurfType & MASK_SURF_TYPE);
+    if (info->type != SURF_TYPE_NONE) {
+        cgi.Printf("%s", info->name);
     } else {
         cgi.Printf("!!*none specified*!!");
     }
