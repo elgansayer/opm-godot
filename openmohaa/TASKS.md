@@ -1871,3 +1871,32 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 80: Lightmap Styles ✅
+
+Implemented BSP lightmap style support.  MOHAA maps can have up to 4 lightmap styles per surface (stored in `lightmapStyles[4]`), controlled by server configstrings.  Light switches, flickering lights, and pulsing lights use alternate lightmap styles baked by the map compiler.
+
+- [x] **Task 80.1:** C accessor (`godot_lightmap_styles_accessors.c`) — reads lightstyle pattern strings from `sv.configstrings[CS_LIGHTSTYLES + index]` and evaluates brightness at the current server time.  Pattern characters map `'a'` = 0 (off) through `'z'` = 255 (full), advancing at 10 Hz.
+- [x] **Task 80.2:** Lightmap style manager (`godot_lightmap_styles.cpp`) — tracks 64 styles (MAX_LIGHTSTYLES × 2), polls engine brightness each frame via the C accessor, and interpolates between steps for smooth transitions (INTERP_SPEED = 10.0).
+- [x] **Task 80.3:** Public API header (`godot_lightmap_styles.h`) — declares `Godot_LightStyles_Init()`, `Godot_LightStyles_Update(delta)`, `Godot_LightStyles_Shutdown()`, `Godot_LightStyles_GetBrightness(style_index)`, plus C accessor declarations.
+- [x] **Task 80.4:** Documentation of integration points for BSP lightmap rendering.
+
+### Key technical details (Phase 80):
+- Style 0 = always full brightness (1.0); style 255 = unused slot (0.0)
+- Styles 1–31 are switchable via `SV_SetLightStyle()` / `gi.SetLightStyle()`
+- Pattern format: each character is a brightness frame, 'a'=0.0 through 'z'=1.0, cycling at 10 Hz
+- Smooth interpolation prevents jarring brightness jumps between pattern steps
+- Final surface light = sum of (lightmap_i × brightness_i) for each active style slot
+
+### Integration points for MoHAARunner / BSP renderer:
+1. **Init:** Call `Godot_LightStyles_Init()` at map load time (in `check_world_load()`).
+2. **Update:** Call `Godot_LightStyles_Update(delta)` once per frame in `_process()`.
+3. **Query:** Call `Godot_LightStyles_GetBrightness(style_index)` when building/updating lightmap data for each BSP surface.
+4. **Shutdown:** Call `Godot_LightStyles_Shutdown()` on map unload or engine shutdown.
+5. **For StandardMaterial3D:** Modulate lightmap texture brightness by the returned multiplier.
+6. **For ShaderMaterial:** Set a `lightstyle_brightness` uniform with the brightness value.
+
+### Files created (Phase 80):
+- `code/godot/godot_lightmap_styles.cpp` — lightmap style manager
+- `code/godot/godot_lightmap_styles.h` — public API header
+- `code/godot/godot_lightmap_styles_accessors.c` — C accessor for configstring light state
