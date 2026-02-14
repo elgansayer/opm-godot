@@ -1871,3 +1871,14 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 264: Settings Accessors (Cvar/Keybind Bridge) ✅
+
+Created a C accessor layer (`code/godot/godot_settings_accessors.c/.h`) that exposes the engine's cvar-based settings system to Godot. GDScript can now read/write all player-configurable settings:
+
+- **Generic cvar access:** `Godot_Settings_GetFloat`, `Godot_Settings_GetInt`, `Godot_Settings_GetString`, `Godot_Settings_Set` — thin wrappers around `Cvar_FindVar` / `Cvar_Set`.
+- **Audio:** `Godot_Settings_GetMasterVolume` / `SetMasterVolume` (`s_volume`), `GetMusicVolume` / `SetMusicVolume` (`s_musicvolume`).
+- **Video:** `Godot_Settings_GetTextureQuality` / `SetTextureQuality` (`r_picmip`).
+- **Network:** `Godot_Settings_GetRate` / `SetRate` (`rate`).
+- **Key bindings:** `Godot_Settings_BindKey` / `GetKeyBinding` — delegates to `Key_SetBinding` / `Key_GetBinding`.
+- **Config persistence:** `Godot_Settings_WriteConfig` — appends `writeconfig mohaaconfig.cfg` to the command buffer.
