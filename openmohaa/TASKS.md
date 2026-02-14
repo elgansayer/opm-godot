@@ -2023,3 +2023,25 @@ each frame.  `Godot_Explosion_Shutdown()` on map unload or module teardown.
 5. Call `Godot_ScreenFX_FlashBang(intensity)` when flash-bang event is detected
 6. Call `Godot_ScreenFX_PainFlinch(pitch_offset)` when `v_dmg_pitch` changes
 7. Call `Godot_ScreenFX_Shutdown()` on map unload or exit
+
+## Phase 56: Cinematic Playback Stub ✅
+- [x] **Task 56.1:** Created `godot_cinematic.cpp` / `godot_cinematic.h` — standalone cinematic skip-hint overlay module.
+- [x] **Task 56.2:** Detects cinematic playback via existing `Godot_Renderer_IsCinematicActive()` accessor (reads `gr_cin_active` flag set by `GR_DrawStretchRaw` in `godot_renderer.c`).
+- [x] **Task 56.3:** Fullscreen black `ColorRect` on `CanvasLayer` z_index 200 (above HUD and cinematic frame display).
+- [x] **Task 56.4:** "Press ESC to skip" label centred at bottom with smooth alpha pulse animation.
+- [x] **Task 56.5:** Overlay auto-shows when cinematic starts, auto-hides when cinematic ends.
+- [x] **Task 56.6:** No CIN_* stubs needed — real RoQ decoder in `cl_cin.cpp` handles all cinematic functions.
+
+### Key technical details (Phase 56):
+- Public API: `Godot_Cinematic_Init(Node*)`, `Godot_Cinematic_Update(delta)`, `Godot_Cinematic_Shutdown()`, `Godot_Cinematic_IsActive()`
+- The overlay complements MoHAARunner's Phase 11 cinematic frame display (layer 11) by adding the skip hint on layer 200
+- ESC key input is already handled by the engine's `SCR_StopCinematic()` path — no additional input injection needed
+- Label alpha oscillates between 0.3 and 1.0 at 2.5 rad/s using `sinf()`
+- Auto-discovered by SConstruct's recursive source walk of `code/godot/`
+
+### Files created (Phase 56):
+- `code/godot/godot_cinematic.cpp` — Cinematic skip-hint overlay implementation
+- `code/godot/godot_cinematic.h` — Public API header
+
+### Files modified (Phase 56):
+- `TASKS.md` — Added Phase 56 documentation
