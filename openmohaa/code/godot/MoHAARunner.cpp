@@ -605,6 +605,7 @@ void MoHAARunner::check_world_load() {
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
             pvs_current_cluster = -1;             // Reset PVS state
+            pvs_log_count = 0;
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -632,6 +633,7 @@ void MoHAARunner::check_world_load() {
         bsp_map_node = map_node;
         loaded_bsp_name = new_bsp;
         pvs_current_cluster = -1;  // Force PVS recalculation for new map
+        pvs_log_count = 0;
         UtilityFunctions::print("[MoHAA] BSP world added to scene.");
 
         // Instantiate static TIKI models from BSP data
@@ -692,7 +694,6 @@ void MoHAARunner::update_pvs_visibility() {
         else     hidden_count++;
     }
 
-    static int pvs_log_count = 0;
     if (pvs_log_count < 5) {
         UtilityFunctions::print(String("[PVS] Cluster ") +
                                 String::num_int64(new_cluster) +
@@ -1134,6 +1135,12 @@ void MoHAARunner::update_entities() {
         entity_cache_keys.resize(ent_count);
     }
 
+    // Cache camera origin for PVS entity culling (id Tech 3 coordinates)
+    float pvs_cam_origin[3] = {0, 0, 0};
+    if (pvs_current_cluster >= 0) {
+        Godot_Renderer_GetViewOrigin(pvs_cam_origin);
+    }
+
     // Update positions for active entities this frame
     for (int i = 0; i < ent_count; i++) {
         float origin[3], axis[9], scale = 1.0f;
@@ -1170,9 +1177,7 @@ void MoHAARunner::update_entities() {
         // Skip first-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) — they
         // are always visible as they're attached to the view weapon.
         if (pvs_current_cluster >= 0 && !(renderfx & 0x06)) {
-            float cam_origin[3];
-            Godot_Renderer_GetViewOrigin(cam_origin);
-            if (!Godot_BSP_InPVS(cam_origin, origin)) {
+            if (!Godot_BSP_InPVS(pvs_cam_origin, origin)) {
                 mi->set_visible(false);
                 continue;
             }
