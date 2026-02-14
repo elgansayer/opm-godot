@@ -1915,3 +1915,32 @@ Wired the engine's existing GameSpy master server query and server hosting into 
 2. **In `_process()`:** Call `Godot_VFX_Update(delta)` each frame to sync sprites.
 3. **On map change:** Call `Godot_VFX_Clear()` to hide all pool slots.
 4. **On shutdown:** Call `Godot_VFX_Shutdown()` to free pool nodes and caches.
+
+## Phase 222: Impact Effects ✅
+- [x] **Task 222.1:** Created `ImpactSurfaceType` enum covering all engine surface types (metal, wood, stone, dirt, grass, water, glass, flesh, sand, snow, mud, gravel, foliage, carpet, paper, grill).
+- [x] **Task 222.2:** Defined `ImpactTemplate` struct with particle count, velocity, lifetime, colour, size, decal texture, decal size, decal lifetime, gravity scale, and spread angle.
+- [x] **Task 222.3:** Populated per-surface templates with visually distinct parameters (e.g. metal = bright-orange sparks, wood = brown splinters, water = white droplets with no decal).
+- [x] **Task 222.4:** Implemented `Godot_Impact_Init()` — pre-allocates a pool of 256 particle MeshInstance3D nodes and 64 decal MeshInstance3D nodes under an "ImpactEffects" Node3D.
+- [x] **Task 222.5:** Implemented `Godot_Impact_Spawn()` — spawns N billboard-quad particles with randomised velocity in a cone around the hit normal, plus a surface-aligned decal quad.
+- [x] **Task 222.6:** Implemented `Godot_Impact_Update(delta)` — animates particle positions (velocity + gravity), fades alpha over lifetime, fades decals in last 20% of life, recycles expired particles/decals.
+- [x] **Task 222.7:** Implemented `Godot_Impact_Shutdown()` — cleans up all nodes and resets state.
+- [x] **Task 222.8:** Implemented `Godot_Impact_SurfaceFromFlags()` — converts engine SURF_* bit-masks to ImpactSurfaceType enum values.
+
+### Key technical details (Phase 222):
+- Particle pool uses a ring buffer (s_next_particle wraps around MAX_IMPACT_PARTICLES=256) to avoid per-frame allocation.
+- Decal pool similarly uses a ring buffer of MAX_DECALS=64 entries.
+- Billboard materials are unshaded with alpha transparency; particle quads are billboarded via BaseMaterial3D::BILLBOARD_ENABLED.
+- Decals are oriented to face along the surface normal with a 0.005m offset to avoid z-fighting.
+- Gravity applied at 9.8 m/s² to all particles (scaled by per-template gravity_scale — not yet exposed but available for tuning).
+- All positions/normals expected in Godot coordinates (Y-up, metres).
+- Standalone Node3D parent ("ImpactEffects") — integrates with Agent 12's VFX foundation when available.
+
+### Files created (Phase 222):
+- `code/godot/godot_impact_effects.h` — Public API: enums, struct, Init/Spawn/Update/Shutdown/SurfaceFromFlags
+- `code/godot/godot_impact_effects.cpp` — Full implementation with particle pool, decal pool, per-surface templates
+
+### MoHAARunner integration point (Phase 222):
+1. **In `_ready()` or `check_world_load()`:** Call `Godot_Impact_Init(scene_root)` after the 3D scene is set up.
+2. **In `_process()`:** Call `Godot_Impact_Update(delta)` each frame.
+3. **When processing impacts:** Call `Godot_Impact_SurfaceFromFlags(surfaceFlags)` to get the type, then `Godot_Impact_Spawn(type, position, normal)`.
+4. **On map unload / shutdown:** Call `Godot_Impact_Shutdown()`.
