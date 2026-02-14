@@ -241,6 +241,7 @@ typedef struct {
     int     hModel;         /* qhandle_t — opaque model handle */
     int     entityNumber;   /* game entity number */
     float   origin[3];
+    float   lightingOrigin[3]; /* RF_LIGHTING_ORIGIN — for multi-part model lighting (Phase 63) */
     float   axis[3][3];
     float   scale;
     float   oldorigin[3];   /* RT_BEAM "to", or previous pos for lerp */
@@ -638,6 +639,7 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
     ge->rotation      = re->rotation;
 
     VectorCopy( re->origin, ge->origin );
+    VectorCopy( re->lightingOrigin, ge->lightingOrigin );
     VectorCopy( re->oldorigin, ge->oldorigin );
     VectorCopy( re->axis[0], ge->axis[0] );
     VectorCopy( re->axis[1], ge->axis[1] );
@@ -2231,6 +2233,13 @@ int Godot_Renderer_GetEntityParent( int index )
 {
     if ( index < 0 || index >= gr_numEntities ) return -1;
     return gr_entities[index].parentEntity;
+}
+
+/* Phase 63: Entity lighting origin accessor — for RF_LIGHTING_ORIGIN support */
+void Godot_Renderer_GetEntityLightingOrigin( int index, float *lightingOrigin )
+{
+    if ( index < 0 || index >= gr_numEntities || !lightingOrigin ) return;
+    VectorCopy( gr_entities[index].lightingOrigin, lightingOrigin );
 }
 
 /* Phase 26: Shader remap query — check if a shader name has been remapped */

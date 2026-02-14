@@ -2,6 +2,7 @@
 #include "godot_bsp_mesh.h"
 #include "godot_skel_model.h"
 #include "godot_shader_props.h"
+#include "godot_entity_lighting.h"
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -221,6 +222,9 @@ extern "C" {
 
     // Phase 35: Entity parenting — from godot_renderer.c
     int   Godot_Renderer_GetEntityParent(int index);
+
+    // Phase 63: Entity lighting origin — from godot_renderer.c
+    void  Godot_Renderer_GetEntityLightingOrigin(int index, float *lightingOrigin);
 
     // Phase 26: Shader remap query — from godot_renderer.c
     const char *Godot_Renderer_GetShaderRemap(const char *shaderName);
@@ -1630,24 +1634,33 @@ void MoHAARunner::update_entities() {
             }
         }
 
-        // ── Phase 21+22: Entity colour tinting + alpha ──
-        // Apply shaderRGBA modulation when it's not opaque white.
-        // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
-        float ambient[3] = {1.0f, 1.0f, 1.0f};
-        float directed[3] = {0.0f, 0.0f, 0.0f};
-        float ldir[3] = {0.0f, 0.0f, 1.0f};
-        float point[3] = { origin[0], origin[1], origin[2] };
-        int lit = Godot_BSP_LightForPoint(point, ambient, directed, ldir);
-        Color light_mul(1.0f, 1.0f, 1.0f, 1.0f);
-        if (lit) {
-            light_mul = Color(clamp01(ambient[0] + directed[0] * 0.5f),
-                              clamp01(ambient[1] + directed[1] * 0.5f),
-                              clamp01(ambient[2] + directed[2] * 0.5f),
-                              1.0f);
+        // ── Phase 63+64: Entity lighting — lightgrid + dynamic lights ──
+        // Sample lighting at the appropriate position (handle RF_LIGHTING_ORIGIN)
+        float light_sample_pos[3];
+        const int RF_LIGHTING_ORIGIN = 0x0080;
+        if (renderfx & RF_LIGHTING_ORIGIN) {
+            // Use lightingOrigin instead of render origin for lighting
+            Godot_Renderer_GetEntityLightingOrigin(i, light_sample_pos);
+        } else {
+            // Use standard render origin for lighting
+            light_sample_pos[0] = origin[0];
+            light_sample_pos[1] = origin[1];
+            light_sample_pos[2] = origin[2];
         }
+
+        // Combined lightgrid + dynamic lights (max 4 dlights per entity)
+        float lr = 0.5f, lg = 0.5f, lb = 0.5f;
+        Godot_EntityLight_Combined(light_sample_pos, 4, &lr, &lg, &lb);
+        
+        Color light_mul(lr, lg, lb, 1.0f);
+        
         bool has_light_tint = fabsf(light_mul.r - 1.0f) > 0.02f ||
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;
+        
+        // ── Phase 21+22: Entity colour tinting + alpha ──
+        // Apply shaderRGBA modulation when it's not opaque white.
+        // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
         bool has_tint  = (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255);
         bool has_alpha = (rgba[3] < 255) || (renderfx & 0x0400);
         if (has_tint || has_alpha || has_light_tint) {
