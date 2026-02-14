@@ -89,15 +89,11 @@ void Godot_RenderSort_SortEntities(SortableEntity *entities,
     }
 
     /*
-     * camera_distance is expected to be pre-populated by the caller
-     * with the entity's Godot-space position.  We treat the value as
-     * a temporary: overwrite it with the squared distance from camera
-     * using the entity_index as a key would require the entity buffer,
-     * which this module intentionally does not access directly.
-     *
-     * The caller should set camera_distance to the squared distance
-     * from camera_pos to the entity's Godot-space origin before
-     * invoking this function.  If not, the existing value is used as-is.
+     * The caller must set camera_distance on each SortableEntity to the
+     * squared distance from camera_pos to the entity's Godot-space origin
+     * before invoking this function.  This module does not access the
+     * entity buffer directly — distance computation is the caller's
+     * responsibility.
      */
 
     std::sort(entities, entities + count, sort_compare);
