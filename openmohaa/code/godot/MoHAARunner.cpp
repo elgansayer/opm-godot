@@ -604,6 +604,7 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+            pvs_current_cluster = -1;             // Reset PVS state
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -630,6 +631,7 @@ void MoHAARunner::check_world_load() {
         game_world->add_child(map_node);
         bsp_map_node = map_node;
         loaded_bsp_name = new_bsp;
+        pvs_current_cluster = -1;  // Force PVS recalculation for new map
         UtilityFunctions::print("[MoHAA] BSP world added to scene.");
 
         // Instantiate static TIKI models from BSP data
@@ -647,6 +649,58 @@ void MoHAARunner::check_world_load() {
 
     } else {
         UtilityFunctions::printerr("[MoHAA] Failed to load BSP world.");
+    }
+}
+
+// ──────────────────────────────────────────────
+//  PVS cluster visibility culling
+// ──────────────────────────────────────────────
+
+void MoHAARunner::update_pvs_visibility() {
+    int num_clusters = Godot_BSP_GetPVSNumClusters();
+    if (num_clusters <= 0) return;
+
+    // Get camera position in id Tech 3 coordinates (already read by update_camera)
+    float origin[3];
+    Godot_Renderer_GetViewOrigin(origin);
+
+    int new_cluster = Godot_BSP_PointCluster(origin);
+
+    // Only update visibility when the camera changes cluster
+    if (new_cluster == pvs_current_cluster) return;
+    pvs_current_cluster = new_cluster;
+
+    // If camera is outside the world (cluster -1), show everything
+    if (new_cluster < 0) {
+        for (int c = 0; c < num_clusters; c++) {
+            MeshInstance3D *mi = Godot_BSP_GetClusterMesh(c);
+            if (mi) mi->set_visible(true);
+        }
+        return;
+    }
+
+    // Toggle per-cluster visibility based on PVS
+    int visible_count = 0;
+    int hidden_count = 0;
+    for (int c = 0; c < num_clusters; c++) {
+        MeshInstance3D *mi = Godot_BSP_GetClusterMesh(c);
+        if (!mi) continue;
+
+        bool vis = (Godot_BSP_ClusterVisible(new_cluster, c) != 0);
+        mi->set_visible(vis);
+        if (vis) visible_count++;
+        else     hidden_count++;
+    }
+
+    static int pvs_log_count = 0;
+    if (pvs_log_count < 5) {
+        UtilityFunctions::print(String("[PVS] Cluster ") +
+                                String::num_int64(new_cluster) +
+                                ": " + String::num_int64(visible_count) +
+                                " visible, " + String::num_int64(hidden_count) +
+                                " hidden of " + String::num_int64(num_clusters) +
+                                " total.");
+        pvs_log_count++;
     }
 }
 
@@ -1110,6 +1164,18 @@ void MoHAARunner::update_entities() {
         if (renderfx & 0x01) {  // RF_THIRD_PERSON — skip player body
             mi->set_visible(false);
             continue;
+        }
+
+        // PVS culling: skip entities not visible from the camera's cluster.
+        // Skip first-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) — they
+        // are always visible as they're attached to the view weapon.
+        if (pvs_current_cluster >= 0 && !(renderfx & 0x06)) {
+            float cam_origin[3];
+            Godot_Renderer_GetViewOrigin(cam_origin);
+            if (!Godot_BSP_InPVS(cam_origin, origin)) {
+                mi->set_visible(false);
+                continue;
+            }
         }
 
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
@@ -3299,6 +3365,9 @@ void MoHAARunner::_process(double delta) {
 
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
+
+    // ── PVS cluster visibility culling ──
+    update_pvs_visibility();
 
     // ── Update entity debug meshes from captured render data (Phase 7e) ──
     update_entities();

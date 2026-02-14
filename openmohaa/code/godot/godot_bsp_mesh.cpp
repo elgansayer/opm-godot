@@ -271,6 +271,12 @@ static std::vector<BSPFogVolume> s_fog_volumes;
 /* ── Phase 74: Flare cache ── */
 static std::vector<BSPFlare> s_flares;
 
+/* ── PVS cluster mesh tracking ──
+ * Maps cluster index → MeshInstance3D node for per-cluster visibility toggling.
+ * Built during Godot_BSP_LoadWorld(), queried each frame by MoHAARunner. */
+static std::vector<godot::MeshInstance3D *> s_cluster_meshes;  /* indexed by cluster */
+static int s_pvs_num_clusters = 0;
+
 /* ===================================================================
  *  Retained BSP data for mark fragment (decal) queries
  *
@@ -288,6 +294,7 @@ struct BSPMarkData {
     /* Leaves — terminal BSP nodes */
     /* Normalised to unified format (all leaves have same fields) */
     struct MarkLeaf {
+        int32_t cluster;
         int32_t firstLeafSurface;
         int32_t numLeafSurfaces;
         int32_t firstTerraPatch;
@@ -1188,6 +1195,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 const bsp_leaf_t_v17 *pl = reinterpret_cast<const bsp_leaf_t_v17 *>(data + l_leaves->fileofs);
                 s_mark_data.leaves.resize(nl);
                 for (int i = 0; i < nl; i++) {
+                    s_mark_data.leaves[i].cluster          = pl[i].cluster;
                     s_mark_data.leaves[i].firstLeafSurface = pl[i].firstLeafSurface;
                     s_mark_data.leaves[i].numLeafSurfaces  = pl[i].numLeafSurfaces;
                     s_mark_data.leaves[i].firstTerraPatch  = pl[i].firstTerraPatch;
@@ -1198,6 +1206,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 const bsp_leaf_t *pl = reinterpret_cast<const bsp_leaf_t *>(data + l_leaves->fileofs);
                 s_mark_data.leaves.resize(nl);
                 for (int i = 0; i < nl; i++) {
+                    s_mark_data.leaves[i].cluster          = pl[i].cluster;
                     s_mark_data.leaves[i].firstLeafSurface = pl[i].firstLeafSurface;
                     s_mark_data.leaves[i].numLeafSurfaces  = pl[i].numLeafSurfaces;
                     s_mark_data.leaves[i].firstTerraPatch  = pl[i].firstTerraPatch;
@@ -1393,8 +1402,36 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
     }
 
-    // ── 5. Accumulate world surfaces into per-shader batches ──
-    std::unordered_map<int, ShaderBatch> batches;
+    // ── 5. Build surface-to-cluster mapping from leaf data ──
+    //
+    // Walk all BSP leaves and build a mapping from surface index to the
+    // PVS cluster that "owns" it. A surface may be referenced by multiple
+    // leaves; we assign it to the first cluster encountered. Surfaces with
+    // no cluster assignment (cluster -1 or not referenced) go into a
+    // special "always-visible" group (cluster -1).
+    std::vector<int> surface_cluster(num_surfaces, -1);  // -1 = unassigned
+
+    if (s_mark_data.loaded && !s_mark_data.leaves.empty()) {
+        for (int li = 0; li < (int)s_mark_data.leaves.size(); li++) {
+            const auto &leaf = s_mark_data.leaves[li];
+            if (leaf.cluster < 0) continue;  // solid/void leaf
+            for (int si = 0; si < leaf.numLeafSurfaces; si++) {
+                int lsIdx = leaf.firstLeafSurface + si;
+                if (lsIdx < 0 || lsIdx >= (int)s_mark_data.leafSurfaces.size())
+                    continue;
+                int surfIdx = s_mark_data.leafSurfaces[lsIdx];
+                if (surfIdx < 0 || surfIdx >= num_surfaces) continue;
+                if (surface_cluster[surfIdx] < 0) {
+                    surface_cluster[surfIdx] = leaf.cluster;
+                }
+            }
+        }
+    }
+
+    // ── 5b. Accumulate world surfaces into per-cluster, per-shader batches ──
+    // Key: cluster → {shaderNum → ShaderBatch}
+    // Cluster -1 is the "always visible" fallback group.
+    std::unordered_map<int, std::unordered_map<int, ShaderBatch>> cluster_batches;
 
     int skipped_nodraw = 0;
     int skipped_type   = 0;
@@ -1461,7 +1498,8 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
 
         if (process_surface(surf, s, verts, num_verts, indices, num_indices,
-                            shaders, num_shaders, batches,
+                            shaders, num_shaders,
+                            cluster_batches[surface_cluster[s]],
                             skipped_nodraw, skipped_sky)) {
             if (surf->surfaceType == MST_PATCH) processed_patches++;
             processed++;
@@ -1473,7 +1511,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             String::num_int64((int64_t)s_flares.size()) + " flare surfaces.");
     }
 
-    // ── 5b. Load and process terrain patches (LUMP_TERRAIN) ──
+    // ── 5c. Load and process terrain patches (LUMP_TERRAIN) ──
     //
     // MOHAA terrain is a separate system from BSP surfaces. Each patch
     // covers 512×512 world units with a 9×9 heightmap grid.  We render
@@ -1509,20 +1547,40 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             // Skip patches with invalid lightmap scale
             if (patch->lmapScale == 0) continue;
 
-            // Get or create shader batch
-            ShaderBatch &batch = batches[patch->iShader];
+            // Compute world-space origin
+            float x0 = (float)((int)patch->x << 6);
+            float y0 = (float)((int)patch->y << 6);
+            float z0 = (float)patch->iBaseHeight;
+
+            // Determine PVS cluster for this terrain patch from its centre
+            float terrain_centre[3] = { x0 + 256.0f, y0 + 256.0f, z0 + 128.0f };
+            int terrain_cluster = -1;
+            if (s_mark_data.loaded && !s_mark_data.nodes.empty()) {
+                int nodeNum = 0;
+                while (nodeNum >= 0) {
+                    if (nodeNum >= (int)s_mark_data.nodes.size()) break;
+                    const bsp_node_t &nd = s_mark_data.nodes[nodeNum];
+                    if (nd.planeNum < 0 || nd.planeNum >= (int)s_mark_data.planes.size()) break;
+                    const bsp_plane_t &pl = s_mark_data.planes[nd.planeNum];
+                    float d = terrain_centre[0]*pl.normal[0] + terrain_centre[1]*pl.normal[1] +
+                              terrain_centre[2]*pl.normal[2] - pl.dist;
+                    nodeNum = (d >= 0) ? nd.children[0] : nd.children[1];
+                }
+                if (nodeNum < 0) {
+                    int leafIdx = -(nodeNum + 1);
+                    if (leafIdx >= 0 && leafIdx < (int)s_mark_data.leaves.size())
+                        terrain_cluster = s_mark_data.leaves[leafIdx].cluster;
+                }
+            }
+
+            // Get or create shader batch for this cluster
+            ShaderBatch &batch = cluster_batches[terrain_cluster][patch->iShader];
             if (!batch.shader_name) {
                 batch.shader_name = sh->shader;
             }
             if (batch.lightmap_num < 0 && patch->iLightMap > 0) {
                 batch.lightmap_num = (int)patch->iLightMap;
             }
-
-            // Compute world-space origin
-            float x0 = (float)((int)patch->x << 6);
-            float y0 = (float)((int)patch->y << 6);
-            float z0 = (float)patch->iBaseHeight;
-
             // Corner diffuse texture coordinates
             //   [0][0] = SW (col=0,row=0)
             //   [0][1] = NW (col=0,row=8)
@@ -1599,6 +1657,11 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
     }
 
+    // Count total shader batches across all clusters
+    int total_shader_batches = 0;
+    for (auto &cp : cluster_batches)
+        total_shader_batches += (int)cp.second.size();
+
     UtilityFunctions::print(String("[BSP] Processed ") + String::num_int64(processed) +
                             " surfaces (" + String::num_int64(processed_patches) +
                             " patches tessellated), " +
@@ -1609,23 +1672,32 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                             " (sky), " + String::num_int64(skipped_type) +
                             " (flare), " + String::num_int64(skipped_bmodel) +
                             " (brushmodel). " +
-                            String::num_int64((int64_t)batches.size()) + " shader batches.");
+                            String::num_int64((int64_t)cluster_batches.size()) +
+                            " clusters, " +
+                            String::num_int64(total_shader_batches) + " shader batches.");
 
-    if (batches.empty()) {
+    if (cluster_batches.empty()) {
         UtilityFunctions::printerr("[BSP] No renderable surfaces found.");
         Godot_VFS_FreeFile(raw);
         return nullptr;
     }
 
-    // ── 6. Create world Godot ArrayMesh ──
+    // ── 6. Create per-cluster Godot ArrayMesh nodes for PVS culling ──
+    //
+    // Each PVS cluster gets its own MeshInstance3D so that MoHAARunner
+    // can toggle visibility per-cluster each frame based on the camera's
+    // PVS bitset. Cluster -1 is the "always-visible" fallback group.
     int tex_loaded = 0, tex_failed = 0;
-    Ref<ArrayMesh> mesh = batches_to_array_mesh(batches, &tex_loaded, &tex_failed);
-    int surface_idx = mesh->get_surface_count();
+    int clusters_with_geometry = 0;
 
-    UtilityFunctions::print(String("[BSP] Created world ArrayMesh with ") +
-                            String::num_int64(surface_idx) + " surfaces. " +
-                            "Textures loaded: " + String::num_int64(tex_loaded) +
-                            ", missing: " + String::num_int64(tex_failed));
+    // Determine the highest cluster index for the lookup table
+    int max_cluster = -1;
+    for (auto &cp : cluster_batches) {
+        if (cp.first > max_cluster) max_cluster = cp.first;
+    }
+    s_pvs_num_clusters = (max_cluster >= 0) ? (max_cluster + 1) : 0;
+    s_cluster_meshes.clear();
+    s_cluster_meshes.resize(s_pvs_num_clusters, nullptr);
 
     // ── 6b. Build brush sub-model meshes ──
     //
@@ -1700,14 +1772,59 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                                 " static model definitions.");
     }
 
-    // ── 7. Create scene tree nodes ──
+    // ── 7. Create scene tree with per-cluster MeshInstance3D nodes ──
     Node3D *root = memnew(Node3D);
     root->set_name("BSPMap");
 
-    MeshInstance3D *mi = memnew(MeshInstance3D);
-    mi->set_name("WorldGeometry");
-    mi->set_mesh(mesh);
-    root->add_child(mi);
+    Node3D *cluster_root = memnew(Node3D);
+    cluster_root->set_name("ClusterGeometry");
+    root->add_child(cluster_root);
+
+    // Always-visible group (cluster -1): surfaces not in any PVS cluster
+    MeshInstance3D *always_visible_mi = nullptr;
+    auto it_fallback = cluster_batches.find(-1);
+    if (it_fallback != cluster_batches.end() && !it_fallback->second.empty()) {
+        int tl = 0, tf = 0;
+        Ref<ArrayMesh> fb_mesh = batches_to_array_mesh(it_fallback->second, &tl, &tf);
+        tex_loaded += tl; tex_failed += tf;
+        if (fb_mesh.is_valid() && fb_mesh->get_surface_count() > 0) {
+            always_visible_mi = memnew(MeshInstance3D);
+            always_visible_mi->set_name("Cluster_AlwaysVisible");
+            always_visible_mi->set_mesh(fb_mesh);
+            cluster_root->add_child(always_visible_mi);
+            clusters_with_geometry++;
+        }
+    }
+
+    // Per-cluster meshes
+    for (auto &cp : cluster_batches) {
+        int cluster = cp.first;
+        if (cluster < 0) continue;  // already handled above
+
+        auto &shader_batches = cp.second;
+        if (shader_batches.empty()) continue;
+
+        int tl = 0, tf = 0;
+        Ref<ArrayMesh> cmesh = batches_to_array_mesh(shader_batches, &tl, &tf);
+        tex_loaded += tl; tex_failed += tf;
+        if (!cmesh.is_valid() || cmesh->get_surface_count() == 0) continue;
+
+        MeshInstance3D *cmi = memnew(MeshInstance3D);
+        cmi->set_name(String("Cluster_") + String::num_int64(cluster));
+        cmi->set_mesh(cmesh);
+        cluster_root->add_child(cmi);
+
+        if (cluster < s_pvs_num_clusters)
+            s_cluster_meshes[cluster] = cmi;
+
+        clusters_with_geometry++;
+    }
+
+    UtilityFunctions::print(String("[BSP] Created ") +
+                            String::num_int64(clusters_with_geometry) +
+                            " cluster mesh nodes. " +
+                            "Textures loaded: " + String::num_int64(tex_loaded) +
+                            ", missing: " + String::num_int64(tex_failed));
 
     // ── 8. Free BSP data ──
     Godot_VFS_FreeFile(raw);
@@ -1723,6 +1840,8 @@ void Godot_BSP_Unload() {
     s_brush_models.clear();
     s_fog_volumes.clear();
     s_flares.clear();
+    s_cluster_meshes.clear();  // PVS cluster references (nodes owned by scene tree)
+    s_pvs_num_clusters = 0;
     s_mark_data = BSPMarkData();  // release all retained mark fragment data
     s_world_data = BSPWorldData();  // release entity string, model bounds, lightgrid, PVS
     Godot_ShaderProps_Unload();
@@ -1780,6 +1899,22 @@ int Godot_BSP_GetFlareCount() {
 const BSPFlare *Godot_BSP_GetFlare(int index) {
     if (index < 0 || index >= (int)s_flares.size()) return nullptr;
     return &s_flares[index];
+}
+
+/* ===================================================================
+ *  PVS cluster mesh accessors
+ *
+ *  Called by MoHAARunner each frame to toggle per-cluster visibility
+ *  based on the camera's PVS bitset.
+ * ================================================================ */
+
+int Godot_BSP_GetPVSNumClusters() {
+    return s_pvs_num_clusters;
+}
+
+godot::MeshInstance3D *Godot_BSP_GetClusterMesh(int cluster) {
+    if (cluster < 0 || cluster >= (int)s_cluster_meshes.size()) return nullptr;
+    return s_cluster_meshes[cluster];
 }
 
 /* ===================================================================
@@ -2523,41 +2658,80 @@ int Godot_BSP_LightForPoint(const float point[3], float ambientLight[3],
     return 1;
 }
 
+/* ── PVS helper: walk BSP tree to find the leaf index containing a point ── */
+int Godot_BSP_PointLeaf(const float pt[3])
+{
+    if (!s_mark_data.loaded || s_mark_data.nodes.empty())
+        return -1;
+
+    int nodeNum = 0;
+    while (nodeNum >= 0) {
+        if (nodeNum >= (int)s_mark_data.nodes.size()) return -1;
+        const bsp_node_t &node = s_mark_data.nodes[nodeNum];
+        if (node.planeNum < 0 || node.planeNum >= (int)s_mark_data.planes.size()) return -1;
+        const bsp_plane_t &plane = s_mark_data.planes[node.planeNum];
+        float d = pt[0]*plane.normal[0] + pt[1]*plane.normal[1] + pt[2]*plane.normal[2] - plane.dist;
+        nodeNum = (d >= 0) ? node.children[0] : node.children[1];
+    }
+    return -(nodeNum + 1);
+}
+
+/* ── PVS helper: get the cluster index for a point in id Tech 3 coords ── */
+int Godot_BSP_PointCluster(const float pt[3])
+{
+    int leaf = Godot_BSP_PointLeaf(pt);
+    if (leaf < 0 || leaf >= (int)s_mark_data.leaves.size())
+        return -1;
+    return s_mark_data.leaves[leaf].cluster;
+}
+
+/* ── PVS helper: test if cluster 'target' is visible from cluster 'source' ── */
+int Godot_BSP_ClusterVisible(int source, int target)
+{
+    if (s_world_data.visData.empty() || s_world_data.numClusters <= 0)
+        return 1;  /* no PVS data — assume visible */
+    if (source < 0 || target < 0)
+        return 1;  /* outside world — assume visible */
+    if (source == target)
+        return 1;  /* same cluster — always visible */
+    if (source >= s_world_data.numClusters || target >= s_world_data.numClusters)
+        return 1;
+
+    int byteOfs = source * s_world_data.clusterBytes + (target >> 3);
+    if (byteOfs < 0 || byteOfs >= (int)s_world_data.visData.size())
+        return 1;
+
+    return (s_world_data.visData[byteOfs] & (1 << (target & 7))) ? 1 : 0;
+}
+
+/* ── PVS helper: number of PVS clusters in the loaded BSP ── */
+int Godot_BSP_GetNumClusters(void)
+{
+    return s_world_data.numClusters;
+}
+
 /* Phase 31: PVS query — check if two points are in the same PVS */
 int Godot_BSP_InPVS(const float p1[3], const float p2[3])
 {
-    /* Without retained BSP cluster info for arbitrary points, we'd need a
-     * full leaf-lookup.  We have the node tree and leaves retained in
-     * s_mark_data for mark fragments.  Use that for leaf lookup. */
     if (!s_world_data.loaded || s_world_data.numClusters <= 0 ||
         s_world_data.visData.empty() || !s_mark_data.loaded)
         return 1;  /* assume visible when no PVS data */
 
-    /* Find leaf for a point by walking the BSP tree */
-    auto findLeaf = [](const float pt[3]) -> int {
-        int nodeNum = 0;
-        while (nodeNum >= 0) {
-            if (nodeNum >= (int)s_mark_data.nodes.size()) return -1;
-            const bsp_node_t &node = s_mark_data.nodes[nodeNum];
-            if (node.planeNum < 0 || node.planeNum >= (int)s_mark_data.planes.size()) return -1;
-            const bsp_plane_t &plane = s_mark_data.planes[node.planeNum];
-            float d = pt[0]*plane.normal[0] + pt[1]*plane.normal[1] + pt[2]*plane.normal[2] - plane.dist;
-            nodeNum = (d >= 0) ? node.children[0] : node.children[1];
-        }
-        return -(nodeNum + 1);
-    };
+    int leaf1 = Godot_BSP_PointLeaf(p1);
+    int leaf2 = Godot_BSP_PointLeaf(p2);
 
-    int leaf1 = findLeaf(p1);
-    int leaf2 = findLeaf(p2);
+    if (leaf1 < 0 || leaf1 >= (int)s_mark_data.leaves.size() ||
+        leaf2 < 0 || leaf2 >= (int)s_mark_data.leaves.size())
+        return 1;
 
-    /* Look up cluster for each leaf — we stored cluster in MarkLeaf? No, 
-     * MarkLeaf doesn't store cluster.  We need leaf cluster info. */
-    /* Since MarkLeaf doesn't store cluster, and we don't retain the full
-     * leaf data, return true (conservative). This is an acceptable fallback
-     * since PVS is primarily an optimisation, not correctness. */
-    (void)leaf1;
-    (void)leaf2;
-    return 1;
+    int cluster1 = s_mark_data.leaves[leaf1].cluster;
+    int cluster2 = s_mark_data.leaves[leaf2].cluster;
+
+    /* Cluster -1 means the leaf is not in any visible cluster (solid/void) */
+    if (cluster1 < 0 || cluster2 < 0)
+        return 1;
+
+    return Godot_BSP_ClusterVisible(cluster1, cluster2);
 }
 
 }  /* extern "C" */
