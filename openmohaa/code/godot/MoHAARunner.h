@@ -154,6 +154,8 @@ private:
     int shadow_quality = 2;
     int geometry_quality = 2;
     int effects_quality = 2;
+    int msaa_level = 0;         // 0=disabled, 1=2x, 2=4x, 3=8x
+    bool fxaa_enabled = false;
 
     // 3D scene nodes (Phase 7a — camera bridge)
     Node3D *game_world = nullptr;            // Root for all 3D content

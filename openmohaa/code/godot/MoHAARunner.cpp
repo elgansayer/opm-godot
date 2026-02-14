@@ -3917,6 +3917,8 @@ void MoHAARunner::set_render_quality(const godot::String &p_preset) {
         set_effects_quality(3);
         set_msaa(2);
         set_fxaa_enabled(false);
+    } else {
+        UtilityFunctions::push_warning("[MoHAA] Unknown render quality preset: ", p_preset);
     }
 }
 
@@ -4041,6 +4043,7 @@ int MoHAARunner::get_effects_quality() const {
 
 void MoHAARunner::set_msaa(int level) {
     level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    msaa_level = level;
 
     // Apply to the root viewport at runtime via get_viewport()
     // 0=disabled, 1=2x, 2=4x, 3=8x
@@ -4053,14 +4056,12 @@ void MoHAARunner::set_msaa(int level) {
 }
 
 int MoHAARunner::get_msaa() const {
-    const Viewport *vp = const_cast<MoHAARunner *>(this)->get_viewport();
-    if (vp) {
-        return static_cast<int>(const_cast<Viewport *>(vp)->get_msaa_3d());
-    }
-    return 0;
+    return msaa_level;
 }
 
 void MoHAARunner::set_fxaa_enabled(bool enabled) {
+    fxaa_enabled = enabled;
+
     Viewport *vp = get_viewport();
     if (vp) {
         vp->set_screen_space_aa(enabled
@@ -4072,11 +4073,7 @@ void MoHAARunner::set_fxaa_enabled(bool enabled) {
 }
 
 bool MoHAARunner::is_fxaa_enabled() const {
-    const Viewport *vp = const_cast<MoHAARunner *>(this)->get_viewport();
-    if (vp) {
-        return const_cast<Viewport *>(vp)->get_screen_space_aa() == Viewport::SCREEN_SPACE_AA_FXAA;
-    }
-    return false;
+    return fxaa_enabled;
 }
 
 void MoHAARunner::set_vsync_mode(int mode) {
