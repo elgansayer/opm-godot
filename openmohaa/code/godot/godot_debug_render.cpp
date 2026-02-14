@@ -44,6 +44,9 @@ static constexpr float NORMAL_LINE_LENGTH    = 0.1f; /* metres */
 static constexpr float NORMAL_MAX_DISTANCE   = 20.0f; /* metres from camera */
 static constexpr int   MAX_NORMAL_MESHES     = 32;
 static constexpr float BBOX_HALF_SIZE        = 0.5f;  /* default half-extent (metres) */
+static constexpr float BBOX_MIN_THRESHOLD    = 0.05f; /* below this, use MIN_SIZE */
+static constexpr float BBOX_MIN_SIZE         = 0.25f; /* minimum visible half-extent */
+static constexpr int   ESTIMATED_POLYS_PER_ENTITY = 500;
 
 /* ── Static state ── */
 static Node               *s_parent      = nullptr;
@@ -280,7 +283,7 @@ static void update_speeds(float delta) {
           + "/" + String::num_int64(cache_misses)
           + String("  (") + String::num(hit_rate, 1) + "%)\n";
     text += String("Draw calls: ") + String::num_int64(g_render_stats.draw_calls) + "\n";
-    text += String("Polys (est): ") + String::num_int64(ent_count * 500) + "\n";
+    text += String("Polys (est): ") + String::num_int64(ent_count * ESTIMATED_POLYS_PER_ENTITY) + "\n";
 
     s_stats_label->set_text(text);
 }
@@ -389,7 +392,7 @@ static void update_showbbox(void) {
 
         Vector3 gpos = id_to_godot(origin);
         float half = BBOX_HALF_SIZE * scale * MOHAA_UNIT_SCALE;
-        if (half < 0.05f) half = 0.25f; /* minimum visible size */
+        if (half < BBOX_MIN_THRESHOLD) half = BBOX_MIN_SIZE;
 
         bool is_dynamic = (frame != 0 || oldframe != 0);
 
