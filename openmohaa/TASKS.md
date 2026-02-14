@@ -2343,3 +2343,48 @@ Audited player movement physics (`bg_pmove.cpp`, `bg_slidemove.cpp`, `bg_public.
 - All trace functions (`G_Trace`, `G_SightTrace`, `G_TraceEntities`) use the `gi` interface which bridges to the server's `SV_Trace` (collision detection via BSP/CM system)
 - `g_entities[]` array indexing for trace results is bounds-safe (ENTITYNUM_NONE check)
 - The `gi_Malloc_Safe`/`gi_Free_Safe` wrappers in `g_main.h` are not needed in the damage pipeline (no allocator calls in hot damage path)
+
+## Phase 91: Game Mode Audit ✅
+
+Audited game mode initialisation, round logic, scoring, warmup, and intermission for all multiplayer modes (FFA, TDM, Team Rounds, Objective, TOW, Liberation). Created accessor layer so `MoHAARunner.cpp` can query game mode state without including fgame headers.
+
+### Audit findings
+
+**Game type initialisation (`g_main.cpp`, `gamecvars.cpp`):**
+- `g_gametype` cvar maps: 0=SP, 1=FFA, 2=TDM, 3=TeamRounds, 4=Objective, 5=TOW, 6=Liberation
+- `G_InitGame()` allocates entity pool, initialises DM manager via `level.SpawnEntities()` for multiplayer modes
+- Entity spawn filtering by game type handled in `g_spawn.cpp` (notfree/notteam/notsingle spawnflags)
+
+**FFA (Free For All):**
+- Spawns at `info_player_deathmatch`; no team assignment
+- Scoring via `fraglimit` cvar; kills tracked per-player in FFA team
+
+**TDM (Team Deathmatch):**
+- Team selection: Allies/Axis/Auto via `DM_Manager::JoinTeam()`
+- Team spawn points: `info_player_allied` / `info_player_axis`
+- Friendly fire controlled by `g_teamdamage` cvar
+
+**Round-based modes (TeamRounds, Objective, TOW, Liberation):**
+- `DM_Manager::m_bRoundBasedGame` flag set during `InitGame()`
+- Round lifecycle: `StartRound()` → `m_bRoundActive=true` → `CheckEndMatch()` → `EndRound()`
+- Warmup: `g_warmup` cvar (default 20s), `CS_WARMUP` configstring set via `GetMatchStartTime()`
+- Score limits: `roundlimit` cvar for round-based; `fraglimit` for FFA/TDM
+
+**Intermission:**
+- `level.intermissiontime` set when match ends
+- `g_maxintermission` controls duration before next map
+
+### Files created
+- `code/godot/godot_game_modes.h` — C-linkage accessor declarations
+- `code/godot/godot_game_modes.cpp` — Accessor implementations (7 functions)
+
+### Accessor API
+| Function | Returns |
+|----------|---------|
+| `Godot_GameMode_GetType()` | `g_gametype` cvar value (0–6) |
+| `Godot_GameMode_GetRoundState()` | 0=inactive, 1=warmup, 2=active, 3=intermission |
+| `Godot_GameMode_GetScoreLimit()` | `fraglimit` or `roundlimit` depending on mode |
+| `Godot_GameMode_GetTimeLimit()` | `timelimit` cvar value (minutes) |
+| `Godot_GameMode_GetTeamScore(team)` | Team win count (0=allies, 1=axis) |
+| `Godot_GameMode_IsWarmup()` | 1 if warmup/pre-round period is active |
+| `Godot_GameMode_GetPlayerCount()` | Number of active players in DM manager |
