@@ -1871,3 +1871,29 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 4. **In `check_world_load()`:** Call `Godot_UI_OnMapLoad()` when a new map load is detected — activates the `GODOT_UI_LOADING` state.
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
+
+## Phase 241: Animation Blending ✅
+
+- [x] **Task 241.1:** Audit existing CPU skinning pipeline (`godot_skel_model_accessors.cpp`) — confirmed that `Godot_Skel_PrepareBones()` correctly passes all 16 `frameInfo[]` channels and `actionWeight` through to `ri.TIKI_SetPoseInternal()`, which performs multi-channel blending internally.
+- [x] **Task 241.2:** Create `godot_anim_blend.h` — public API with `AnimBlendInput` struct (frame indices, weights, times, action_weight, active channel count, per-group weight sums) and `AnimBlendValidation` struct (diagnostic output).
+- [x] **Task 241.3:** Create `godot_anim_blend.cpp` — implementation of extraction, validation, bone computation wrapper, and debug logging helpers.
+- [x] **Task 241.4:** `Godot_AnimBlend_ExtractFromEntity()` reads entity buffer via `Godot_Renderer_GetEntityAnim()`, splits channels into group A (0–7, action/upper body) and group B (8–15, legs/movement), and computes per-group weight sums.
+- [x] **Task 241.5:** `Godot_AnimBlend_Validate()` checks weight sanity: at least one active channel, actionWeight in [0,1], per-group weight sums ≈ 1.0 (tolerance 0.1).
+- [x] **Task 241.6:** `Godot_AnimBlend_ComputeBones()` convenience wrapper reconstructs `frameInfo_t[]` from `AnimBlendInput`, delegates to `Godot_Skel_PrepareBones()` (engine-internal blending), and copies result to caller buffer.
+- [x] **Task 241.7:** `Godot_AnimBlend_DebugLogEntity()` logs per-channel state and validation results via `Com_Printf` for runtime debugging.
+
+### Key technical details (Phase 241):
+- MOHAA uses `MAX_FRAMEINFOS` = 16 channels (not 4), split at `FRAMEINFO_BLEND` = 8 into action (group A) and movement (group B) groups.
+- `actionWeight` blends group A vs group B: 0.0 = all action, 1.0 = all movement.
+- The engine's skeletor (`ri.TIKI_SetPoseInternal`) already performs correct weighted blending of all channels internally — no Godot-side quaternion blending is needed.
+- `Godot_Skel_PrepareBones()` correctly delegates the full `frameInfo[16]` array and `actionWeight` to the engine; bone cache output already reflects multi-channel blended transforms.
+- Vertex skinning in `Godot_Skel_SkinSurface()` correctly applies per-vertex bone weights from the blended bone cache.
+
+### Verification findings (Phase 241):
+- All 16 frameInfo channels are captured by `GR_AddRefEntityToScene()` via `memcpy(ge->frameInfo, re->frameInfo, sizeof(ge->frameInfo))`.
+- `Godot_Renderer_GetEntityAnim()` exposes the full `frameInfo[MAX_FRAMEINFOS]` to the Godot layer.
+- No fixes required in `godot_skel_model_accessors.cpp` — the existing pipeline is correct.
+
+### Files created (Phase 241):
+- `code/godot/godot_anim_blend.h` — public API (AnimBlendInput, AnimBlendValidation, 5 exported functions)
+- `code/godot/godot_anim_blend.cpp` — implementation (extraction, validation, bone computation, debug logging)
