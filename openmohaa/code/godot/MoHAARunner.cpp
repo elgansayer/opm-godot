@@ -602,8 +602,10 @@ void MoHAARunner::check_world_load() {
             static_model_root = nullptr;  // child of bsp_map_node, freed with it
             loaded_bsp_name = "";
             GodotSkelModelCache::get().clear();  // Invalidate model cache
-            skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
-            tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+#ifdef HAS_MESH_CACHE_MODULE
+            Godot_MeshCache::get().clear();       // Phase 60: Clear skinned mesh cache
+            Godot_MaterialCache::get().clear();    // Phase 61: Clear tinted material cache
+#endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -620,6 +622,10 @@ void MoHAARunner::check_world_load() {
         bsp_map_node->queue_free();
         bsp_map_node = nullptr;
         Godot_BSP_Unload();
+#ifdef HAS_MESH_CACHE_MODULE
+        Godot_MeshCache::get().clear();
+        Godot_MaterialCache::get().clear();
+#endif
     }
 
     // Load new BSP geometry
@@ -1279,6 +1285,9 @@ void MoHAARunner::update_entities() {
         int modType = Godot_Model_GetType(hModel);
 
         if (modType == 1 /* GR_MOD_BRUSH */) {
+#ifdef HAS_MESH_CACHE_MODULE
+            g_render_stats.entities_static++;
+#endif
             // ── Brush model (door, mover, platform, etc.) ──
             // Extract submodel number from name (e.g. "*5" → 5)
             const char *modName = Godot_Model_GetName(hModel);
@@ -1299,6 +1308,9 @@ void MoHAARunner::update_entities() {
             }
         } else {
             // ── Skeletal (TIKI) model ──
+#ifdef HAS_MESH_CACHE_MODULE
+            g_render_stats.entities_skeletal++;
+#endif
             const GodotSkelModelCache::CachedModel *cached =
                 GodotSkelModelCache::get().get_model(hModel);
 
@@ -1387,29 +1399,31 @@ void MoHAARunner::update_entities() {
                 }
 
                 if (has_anim && tikiPtr) {
-                    // Phase 60: Compute FNV-1a hash of animation state to
-                    // skip mesh rebuild when the pose hasn't changed.
-                    uint64_t anim_hash = 14695981039346656037ULL;
-                    auto fnv_bytes = [&anim_hash](const void *p, size_t n) {
-                        const unsigned char *b = (const unsigned char *)p;
-                        for (size_t j = 0; j < n; j++) {
-                            anim_hash ^= b[j];
-                            anim_hash *= 1099511628211ULL;
-                        }
-                    };
-                    fnv_bytes(frameInfoBuf, sizeof(frameInfoBuf));
-                    fnv_bytes(boneTagBuf, sizeof(boneTagBuf));
-                    fnv_bytes(boneQuatBuf, sizeof(boneQuatBuf));
-                    fnv_bytes(&actionWeight, sizeof(actionWeight));
-                    fnv_bytes(&hModel, sizeof(hModel));
+#ifdef HAS_MESH_CACHE_MODULE
+                    // Phase 60: Build EntityMeshCacheKey from animation state
+                    EntityMeshCacheKey mesh_key;
+                    memset(&mesh_key, 0, sizeof(mesh_key));
+                    mesh_key.hModel = hModel;
+                    mesh_key.lodLevel = 0;
+                    // Fill frame slots from frameInfoBuf (index, weight, time)
+                    // frameInfoBuf holds up to 16 frameInfo_t entries; we use first 4.
+                    const float *fi_floats = reinterpret_cast<const float *>(frameInfoBuf);
+                    for (int f = 0; f < 4; f++) {
+                        // Each frameInfo_t: int index, float weight, float time (+ padding)
+                        const int *fi_ints = reinterpret_cast<const int *>(frameInfoBuf) + f * 4;
+                        mesh_key.frames[f].index  = fi_ints[0];
+                        mesh_key.frames[f].weight = fi_floats[f * 4 + 1];
+                        mesh_key.frames[f].time   = fi_floats[f * 4 + 2];
+                    }
 
-                    // Check cache: if animation state unchanged, reuse mesh
-                    auto cache_it = skel_mesh_cache.find(entNum);
-                    if (cache_it != skel_mesh_cache.end() &&
-                        cache_it->second.anim_hash == anim_hash &&
-                        cache_it->second.mesh != nullptr) {
-                        skinned_mesh = cache_it->second.mesh;
+                    const EntityMeshCacheEntry *cached_entry =
+                        Godot_MeshCache::get().lookup(mesh_key, frame_counter_);
+                    if (cached_entry && cached_entry->mesh.is_valid()) {
+                        skinned_mesh = cached_entry->mesh;
+                        g_render_stats.mesh_cache_hits++;
                     } else {
+                        g_render_stats.mesh_cache_misses++;
+#endif // HAS_MESH_CACHE_MODULE
                         int boneCount = 0;
                         void *boneCache = Godot_Skel_PrepareBones(
                             tikiPtr, entNum,
@@ -1512,14 +1526,18 @@ void MoHAARunner::update_entities() {
                             ::free(boneCache);
                         }
 
-                        // Phase 60: Cache the newly built skinned mesh
+#ifdef HAS_MESH_CACHE_MODULE
+                        // Phase 60: Store the newly built skinned mesh in singleton cache
                         if (skinned_mesh.is_valid() && skinned_mesh->get_surface_count() > 0) {
-                            auto &entry = skel_mesh_cache[entNum];
-                            entry.anim_hash = anim_hash;
-                            entry.mesh = skinned_mesh;
-                            entry.mesh_surfaces = skinned_mesh->get_surface_count();
+                            std::vector<String> surf_shaders;
+                            for (int s = 0; s < (int)cached->surfaces.size(); s++) {
+                                surf_shaders.push_back(cached->surfaces[s].shader_name);
+                            }
+                            Godot_MeshCache::get().store(mesh_key, skinned_mesh,
+                                                         surf_shaders, frame_counter_);
                         }
                     }  // end else (cache miss)
+#endif // HAS_MESH_CACHE_MODULE
                 }
 
                 // Use skinned mesh if available, else cached bind pose
@@ -1653,32 +1671,33 @@ void MoHAARunner::update_entities() {
         if (has_tint || has_alpha || has_light_tint) {
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
-                // Phase 61: Quantise light to 4-bit and combine with RGBA for cache key
-                uint8_t lr = (uint8_t)(light_mul.r * 15.0f + 0.5f);
-                uint8_t lg = (uint8_t)(light_mul.g * 15.0f + 0.5f);
-                uint8_t lb = (uint8_t)(light_mul.b * 15.0f + 0.5f);
-                uint32_t light_q = ((uint32_t)lr << 8) | ((uint32_t)lg << 4) | lb;
-
                 Color tint(rgba[0] / 255.0f, rgba[1] / 255.0f,
                            rgba[2] / 255.0f, rgba[3] / 255.0f);
                 int sc = mesh->get_surface_count();
                 for (int s = 0; s < sc; s++) {
-                    // Build tinted material cache key:
-                    //   hModel(16b) | surfIdx(4b) | rgba_q(16b=4×4b) | light_q(12b) = 48 bits
-                    uint8_t rq = rgba[0] >> 4, gq = rgba[1] >> 4;
-                    uint8_t bq = rgba[2] >> 4, aq = rgba[3] >> 4;
-                    uint64_t tint_key = ((uint64_t)(hModel & 0xFFFF) << 32) |
-                                        ((uint64_t)(s & 0xF) << 28) |
-                                        ((uint64_t)rq << 24) |
-                                        ((uint64_t)gq << 20) |
-                                        ((uint64_t)bq << 16) |
-                                        ((uint64_t)aq << 12) |
-                                        (uint64_t)(light_q & 0xFFF);
+#ifdef HAS_MESH_CACHE_MODULE
+                    // Phase 61: Build MaterialCacheKey for singleton cache lookup
+                    // Quantise light into the RGBA bytes to capture lighting in the key
+                    uint8_t lr = (uint8_t)(light_mul.r * 15.0f + 0.5f);
+                    uint8_t lg = (uint8_t)(light_mul.g * 15.0f + 0.5f);
+                    uint8_t lb = (uint8_t)(light_mul.b * 15.0f + 0.5f);
+                    MaterialCacheKey mat_key;
+                    // Encode hModel + surface index into shader_handle for uniqueness
+                    mat_key.shader_handle = (hModel << 4) | (s & 0xF);
+                    mat_key.rgba[0] = (rgba[0] >> 4) | (lr << 4);
+                    mat_key.rgba[1] = (rgba[1] >> 4) | (lg << 4);
+                    mat_key.rgba[2] = (rgba[2] >> 4) | (lb << 4);
+                    mat_key.rgba[3] = rgba[3] >> 4;
+                    mat_key.blend_mode = has_alpha ? 1 : 0;
 
-                    auto tint_it = tinted_mat_cache.find(tint_key);
-                    if (tint_it != tinted_mat_cache.end()) {
-                        mi->set_surface_override_material(s, tint_it->second);
+                    Ref<Material> cached_mat =
+                        Godot_MaterialCache::get().lookup(mat_key, frame_counter_);
+                    if (cached_mat.is_valid()) {
+                        mi->set_surface_override_material(s, cached_mat);
+                        g_render_stats.material_cache_hits++;
                     } else {
+                        g_render_stats.material_cache_misses++;
+#endif // HAS_MESH_CACHE_MODULE
                         Ref<Material> base_mat = mi->get_surface_override_material(s);
                         if (base_mat.is_null())
                             base_mat = mesh->surface_get_material(s);
@@ -1694,15 +1713,23 @@ void MoHAARunner::update_entities() {
                             if (has_alpha) {
                                 dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
                             }
-                            tinted_mat_cache[tint_key] = dup;
+#ifdef HAS_MESH_CACHE_MODULE
+                            Godot_MaterialCache::get().store(mat_key, dup, frame_counter_);
+#endif
                             mi->set_surface_override_material(s, dup);
                         }
+#ifdef HAS_MESH_CACHE_MODULE
                     }
+#endif
                 }
             }
         }
 
         mi->set_visible(true);
+#ifdef HAS_MESH_CACHE_MODULE
+        g_render_stats.entities_rendered++;
+        g_render_stats.draw_calls++;
+#endif
         entity_cache_keys[i] = key;
     }
 
@@ -3294,6 +3321,12 @@ void MoHAARunner::_process(double delta) {
     Com_Frame();
     godot_jmpbuf_valid = false;
 
+#ifdef HAS_MESH_CACHE_MODULE
+    // Phase 85: Begin render stats for this frame
+    Godot_RenderStats_BeginFrame();
+    frame_counter_++;
+#endif
+
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
 
@@ -3329,6 +3362,13 @@ void MoHAARunner::_process(double delta) {
 #endif
 #ifdef HAS_DEBUG_RENDER_MODULE
     Godot_DebugRender_Update(delta);
+#endif
+
+#ifdef HAS_MESH_CACHE_MODULE
+    // Phase 60/61: Evict stale cache entries and end render stats
+    Godot_MeshCache::get().evict_stale(frame_counter_);
+    Godot_MaterialCache::get().evict_stale(frame_counter_);
+    Godot_RenderStats_EndFrame();
 #endif
 
     // ── Update game flow state machine (Phase 261) ──
