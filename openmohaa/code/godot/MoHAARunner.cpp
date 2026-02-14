@@ -604,6 +604,9 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+#ifdef HAS_SHADER_MATERIAL_MODULE
+            Godot_Shader_ClearCache();            // Release cached ShaderMaterial shaders
+#endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -620,6 +623,9 @@ void MoHAARunner::check_world_load() {
         bsp_map_node->queue_free();
         bsp_map_node = nullptr;
         Godot_BSP_Unload();
+#ifdef HAS_SHADER_MATERIAL_MODULE
+        Godot_Shader_ClearCache();
+#endif
     }
 
     // Load new BSP geometry
