@@ -2564,3 +2564,14 @@ Full integration of all standalone agent modules into MoHAARunner.cpp.
 
 ### Files modified (Phase 262):
 - `code/godot/MoHAARunner.cpp` — added save accessor extern declarations, F5/F9 key handlers, moved HUD toggle to F10
+
+## Phase 264: Settings Accessors (Cvar/Keybind Bridge) ✅
+
+Created a C accessor layer (`code/godot/godot_settings_accessors.c/.h`) that exposes the engine's cvar-based settings system to Godot. GDScript can now read/write all player-configurable settings:
+
+- **Generic cvar access:** `Godot_Settings_GetFloat`, `Godot_Settings_GetInt`, `Godot_Settings_GetString`, `Godot_Settings_Set` — thin wrappers around `Cvar_FindVar` / `Cvar_Set`.
+- **Audio:** `Godot_Settings_GetMasterVolume` / `SetMasterVolume` (`s_volume`), `GetMusicVolume` / `SetMusicVolume` (`s_musicvolume`).
+- **Video:** `Godot_Settings_GetTextureQuality` / `SetTextureQuality` (`r_picmip`).
+- **Network:** `Godot_Settings_GetRate` / `SetRate` (`rate`).
+- **Key bindings:** `Godot_Settings_BindKey` / `GetKeyBinding` — delegates to `Key_SetBinding` / `Key_GetBinding`.
+- **Config persistence:** `Godot_Settings_WriteConfig` — appends `writeconfig mohaaconfig.cfg` to the command buffer.
