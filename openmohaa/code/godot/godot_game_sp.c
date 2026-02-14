@@ -84,9 +84,6 @@ int Godot_SP_CanSave(void)
     if (sv.state != SS_GAME) {
         return 0;
     }
-    if (sv.state == SS_LOADING || sv.state == SS_LOADING2) {
-        return 0;
-    }
     if (g_gametype && g_gametype->integer != GT_SINGLE_PLAYER) {
         return 0;
     }
