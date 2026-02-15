@@ -2077,7 +2077,7 @@ void MoHAARunner::update_entities() {
                         }
                     }
 
-                    // Build modulation color
+                    // Build modulation color (entity color + wave animation)
                     Color entity_tint(1.0f, 1.0f, 1.0f, 1.0f);
                     bool has_entity_tint = false;
 
@@ -2099,6 +2099,26 @@ void MoHAARunner::update_entities() {
                     } else if (apply_alpha_one_minus_entity) {
                         entity_tint.a = (255 - rgba[3]) / 255.0f;
                         has_entity_tint = true;
+                    }
+
+                    // Phase 135: Apply rgbGen/alphaGen wave animation (pulsing color/alpha effects)
+                    // Mirrors update_shader_animations() wave logic but applied per-entity
+                    if (sp) {
+                        if (sp->rgbgen_type == 2) { // wave
+                            float wave_val = sp->rgbgen_wave_base +
+                                           sp->rgbgen_wave_amp * sinf((float)(shader_anim_time * sp->rgbgen_wave_freq + sp->rgbgen_wave_phase));
+                            wave_val = clamp01(wave_val);
+                            entity_tint.r *= wave_val;
+                            entity_tint.g *= wave_val;
+                            entity_tint.b *= wave_val;
+                            has_entity_tint = true;
+                        }
+                        if (sp->alphagen_type == 2) { // wave
+                            float alpha_wave = sp->alphagen_wave_base +
+                                             sp->alphagen_wave_amp * sinf((float)(shader_anim_time * sp->alphagen_wave_freq + sp->alphagen_wave_phase));
+                            entity_tint.a *= clamp01(alpha_wave);
+                            has_entity_tint = true;
+                        }
                     }
 
                     // Skip if no modulation needed

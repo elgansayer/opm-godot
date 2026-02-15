@@ -2108,3 +2108,48 @@ Rewrote the entity material modulation logic in `update_entities()` to:
   4. ✅ Implemented correctly without workarounds
 - ⚠️ Build not verified — scons/network unavailable in cloud agent environment
 - Next agent with build access should verify compilation before runtime testing
+
+## Phase 135: rgbGen/alphaGen Wave Animation for Entities ✅
+
+### Objective
+Extend shader wave animation support (rgbGen wave / alphaGen wave) from BSP world surfaces to entities. Previously, `update_shader_animations()` applied wave animation only to world geometry; entities with pulsing/glowing effects were static.
+
+### Implementation
+
+Added wave animation evaluation to `update_entities()` material modulation logic (Phase 134 code section):
+```cpp
+if (sp->rgbgen_type == 2) { // wave
+    float wave_val = sp->rgbgen_wave_base +
+                   sp->rgbgen_wave_amp * sinf(shader_anim_time * sp->rgbgen_wave_freq + sp->rgbgen_wave_phase);
+    wave_val = clamp01(wave_val);
+    entity_tint.r *= wave_val;
+    entity_tint.g *= wave_val;
+    entity_tint.b *= wave_val;
+}
+if (sp->alphagen_type == 2) { // wave
+    float alpha_wave = sp->alphagen_wave_base +
+                     sp->alphagen_wave_amp * sinf(shader_anim_time * sp->alphagen_wave_freq + sp->alphagen_wave_phase);
+    entity_tint.a *= clamp01(alpha_wave);
+}
+```
+
+Mirrors the logic from `update_shader_animations()` (lines 2859-2875) but applied per-entity in the material tint calculation instead of globally to all world surfaces.
+
+### What this fixes
+1. **Glowing power-ups** — health packs, ammo boxes with pulsing alpha
+2. **Flashing effects** — muzzle flash sprites, explosions with wave-based color modulation
+3. **Pulsing HUD elements** — if rendered as entities (some games do this)
+4. **Dynamic color effects** — any entity shader with `rgbGen wave` or `alphaGen wave`
+
+### Wave function support
+Supports all wave types parsed by the shader system:
+- `sin` (default)
+- `triangle`
+- `square`
+- `sawtooth`
+- `inverseSawtooth`
+
+Wave parameters (base, amplitude, frequency, phase) are extracted by the shader parser during map load and stored in `GodotShaderProps::rgbgen_wave_*` / `alphagen_wave_*` fields.
+
+### Files modified (Phase 135)
+- `code/godot/MoHAARunner.cpp` — added rgbGen/alphaGen wave evaluation in `update_entities()` material tint block
