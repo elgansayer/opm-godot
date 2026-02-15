@@ -292,6 +292,7 @@ cgame_env.Append(CPPPATH=[
 
 cgame_env.Append(CPPDEFINES=[
     "CGAME_DLL",
+    "GODOT_GDEXTENSION",
 ])
 
 # Use a separate build directory so SCons doesn't conflict with the main build

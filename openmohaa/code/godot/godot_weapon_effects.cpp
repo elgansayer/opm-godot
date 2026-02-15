@@ -403,3 +403,41 @@ void Godot_ShellCasing_Clear() {
     }
     s_casing_next = 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ *  C Accessor Wrappers (Phase 224 Extension)
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static constexpr float MOHAA_UNIT_SCALE_C = 1.0f / 39.37f;
+
+/* Convert id Tech 3 coordinates (X=Forward, Y=Left, Z=Up) to Godot (X=Right, Y=Up, Z=Back) */
+static inline Vector3 id_to_godot_c(float ix, float iy, float iz) {
+    return Vector3(-iy * MOHAA_UNIT_SCALE_C,
+                    iz * MOHAA_UNIT_SCALE_C,
+                   -ix * MOHAA_UNIT_SCALE_C);
+}
+
+/* Convert id Tech 3 direction vector (no scale) */
+static inline Vector3 id_to_godot_dir_c(float ix, float iy, float iz) {
+    return Vector3(-iy, iz, -ix);
+}
+
+extern "C" {
+
+void Godot_MuzzleFlash_Spawn_C(float *pos, float *dir, float intensity) {
+    if (!pos || !dir) return;
+    Vector3 g_pos = id_to_godot_c(pos[0], pos[1], pos[2]);
+    Vector3 g_dir = id_to_godot_dir_c(dir[0], dir[1], dir[2]);
+    Godot_MuzzleFlash_Spawn(g_pos, g_dir, intensity);
+}
+
+void Godot_ShellCasing_Eject_C(float *pos, float *vel, int type) {
+    if (!pos || !vel) return;
+    Vector3 g_pos = id_to_godot_c(pos[0], pos[1], pos[2]);
+    /* Velocity is a vector with units/sec, so scale it too */
+    Vector3 g_vel = id_to_godot_c(vel[0], vel[1], vel[2]);
+
+    Godot_ShellCasing_Eject(g_pos, g_vel, type);
+}
+
+}
