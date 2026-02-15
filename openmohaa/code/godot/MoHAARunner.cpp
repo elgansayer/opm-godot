@@ -431,6 +431,9 @@ MoHAARunner::~MoHAARunner() {
 #ifdef HAS_SHADER_MATERIAL_MODULE
     Godot_Shader_ClearCache();
 #endif
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_Shutdown();
+#endif
 
     g_godot_ready = false;
 }
@@ -1402,6 +1405,38 @@ void MoHAARunner::update_entities() {
                 continue;
             }
         }
+
+        // Phase 133: Frustum culling — skip entities entirely outside the view.
+        // First-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) are always
+        // visible because they are the view weapon.
+#ifdef HAS_FRUSTUM_CULL_MODULE
+        if (!(renderfx & 0x06)) {
+            Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+            // Use a conservative bounding sphere (2 m radius ≈ 78 inches,
+            // covers most player-sized entities and props).
+            if (!Godot_FrustumCull_TestSphere(ent_pos, 2.0f)) {
+                mi->set_visible(false);
+                continue;
+            }
+        }
+#endif
+
+        // Phase 133: Draw distance culling — skip entities beyond the far-plane
+        // cull distance when farplane_cull is enabled.
+#ifdef HAS_DRAW_DISTANCE_MODULE
+        if (!(renderfx & 0x06)) {
+            float cull_dist = Godot_DrawDistance_GetCullDistance();
+            if (cull_dist > 0.0f) {
+                Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+                Vector3 cam_pos = camera ? camera->get_global_position() : Vector3();
+                float dist = ent_pos.distance_to(cam_pos);
+                if (dist > cull_dist) {
+                    mi->set_visible(false);
+                    continue;
+                }
+            }
+        }
+#endif
 
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
         if (reType == RT_SPRITE) {
@@ -3734,6 +3769,12 @@ void MoHAARunner::_ready() {
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Init(game_world);
 #endif
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_Init();
+#endif
+#ifdef HAS_DRAW_DISTANCE_MODULE
+    Godot_DrawDistance_Init();
+#endif
 
     UtilityFunctions::print("[MoHAA] Engine initialised.");
 }
@@ -3798,6 +3839,21 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
+
+    // ── Phase 133: Frustum culling — extract planes after camera update ──
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_UpdateCamera(camera);
+#endif
+
+    // ── Phase 133: Draw distance — apply near/far planes and fog from cvars ──
+#ifdef HAS_DRAW_DISTANCE_MODULE
+    if (camera && world_env) {
+        Ref<Environment> dd_env = world_env->get_environment();
+        if (dd_env.is_valid()) {
+            Godot_DrawDistance_Update(camera, dd_env.ptr(), static_cast<float>(delta));
+        }
+    }
+#endif
 
     // ── Sync weapon viewport camera (Phase 62) ──
 #ifdef HAS_WEAPON_VIEWPORT_MODULE

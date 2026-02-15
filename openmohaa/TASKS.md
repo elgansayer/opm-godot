@@ -1971,3 +1971,34 @@ The `spawns[]` table in `g_spawn.cpp` contains entries for `SP_trigger_always`, 
 
 ### Next priority:
 - Full UI parity validation pass for in-game menu flow (`ESC` menu stack, team/weapon selection, and loading/menu background transitions) with runtime command-path checks for `pushmenu`/`showmenu` usage from scripts and UI events.
+
+## Phase 133: Frustum Culling & Draw Distance Integration ✅
+
+- [x] **Task 133.1:** Fixed `Godot_Renderer_GetFarplane` signature mismatch in `godot_draw_distance_accessors.c` — extern declaration had 3 params but actual function in `godot_renderer.c` takes 4 (distance, bias, colour, cull). All three call sites now pass the correct 4-parameter form.
+- [x] **Task 133.2:** Integrated `godot_frustum_cull` module into MoHAARunner:
+  - Added `__has_include` guard and `HAS_FRUSTUM_CULL_MODULE` define in `MoHAARunner.h`
+  - Call `Godot_FrustumCull_Init()` in `_ready()` module init block
+  - Call `Godot_FrustumCull_UpdateCamera(camera)` each frame in `_process()` after camera update
+  - Call `Godot_FrustumCull_Shutdown()` in destructor shutdown block
+  - Added per-entity frustum sphere test in `update_entities()` after PVS culling — entities entirely outside the camera frustum are skipped (set invisible + continue). Uses a conservative 2 m bounding sphere. First-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) bypass the test.
+- [x] **Task 133.3:** Integrated `godot_draw_distance` module into MoHAARunner:
+  - Added `__has_include` guard and `HAS_DRAW_DISTANCE_MODULE` define in `MoHAARunner.h`
+  - Call `Godot_DrawDistance_Init()` in `_ready()` module init block
+  - Call `Godot_DrawDistance_Update(camera, env, delta)` each frame in `_process()` to apply cvar-driven near/far planes and fog
+  - Added per-entity draw distance culling in `update_entities()` — when `farplane_cull` is active and the entity is beyond the cull distance, it is hidden. First-person entities bypass the test.
+
+### Key technical details (Phase 133):
+
+**Bug fix:** `godot_draw_distance_accessors.c` declared `Godot_Renderer_GetFarplane` as `(float*, float*, int*)` but the real function in `godot_renderer.c` is `(float*, float*, float*, int*)` — a 4-parameter function. On x86-64 this likely passed the `color` pointer as `NULL` (correct by coincidence on some calls) but passed undefined stack data for the `cull` pointer on one call. Fixed by adding the missing `bias` parameter to the extern declaration and passing `NULL` for it at each call site.
+
+**Frustum culling architecture:** The `godot_frustum_cull` module (Phase 258) was already fully implemented with 6-plane extraction from the Camera3D view-projection matrix and AABB/sphere visibility tests, but was never wired into the rendering pipeline. This integration calls `UpdateCamera()` once per frame and `TestSphere()` per entity, providing O(1) per-entity culling that eliminates off-screen entity mesh processing.
+
+**Draw distance architecture:** The `godot_draw_distance` module (Phase unknown) maps engine cvars (`r_znear`, `r_zfar`, `cg_farplane`, `cg_farplane_color`, `farplane_cull`) to Godot Camera3D near/far planes and Environment fog. It rate-limits cvar polling to once per second. The entity distance cull uses the same `GetCullDistance()` value (far plane in Godot metres) to skip entities beyond the fog wall.
+
+### Files modified (Phase 133):
+- `code/godot/MoHAARunner.h` — added `HAS_FRUSTUM_CULL_MODULE` and `HAS_DRAW_DISTANCE_MODULE` conditional includes
+- `code/godot/MoHAARunner.cpp` — added init/update/shutdown calls for both modules; added per-entity frustum and distance culling in `update_entities()`
+- `code/godot/godot_draw_distance_accessors.c` — fixed `Godot_Renderer_GetFarplane` extern declaration (3 → 4 params) and all call sites
+
+### Next priority:
+- Music volume synchronisation — `set_audio_volume()` sets engine cvars but does not call `Godot_Music_SetVolume()` to update the playing Godot AudioStreamPlayer volume in real time.
