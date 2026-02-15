@@ -286,7 +286,9 @@ qboolean CL_CDKeyValidate(const char *key, const char *checksum) {
     return qtrue;
 }
 
-// R_ImageExists — referenced by some shared code paths
+// R_ImageExists — Global symbol referenced by some shared code paths.
+// The UI system uses re.ImageExists (= GR_ImageExists from godot_renderer.c)
+// which properly checks VFS.  This stub handles any remaining direct callers.
 qboolean R_ImageExists(const char *name) {
     return qfalse;
 }
@@ -296,9 +298,14 @@ qboolean R_ImageExists(const char *name) {
 //  that is not compiled in the Godot build.
 // ──────────────────────────────────────────────
 
+// Accessor from godot_client_accessors.cpp — returns cl.mousex/cl.mousey
+extern void Godot_Client_GetMousePos(int *, int *);
+
 void IN_GetMousePosition(int *x, int *y) {
-    if (x) *x = 0;
-    if (y) *y = 0;
+    /* Under Godot, cursor position is tracked internally via SE_MOUSE
+       events and accumulated in cl.mousex/cl.mousey.  Return the
+       engine's current position so any callers get sensible values. */
+    Godot_Client_GetMousePos(x, y);
 }
 
 qboolean IN_SetCursorFromImage(const byte *pic, int width, int height, pCursorFree cursorFreeFn) {

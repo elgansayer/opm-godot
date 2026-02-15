@@ -1971,3 +1971,66 @@ The `spawns[]` table in `g_spawn.cpp` contains entries for `SP_trigger_always`, 
 
 ### Next priority:
 - Full UI parity validation pass for in-game menu flow (`ESC` menu stack, team/weapon selection, and loading/menu background transitions) with runtime command-path checks for `pushmenu`/`showmenu` usage from scripts and UI events.
+
+## Phase 133: Full UI/Menu/HUD Parity ✅
+
+### Objective
+Complete menu/UI/HUD parity so the Godot GDExtension port behaves as a 1:1 replacement for OpenMoHAA for all user-facing GUI flows: main menu, ESC in-game menu, team/weapon selection, console, chat, HUD, and all `.urc`-driven menus.
+
+### Issues found and fixed
+
+#### 1. Mouse position clobbering in CL_UpdateMouse (CRITICAL)
+**Root cause:** `CL_UpdateMouse()` (added by OPM in cl_input.cpp) is called every frame from `CL_Frame()`. When `KEYCATCH_UI` is set (menu active), it calls `IN_GetMousePosition(&cl.mousex, &cl.mousey)`. Our Godot stub for `IN_GetMousePosition` returned `(0,0)`, which **reset the UI cursor position to the top-left corner every frame**, making menu interaction impossible.
+
+**Fix:** Added `#ifdef GODOT_GDEXTENSION` guard in `CL_UpdateMouse()` to skip the `IN_GetMousePosition` call. Under Godot, cursor position is tracked via SE_MOUSE events injected from `godot_input_bridge.c` → `CL_MouseEvent()`, which correctly accumulates deltas into `cl.mousex/cl.mousey` when `in_guimouse` is true.
+
+**Upstream function traced:** `CL_MouseEvent()` (cl_input.cpp:435), `IN_GetMousePosition()` (sdl_mouse.c in real engine, stubs.cpp in Godot build).
+
+#### 2. IN_GetMousePosition stub improvement
+**Issue:** `IN_GetMousePosition` always returned `(0,0)`, which could affect any other callers besides `CL_UpdateMouse`.
+
+**Fix:** Changed the stub to delegate to `Godot_Client_GetMousePos()` which returns the actual engine cursor position (`cl.mousex/cl.mousey`). This ensures any code path that reads the mouse position gets the correct values.
+
+#### 3. Duplicate UI_ClearResource stub
+**Issue:** `stubs.cpp` contained an empty `UI_ClearResource()` stub, but `cl_ui.cpp` has the real implementation. With `-z muldefs`, the first definition wins (cl_ui.cpp wins due to link order), so the stub was dead code. Removed it for clarity and to eliminate any risk of link-order changes.
+
+#### 4. Missing Godot wrapper methods
+**Issue:** The engine supports `togglemenu`, `popmenu`, `hidemenu` commands but MoHAARunner only exposed `push_menu` and `show_menu`.
+
+**Fix:** Added:
+- `toggle_menu(menu_name)` → issues `togglemenu <name>`
+- `pop_menu(restore_cvars)` → issues `popmenu <0|1>`
+- `hide_menu(menu_name)` → issues `hidemenu <name>`
+- `is_menu_active()` → queries `Godot_UI_IsMenuActive()`
+
+All methods registered via `ClassDB::bind_method` for GDScript access.
+
+#### 5. Cursor centering on overlay transitions
+**Issue:** When opening a menu (e.g. pressing ESC), the cursor started at whatever position `cl.mousex/cl.mousey` had — often (0,0) on first use, leaving the cursor stuck at the top-left.
+
+**Fix:** In `update_input_routing()`, when transitioning to overlay mode, the engine cursor is set to screen centre via `Godot_Client_SetMousePos(rw/2, rh/2)`.
+
+#### 6. New client accessor functions
+Added to `godot_client_accessors.cpp`:
+- `Godot_Client_SetMousePos(x, y)` — directly set engine UI cursor position
+- `Godot_Client_IsUIStarted()` — check if `CL_InitializeUI()` has completed
+- `Godot_Client_IsMenuUp()` — wraps `UI_MenuUp()` for Godot-side state queries
+
+### UI/Menu architecture summary (for reference)
+
+The complete menu flow is:
+1. **Boot:** `Com_Init()` → `CL_Init()` → `CL_StartHunkUsers()` → `CL_InitializeUI()`
+2. **Init:** `CL_InitializeUI()` loads all `.urc` files from `ui/` via VFS, creates UILayout objects, registers pushmenu/showmenu/etc. commands, creates View3D, health/compass/weapons HUDs
+3. **Rendering:** `SCR_UpdateScreen()` → `UpdateStereoSide()` → `UI_Update()` → engine's window manager renders all UI elements via `re.DrawStretchPic` etc. → captured in 2D command buffer → `update_2d_overlay()` renders on Godot CanvasLayer
+4. **Input:** Godot `_unhandled_input` → `Godot_InjectKeyEvent` → `Com_QueueEvent(SE_KEY)` → `CL_KeyEvent()` → ESC handler / KEYCATCH routing → `UI_KeyEvent` / `UI_MenuEscape`
+5. **Mouse:** SE_MOUSE events → `CL_MouseEvent()` → when `in_guimouse`, accumulates into `cl.mousex/cl.mousey` → `CL_FillUIDef()` copies to `uid.mouseX/Y` → window manager uses for hit testing
+
+### .urc coverage
+`.urc` files are loaded in `CL_InitializeUI()` via `FS_ListFiles("ui/", "urc", ...)` → `new UILayout(path)`. All `.urc` resources from the game's pk3 archives are loaded through the engine's VFS. No Godot-side changes needed for `.urc` support — it works through the existing engine code path.
+
+### Files modified (Phase 133)
+- `code/client/cl_input.cpp` — `CL_UpdateMouse()` guarded with `#ifdef GODOT_GDEXTENSION`
+- `code/godot/stubs.cpp` — removed duplicate `UI_ClearResource`, improved `IN_GetMousePosition`, updated comments
+- `code/godot/godot_client_accessors.cpp` — added `SetMousePos`, `IsUIStarted`, `IsMenuUp` accessors
+- `code/godot/MoHAARunner.cpp` — added `toggle_menu`/`pop_menu`/`hide_menu`/`is_menu_active`, cursor centering, extern declarations
+- `code/godot/MoHAARunner.h` — added method declarations
