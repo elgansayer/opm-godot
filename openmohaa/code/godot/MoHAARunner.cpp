@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <unordered_set>
 #include <setjmp.h>
 
@@ -2177,12 +2178,15 @@ void MoHAARunner::update_polys() {
 
     int poly_count = Godot_Renderer_GetPolyCount();
 
-    // Log poly count once
-    static bool logged_poly_count = false;
-    if (!logged_poly_count && poly_count > 0) {
-        UtilityFunctions::print(String("[MoHAA] Polys in frame: ") +
-                                String::num_int64(poly_count));
-        logged_poly_count = true;
+    // Debug logging for poly activity (once per session + count changes)
+    static int last_logged_count = -1;
+    if (poly_count != last_logged_count) {
+        if (poly_count > 0) {
+            UtilityFunctions::print(String("[MoHAA] Poly count changed: ") +
+                                    String::num_int64(poly_count) +
+                                    " (particles/beams/decals active)");
+        }
+        last_logged_count = poly_count;
     }
 
     if (poly_count == 0 && active_poly_count == 0) return;
@@ -2276,12 +2280,41 @@ void MoHAARunner::update_polys() {
 
         // Try to apply the poly's shader texture and shader properties
         if (hShader > 0) {
+            const char *sn = Godot_Renderer_GetShaderName(hShader);
             Ref<ImageTexture> tex = get_shader_texture(hShader);
+            
+            // Particle effect fallback: if shader name suggests particle/tracer/beam
+            // but texture load failed, use white albedo + additive blending
+            bool is_particle_effect = false;
+            if (sn && sn[0]) {
+                // Check for common particle shader names
+                const char* particle_keywords[] = {
+                    "tracer", "beam", "flare", "glow", "particle",
+                    "flash", "spark", "trail", nullptr
+                };
+                for (int kw = 0; particle_keywords[kw]; kw++) {
+                    if (strstr(sn, particle_keywords[kw])) {
+                        is_particle_effect = true;
+                        break;
+                    }
+                }
+            }
+            
             if (tex.is_valid()) {
                 mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            } else if (is_particle_effect) {
+                // Fallback for particle effects: use vertex colour only, additive blend
+                mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
+                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                // Log fallback once per shader
+                static std::unordered_set<std::string> logged_fallbacks;
+                if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
+                    UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
+                    logged_fallbacks.insert(sn);
+                }
             }
-            // Apply shader properties (additive blending for tracers, etc.)
-            const char *sn = Godot_Renderer_GetShaderName(hShader);
+            
+            // Apply shader properties (additive blending, alpha, etc.)
             if (sn && sn[0]) {
                 apply_shader_props_to_material(mat, sn);
             }
