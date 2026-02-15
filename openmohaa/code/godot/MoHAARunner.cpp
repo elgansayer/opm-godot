@@ -374,6 +374,10 @@ MoHAARunner::MoHAARunner() {
 }
 
 MoHAARunner::~MoHAARunner() {
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    Godot_WeaponViewport::get().destroy();
+#endif
+
     if (initialized) {
         Com_Shutdown();
         /* Mark zone allocator as shut down.  Global C++ destructors
@@ -560,6 +564,17 @@ void MoHAARunner::setup_3d_scene() {
     game_world->add_child(world_env);
 
     UtilityFunctions::print("[MoHAA] 3D scene created (Camera3D + light + environment).");
+
+    // ── Weapon viewport (Phase 62) ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    {
+        Vector2i win_size = DisplayServer::get_singleton()->window_get_size();
+        if (win_size.x < 1 || win_size.y < 1) {
+            win_size = Vector2i(1280, 720);
+        }
+        Godot_WeaponViewport::get().create(this, camera, win_size.x, win_size.y);
+    }
+#endif
 }
 
 // ──────────────────────────────────────────────
@@ -1746,11 +1761,21 @@ void MoHAARunner::update_entities() {
             mi->set_global_transform(Transform3D(basis, pos));
         }
 
-        // ── Phase 15: Depth hack for first-person / depthhack entities ──
-        // These entities (view weapon, damage blobs) must render on top of
-        // world geometry.  We disable depth testing on their materials and
-        // give them a high render priority so they draw last.
+        // ── Phase 62: Weapon viewport for first-person entities ──
+        // Reparent RF_FIRST_PERSON / RF_DEPTHHACK entities into the
+        // weapon SubViewport so they render in a separate pass and
+        // composite on top of the main scene (correct self-occlusion).
         if (is_first_person || is_depthhack) {
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+            Node3D *wp_root = Godot_WeaponViewport::get().get_weapon_root();
+            Node *cur_parent = mi->get_parent();
+            if (wp_root && cur_parent && cur_parent != wp_root) {
+                cur_parent->remove_child(mi);
+                wp_root->add_child(mi);
+            }
+#else
+            // Fallback when weapon viewport is unavailable: disable depth
+            // test so weapons render on top of world geometry.
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
                 int sc = mesh->get_surface_count();
@@ -1761,15 +1786,14 @@ void MoHAARunner::update_entities() {
 
                     Ref<StandardMaterial3D> smat = base_mat;
                     if (smat.is_valid()) {
-                        // Duplicate to avoid modifying the cached original
                         Ref<StandardMaterial3D> dup = smat->duplicate();
                         dup->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
-                        dup->set_render_priority(127);  // max priority → draw last
+                        dup->set_render_priority(127);
                         mi->set_surface_override_material(s, dup);
                     }
                 }
             }
-
+#endif
             // One-time diagnostic
             static bool logged_fp = false;
             if (!logged_fp) {
@@ -1779,6 +1803,15 @@ void MoHAARunner::update_entities() {
                     String(" renderfx=0x") + String::num_int64(renderfx, 16));
                 logged_fp = true;
             }
+        } else {
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+            // Non-weapon entity — ensure it is parented under entity_root
+            Node *cur_parent = mi->get_parent();
+            if (cur_parent && cur_parent != entity_root) {
+                cur_parent->remove_child(mi);
+                entity_root->add_child(mi);
+            }
+#endif
         }
 
         // ── Phase 21+22+268: Entity colour tinting + alpha + entity lighting ──
@@ -3570,6 +3603,11 @@ void MoHAARunner::_process(double delta) {
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
 
+    // ── Sync weapon viewport camera (Phase 62) ──
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    Godot_WeaponViewport::get().sync_camera();
+#endif
+
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
 
@@ -4135,6 +4173,10 @@ void MoHAARunner::set_video_resolution(int width, int height) {
     DisplayServer *ds = DisplayServer::get_singleton();
     if (!ds) return;
     ds->window_set_size(Vector2i(width, height));
+
+#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    Godot_WeaponViewport::get().resize(width, height);
+#endif
 }
 
 void MoHAARunner::set_network_rate(const godot::String &p_preset) {
