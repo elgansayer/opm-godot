@@ -24,6 +24,9 @@
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
+#include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/rendering_server.hpp>
 
 #include <vector>
 #include <unordered_map>
@@ -163,6 +166,14 @@ private:
     bool debug_fog_off = false;     // F5 toggles fog off for debugging
     bool debug_notex = false;       // F8 toggles textures off for debugging
     bool last_ui_cursor_shown = false; // Phase 59: track cursor state for mode transitions
+
+    // Render quality state — cached for getters (0=low, 1=medium, 2=high, 3=ultra)
+    int texture_quality = 2;    // default high
+    int shadow_quality = 2;
+    int geometry_quality = 2;
+    int effects_quality = 2;
+    int msaa_level = 0;         // 0=disabled, 1=2x, 2=4x, 3=8x
+    bool fxaa_enabled = false;
 
     // 3D scene nodes (Phase 7a — camera bridge)
     Node3D *game_world = nullptr;            // Root for all 3D content
@@ -380,6 +391,30 @@ public:
     void set_video_fullscreen(bool fullscreen);
     void set_video_resolution(int width, int height);
     void set_network_rate(const String &p_preset);
+
+    // Render quality settings
+    void set_render_quality(const String &p_preset);
+
+    void set_texture_quality(int level);
+    int get_texture_quality() const;
+
+    void set_shadow_quality(int level);
+    int get_shadow_quality() const;
+
+    void set_geometry_quality(int level);
+    int get_geometry_quality() const;
+
+    void set_effects_quality(int level);
+    int get_effects_quality() const;
+
+    void set_msaa(int level);
+    int get_msaa() const;
+
+    void set_fxaa_enabled(bool enabled);
+    bool is_fxaa_enabled() const;
+
+    void set_vsync_mode(int mode);
+    int get_vsync_mode() const;
 
     // Main menu control (Phase 261)
     void open_main_menu();

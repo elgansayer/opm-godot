@@ -55,6 +55,11 @@ extern "C" {
     void Cbuf_AddText(const char *text);
     void Cbuf_ExecuteText(int exec_when, const char *text);
 
+    // Console variable access
+    float Cvar_VariableValue(const char *var_name);
+    int   Cvar_VariableIntegerValue(const char *var_name);
+    void  Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
+
     // Server state — from server.h (we only read these, never write)
     // serverState_t enum: SS_DEAD=0, SS_LOADING=1, SS_LOADING2=2, SS_GAME=3
     typedef struct {
@@ -473,6 +478,30 @@ void MoHAARunner::_bind_methods() {
     godot::ClassDB::bind_method(godot::D_METHOD("set_video_resolution", "width", "height"), &MoHAARunner::set_video_resolution);
     godot::ClassDB::bind_method(godot::D_METHOD("set_network_rate", "preset"), &MoHAARunner::set_network_rate);
 
+    // Render quality settings
+    godot::ClassDB::bind_method(godot::D_METHOD("set_render_quality", "preset"), &MoHAARunner::set_render_quality);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_texture_quality", "level"), &MoHAARunner::set_texture_quality);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_texture_quality"), &MoHAARunner::get_texture_quality);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_shadow_quality", "level"), &MoHAARunner::set_shadow_quality);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_shadow_quality"), &MoHAARunner::get_shadow_quality);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_geometry_quality", "level"), &MoHAARunner::set_geometry_quality);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_geometry_quality"), &MoHAARunner::get_geometry_quality);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_effects_quality", "level"), &MoHAARunner::set_effects_quality);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_effects_quality"), &MoHAARunner::get_effects_quality);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_msaa", "level"), &MoHAARunner::set_msaa);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_msaa"), &MoHAARunner::get_msaa);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_fxaa_enabled", "enabled"), &MoHAARunner::set_fxaa_enabled);
+    godot::ClassDB::bind_method(godot::D_METHOD("is_fxaa_enabled"), &MoHAARunner::is_fxaa_enabled);
+
+    godot::ClassDB::bind_method(godot::D_METHOD("set_vsync_mode", "mode"), &MoHAARunner::set_vsync_mode);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_vsync_mode"), &MoHAARunner::get_vsync_mode);
+
     // Menu control (Phase 261)
     godot::ClassDB::bind_method(godot::D_METHOD("open_main_menu"), &MoHAARunner::open_main_menu);
     godot::ClassDB::bind_method(godot::D_METHOD("close_menu"), &MoHAARunner::close_menu);
@@ -482,12 +511,23 @@ void MoHAARunner::_bind_methods() {
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::STRING, "startup_args"), "set_startup_args", "get_startup_args");
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::BOOL, "hud_visible"), "set_hud_visible", "is_hud_visible");
 
+    // Render quality properties (0=Low, 1=Medium, 2=High, 3=Ultra)
+    ADD_GROUP("Render Quality", "render_");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_texture_quality", godot::PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_texture_quality", "get_texture_quality");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_shadow_quality", godot::PROPERTY_HINT_ENUM, "Off,Low,Medium,High"), "set_shadow_quality", "get_shadow_quality");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_geometry_quality", godot::PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_geometry_quality", "get_geometry_quality");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_effects_quality", godot::PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_effects_quality", "get_effects_quality");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_msaa", godot::PROPERTY_HINT_ENUM, "Disabled,2x,4x,8x"), "set_msaa", "get_msaa");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::BOOL, "render_fxaa"), "set_fxaa_enabled", "is_fxaa_enabled");
+    ADD_PROPERTY(godot::PropertyInfo(godot::Variant::INT, "render_vsync_mode", godot::PROPERTY_HINT_ENUM, "Disabled,Enabled,Adaptive,Mailbox"), "set_vsync_mode", "get_vsync_mode");
+
     // Signals (Task 2.5.4)
     ADD_SIGNAL(godot::MethodInfo("engine_error", godot::PropertyInfo(godot::Variant::STRING, "message")));
     ADD_SIGNAL(godot::MethodInfo("map_loaded", godot::PropertyInfo(godot::Variant::STRING, "map_name")));
     ADD_SIGNAL(godot::MethodInfo("map_unloaded"));
     ADD_SIGNAL(godot::MethodInfo("engine_shutdown_requested"));
     ADD_SIGNAL(godot::MethodInfo("game_flow_state_changed", godot::PropertyInfo(godot::Variant::INT, "new_state")));
+    ADD_SIGNAL(godot::MethodInfo("render_quality_changed", godot::PropertyInfo(godot::Variant::STRING, "setting"), godot::PropertyInfo(godot::Variant::INT, "level")));
 }
 
 bool MoHAARunner::is_engine_initialized() const {
@@ -4194,6 +4234,219 @@ void MoHAARunner::set_network_rate(const godot::String &p_preset) {
     } else if (strcmp(p, "lan") == 0) {
         Cbuf_AddText("set rate 25000\nset snaps 40\nset cl_maxpackets 42\n");
     }
+}
+
+// ──────────────────────────────────────────────
+//  Render quality settings
+// ──────────────────────────────────────────────
+
+void MoHAARunner::set_render_quality(const godot::String &p_preset) {
+    godot::CharString preset = p_preset.utf8();
+    const char *p = preset.get_data();
+
+    if (strcmp(p, "low") == 0) {
+        set_texture_quality(0);
+        set_shadow_quality(0);
+        set_geometry_quality(0);
+        set_effects_quality(0);
+        set_msaa(0);
+        set_fxaa_enabled(false);
+    } else if (strcmp(p, "medium") == 0) {
+        set_texture_quality(1);
+        set_shadow_quality(1);
+        set_geometry_quality(1);
+        set_effects_quality(1);
+        set_msaa(0);
+        set_fxaa_enabled(true);
+    } else if (strcmp(p, "high") == 0) {
+        set_texture_quality(2);
+        set_shadow_quality(2);
+        set_geometry_quality(2);
+        set_effects_quality(2);
+        set_msaa(1);
+        set_fxaa_enabled(false);
+    } else if (strcmp(p, "ultra") == 0) {
+        set_texture_quality(3);
+        set_shadow_quality(3);
+        set_geometry_quality(3);
+        set_effects_quality(3);
+        set_msaa(2);
+        set_fxaa_enabled(false);
+    } else {
+        UtilityFunctions::push_warning("[MoHAA] Unknown render quality preset: ", p_preset);
+    }
+}
+
+void MoHAARunner::set_texture_quality(int level) {
+    level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    texture_quality = level;
+
+    if (initialized) {
+        // r_picmip: 0=full, 1=half, 2=quarter, 3=eighth — invert from quality
+        int picmip = 3 - level;
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "set r_picmip %d\n", picmip);
+        Cbuf_AddText(cmd);
+    }
+
+    emit_signal("render_quality_changed", "texture_quality", level);
+}
+
+int MoHAARunner::get_texture_quality() const {
+    return texture_quality;
+}
+
+void MoHAARunner::set_shadow_quality(int level) {
+    level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    shadow_quality = level;
+
+    // Godot-side: configure sun shadow mode and atlas size
+    if (sun_light) {
+        if (level == 0) {
+            // Off — disable shadow casting
+            sun_light->set_shadow(false);
+        } else {
+            sun_light->set_shadow(true);
+            if (level == 1) {
+                sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_ORTHOGONAL);
+            } else if (level == 2) {
+                sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_2_SPLITS);
+            } else {
+                sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
+            }
+        }
+    }
+
+    // Godot-side: shadow atlas size via RenderingServer
+    RenderingServer *rs = RenderingServer::get_singleton();
+    if (rs) {
+        // 512 / 1024 / 2048 / 4096 for off/low/medium/high
+        int atlas_sizes[] = { 512, 1024, 2048, 4096 };
+        rs->directional_shadow_atlas_set_size(atlas_sizes[level], level < 2);
+    }
+
+    emit_signal("render_quality_changed", "shadow_quality", level);
+}
+
+int MoHAARunner::get_shadow_quality() const {
+    return shadow_quality;
+}
+
+void MoHAARunner::set_geometry_quality(int level) {
+    level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    geometry_quality = level;
+
+    if (initialized) {
+        // r_subdivisions: lower = more tessellation. 16/8/4/2 for low→ultra
+        int subdivs[] = { 16, 8, 4, 2 };
+        // r_lodBias: positive = further LOD switch. 2/1/0/0 for low→ultra
+        int lodbias[] = { 2, 1, 0, 0 };
+        // ter_maxlod: terrain LOD (higher = coarser). 6/4/2/0 for low→ultra
+        int termaxlod[] = { 6, 4, 2, 0 };
+
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "set r_subdivisions %d\nset r_lodBias %d\nset ter_maxlod %d\n",
+                 subdivs[level], lodbias[level], termaxlod[level]);
+        Cbuf_AddText(cmd);
+    }
+
+    emit_signal("render_quality_changed", "geometry_quality", level);
+}
+
+int MoHAARunner::get_geometry_quality() const {
+    return geometry_quality;
+}
+
+void MoHAARunner::set_effects_quality(int level) {
+    level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    effects_quality = level;
+
+    if (initialized) {
+        // r_detailTextures: 0=off for low, 1=on otherwise
+        int detail = (level > 0) ? 1 : 0;
+        // r_fastsky: 1=skip sky for low, 0=render sky otherwise
+        int fastsky = (level == 0) ? 1 : 0;
+        // r_drawmarks: 0=off for low, 1=on otherwise (decals/bullet holes)
+        int drawmarks = (level > 0) ? 1 : 0;
+
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "set r_detailTextures %d\nset r_fastsky %d\nset r_drawmarks %d\n",
+                 detail, fastsky, drawmarks);
+        Cbuf_AddText(cmd);
+    }
+
+    // Godot-side: SSAO for high/ultra
+    if (world_env) {
+        Ref<Environment> env = world_env->get_environment();
+        if (env.is_valid()) {
+            env->set_ssao_enabled(level >= 2);
+            if (level >= 2) {
+                env->set_ssao_radius(level >= 3 ? 2.0f : 1.0f);
+                env->set_ssao_intensity(level >= 3 ? 1.5f : 1.0f);
+            }
+        }
+    }
+
+    emit_signal("render_quality_changed", "effects_quality", level);
+}
+
+int MoHAARunner::get_effects_quality() const {
+    return effects_quality;
+}
+
+void MoHAARunner::set_msaa(int level) {
+    level = (level < 0) ? 0 : (level > 3) ? 3 : level;
+    msaa_level = level;
+
+    // Apply to the root viewport at runtime via get_viewport()
+    // 0=disabled, 1=2x, 2=4x, 3=8x
+    Viewport *vp = get_viewport();
+    if (vp) {
+        vp->set_msaa_3d(static_cast<Viewport::MSAA>(level));
+    }
+
+    emit_signal("render_quality_changed", "msaa", level);
+}
+
+int MoHAARunner::get_msaa() const {
+    return msaa_level;
+}
+
+void MoHAARunner::set_fxaa_enabled(bool enabled) {
+    fxaa_enabled = enabled;
+
+    Viewport *vp = get_viewport();
+    if (vp) {
+        vp->set_screen_space_aa(enabled
+            ? Viewport::SCREEN_SPACE_AA_FXAA
+            : Viewport::SCREEN_SPACE_AA_DISABLED);
+    }
+
+    emit_signal("render_quality_changed", "fxaa", enabled ? 1 : 0);
+}
+
+bool MoHAARunner::is_fxaa_enabled() const {
+    return fxaa_enabled;
+}
+
+void MoHAARunner::set_vsync_mode(int mode) {
+    mode = (mode < 0) ? 0 : (mode > 3) ? 3 : mode;
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (ds) {
+        ds->window_set_vsync_mode(static_cast<DisplayServer::VSyncMode>(mode));
+    }
+
+    emit_signal("render_quality_changed", "vsync_mode", mode);
+}
+
+int MoHAARunner::get_vsync_mode() const {
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (ds) {
+        return static_cast<int>(ds->window_get_vsync_mode());
+    }
+    return 0;
 }
 
 // ──────────────────────────────────────────────
