@@ -52,7 +52,8 @@ void Godot_Client_SetGameInputMode(void) {
     cls.keyCatchers &= ~(KEYCATCH_UI | KEYCATCH_CONSOLE);
     UI_ForceMenuOff(true);
     /* IN_MouseOff sets in_guimouse = qfalse — must come AFTER
-       UI_ForceMenuOff which may call IN_MouseOn internally. */
+       UI_ForceMenuOff which may call IN_MouseOn internally.
+       This ensures mouse look works in game mode. */
     IN_MouseOff();
     
     /* Force unpause — in single-player listen-server mode the engine
