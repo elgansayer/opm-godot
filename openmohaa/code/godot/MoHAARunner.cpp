@@ -28,6 +28,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/sub_viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
+#include <godot_cpp/classes/audio_server.hpp>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -275,6 +276,9 @@ extern "C" {
                                          void *outFrameInfo, int *outBoneTag,
                                          float *outBoneQuat, float *outActionWeight,
                                          float *outScale);
+
+    // Phase 149: Vid_restart detection + settings accessors
+    int   Godot_Renderer_ConsumeVidRestart(int *out_fullscreen, int *out_width, int *out_height);
 
     // Phase 26: Shader remap query — from godot_renderer.c
     const char *Godot_Renderer_GetShaderRemap(const char *shaderName);
@@ -2704,6 +2708,16 @@ void MoHAARunner::update_swipe_effects() {
 void MoHAARunner::update_terrain_marks() {
     if (!game_world) return;
 
+    // Phase 150: honour r_drawmarks cvar — when 0, hide all marks
+    if (Cvar_VariableIntegerValue("r_drawmarks") == 0) {
+        for (int i = 0; i < active_terrain_mark_count; i++) {
+            if (i < (int)terrain_mark_meshes.size())
+                terrain_mark_meshes[i]->set_visible(false);
+        }
+        active_terrain_mark_count = 0;
+        return;
+    }
+
     int markCount = Godot_Renderer_GetTerrainMarkCount();
     if (markCount <= 0) {
         for (int i = 0; i < active_terrain_mark_count; i++) {
@@ -4506,6 +4520,77 @@ void MoHAARunner::_process(double delta) {
 
     Com_Frame();
     godot_jmpbuf_valid = false;
+
+    // ── Phase 149: Apply engine cvar settings to Godot systems ──
+    // Audio volume: read s_volume / s_musicvolume and apply to Godot AudioServer bus
+    {
+        AudioServer *as = AudioServer::get_singleton();
+        if (as) {
+            float master_vol = Cvar_VariableValue("s_volume");
+            if (master_vol < 0.0f) master_vol = 0.0f;
+            if (master_vol > 1.0f) master_vol = 1.0f;
+            float master_db = (master_vol > 0.001f) ? (20.0f * log10f(master_vol)) : -80.0f;
+            int bus_idx = as->get_bus_index("Master");
+            if (bus_idx >= 0) {
+                as->set_bus_volume_db(bus_idx, master_db);
+            }
+        }
+        // Music volume: sync s_musicvolume cvar to Godot music player
+        float music_vol = Cvar_VariableValue("s_musicvolume");
+        if (music_vol < 0.0f) music_vol = 0.0f;
+        if (music_vol > 1.0f) music_vol = 1.0f;
+        Godot_Music_SetVolume(music_vol);
+    }
+
+    // Gamma: read r_gamma and apply brightness adjustment to environment
+    if (world_env) {
+        Ref<Environment> env = world_env->get_environment();
+        if (env.is_valid()) {
+            float gamma = Cvar_VariableValue("r_gamma");
+            if (gamma < 0.5f) gamma = 0.5f;
+            if (gamma > 3.0f) gamma = 3.0f;
+            // Map gamma to brightness: gamma 1.0 = no change, higher = brighter
+            env->set_adjustment_enabled(gamma != 1.0f);
+            if (gamma != 1.0f) {
+                env->set_adjustment_brightness(gamma);
+            }
+        }
+    }
+
+    // r_fastsky: toggle skybox visibility based on cvar
+    if (world_env) {
+        Ref<Environment> env = world_env->get_environment();
+        if (env.is_valid()) {
+            int fastsky = Cvar_VariableIntegerValue("r_fastsky");
+            Environment::BGMode bg = env->get_background();
+            if (fastsky && bg == Environment::BG_SKY) {
+                env->set_background(Environment::BG_COLOR);
+            } else if (!fastsky && bg == Environment::BG_COLOR && env->get_sky().is_valid()) {
+                env->set_background(Environment::BG_SKY);
+            }
+        }
+    }
+
+    // Vid_restart: apply fullscreen/resolution changes from menu
+    {
+        int fs = 0, vw = 0, vh = 0;
+        if (Godot_Renderer_ConsumeVidRestart(&fs, &vw, &vh)) {
+            DisplayServer *ds = DisplayServer::get_singleton();
+            if (ds) {
+                if (fs) {
+                    ds->window_set_mode(DisplayServer::WINDOW_MODE_FULLSCREEN);
+                } else {
+                    ds->window_set_mode(DisplayServer::WINDOW_MODE_WINDOWED);
+                    if (vw > 0 && vh > 0) {
+                        ds->window_set_size(Vector2i(vw, vh));
+                    }
+                }
+                UtilityFunctions::print(String("[MoHAA] vid_restart: fullscreen=") +
+                    String::num_int64(fs) + String(" size=") +
+                    String::num_int64(vw) + String("x") + String::num_int64(vh));
+            }
+        }
+    }
 
     // ── Phase 85: Begin per-frame render statistics ──
 #ifdef HAS_MESH_CACHE_MODULE

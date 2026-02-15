@@ -449,9 +449,15 @@ void S_Init(qboolean full_startup)
 void S_Shutdown(qboolean full_shutdown)
 {
     Com_Printf("[GodotSound] S_Shutdown\n");
+    /* Phase 149: Push stop-all event so MoHAARunner stops all Godot AudioStreamPlayers.
+     * Without this, snd_restart/vid_restart leaves ghost sounds playing on the Godot side
+     * while the engine-side tables are cleared. */
+    push_event(GR_SND_STOP_ALL, NULL, 0, 0, 0,
+               0, 0, 0, 0, 0, NULL);
     gr_sfx_count = 0;
     gr_sound_event_count = 0;
     gr_loop_sound_count = 0;
+    gr_playing_count = 0;
 }
 
 void S_SoundInfo_f(void)
@@ -778,7 +784,7 @@ void     MUSIC_UpdateMusicVolumes(void)        {}
 void     MUSIC_CheckForStoppedSongs(void)      {}
 
 void        S_loadsoundtrack(void)             {}
-const char *S_CurrentSoundtrack(void)          { return ""; }
+const char *S_CurrentSoundtrack(void)          { return gr_music.name; }
 void        S_PlaySong(void)                   {}
 
 /* ===================================================================
@@ -848,9 +854,9 @@ int  S_CurrentMoviePosition(void)                     { return 0; }
  *  Music info queries
  * ================================================================ */
 
-const char  *S_GetMusicFilename(void)   { return ""; }
-int          S_GetMusicLoopCount(void)  { return 0; }
-unsigned int S_GetMusicOffset(void)     { return 0; }
+const char  *S_GetMusicFilename(void)   { return gr_triggered_music.name; }
+int          S_GetMusicLoopCount(void)  { return gr_triggered_music.loopCount; }
+unsigned int S_GetMusicOffset(void)     { return (unsigned int)gr_triggered_music.offset; }
 
 /* ===================================================================
  *  MP3-in-WAV detection (Phase 46)

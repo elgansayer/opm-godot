@@ -204,6 +204,33 @@ static refEntity_t scratch_entity;
 /* Scratch glconfig filled during BeginRegistration */
 static glconfig_t stored_glconfig;
 
+/* Phase 149: vid_restart detection — set in GR_BeginRegistration, consumed by MoHAARunner */
+static int gr_vidRestarted = 0;
+static int gr_vidRestart_fullscreen = 0;    /* r_fullscreen value at restart time */
+static int gr_vidRestart_width  = 0;        /* resolved window width */
+static int gr_vidRestart_height = 0;        /* resolved window height */
+
+/* Phase 149: Video mode table matching the original renderer (tr_init.c) */
+typedef struct {
+    int width, height;
+} gr_vidmode_t;
+
+static const gr_vidmode_t gr_vidModes[] = {
+    {  320,  240 },  /* Mode  0 */
+    {  400,  300 },  /* Mode  1 */
+    {  512,  384 },  /* Mode  2 */
+    {  640,  480 },  /* Mode  3 */
+    {  800,  600 },  /* Mode  4 */
+    {  960,  720 },  /* Mode  5 */
+    { 1024,  768 },  /* Mode  6 */
+    { 1152,  864 },  /* Mode  7 */
+    { 1280, 1024 },  /* Mode  8 */
+    { 1600, 1200 },  /* Mode  9 */
+    { 2048, 1536 },  /* Mode 10 */
+    {  856,  480 },  /* Mode 11 (wide) */
+};
+static const int gr_numVidModes = (int)( sizeof(gr_vidModes) / sizeof(gr_vidModes[0]) );
+
 /* -------------------------------------------------------------------
  *  Camera bridge — captured refdef_t data (Phase 7a)
  *
@@ -481,6 +508,40 @@ static void GR_BeginRegistration( glconfig_t *config )
     config->textureEnvAddAvailable = qtrue;
     config->maxTextureSize    = 4096;
 
+    /* Phase 149: Read video cvars and signal vid_restart to MoHAARunner.
+     * The UI virtual resolution stays 640×480, but we resolve the desired
+     * window resolution + fullscreen state for the Godot window. */
+    {
+        cvar_t *r_mode_cv       = ri.Cvar_Get( "r_mode",         "-2", 0 );
+        cvar_t *r_fullscreen_cv = ri.Cvar_Get( "r_fullscreen",   "0",  0 );
+        cvar_t *r_customw_cv    = ri.Cvar_Get( "r_customwidth",  "1280", 0 );
+        cvar_t *r_customh_cv    = ri.Cvar_Get( "r_customheight", "720",  0 );
+
+        int mode = r_mode_cv ? r_mode_cv->integer : -2;
+        int fs   = r_fullscreen_cv ? r_fullscreen_cv->integer : 0;
+        int w = 0, h = 0;
+
+        if ( mode >= 0 && mode < gr_numVidModes ) {
+            w = gr_vidModes[mode].width;
+            h = gr_vidModes[mode].height;
+        } else if ( mode == -1 ) {
+            /* Custom mode */
+            w = r_customw_cv ? r_customw_cv->integer : 1280;
+            h = r_customh_cv ? r_customh_cv->integer : 720;
+        }
+        /* mode -2 = "use desktop resolution" — leave w/h = 0 to signal no resize */
+
+        config->isFullscreen      = (qboolean)( fs != 0 );
+
+        gr_vidRestart_fullscreen = fs;
+        gr_vidRestart_width      = w;
+        gr_vidRestart_height     = h;
+        gr_vidRestarted          = 1;
+
+        ri.Printf( PRINT_ALL, "[GodotRenderer] BeginRegistration: r_mode=%d fs=%d => %dx%d\n",
+                   mode, fs, w, h );
+    }
+
     /* Copy for later queries */
     stored_glconfig = *config;
 }
@@ -622,6 +683,9 @@ static void GR_BeginFrame( stereoFrame_t stereoFrame )
     (void)stereoFrame;
     /* Reset 2D command buffer for this frame */
     gr_num2DCmds = 0;
+    /* Reset HUD model state so the first ClearScene does a full clear */
+    gr_mainSceneRendered = 0;
+    gr_numHudModels = 0;
 }
 
 static void GR_EndFrame( int *frontEndMsec, int *backEndMsec )
@@ -2110,6 +2174,13 @@ static void GR_SetFullscreen( qboolean fullScreen )
     (void)fullScreen;  /* Godot manages window mode */
 }
 
+/* Phase 149: ter_restart command handler — terrain quality changes are
+ * applied on next map load, so this is effectively a no-op. */
+static void GR_TerrainRestart_f( void )
+{
+    ri.Printf( PRINT_ALL, "[GodotRenderer] ter_restart: terrain quality changes will apply on next map load.\\n" );
+}
+
 static void GR_SetRenderTime( int t )
 {
     gr_renderTime = t;
@@ -2909,6 +2980,19 @@ int Godot_Renderer_GetHudModel( int index,
     return 1;
 }
 
+/* Phase 149: Vid_restart state — consumed by MoHAARunner after Com_Frame().
+ * Returns 1 if a vid_restart happened this frame, and fills output params.
+ * Resets the flag so it only fires once. */
+int Godot_Renderer_ConsumeVidRestart( int *out_fullscreen, int *out_width, int *out_height )
+{
+    if ( !gr_vidRestarted ) return 0;
+    gr_vidRestarted = 0;
+    if ( out_fullscreen ) *out_fullscreen = gr_vidRestart_fullscreen;
+    if ( out_width )      *out_width      = gr_vidRestart_width;
+    if ( out_height )     *out_height     = gr_vidRestart_height;
+    return 1;
+}
+
 /* Return animation data for a HUD model entity */
 int Godot_Renderer_GetHudModelAnim( int index,
                                     void *outFrameInfo,     /* frameInfo_t[MAX_FRAMEINFOS] */
@@ -3070,6 +3154,12 @@ refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
     re.AddMuzzleFlash      = GR_AddMuzzleFlash;
     re.AddShellCasing      = GR_AddShellCasing;
 #endif
+
+    /* Phase 149: Register ter_restart command — the original renderer registers this
+     * in tr_terrain.c which we don't compile. The menu's CheckRestart() issues
+     * "ter_restart" when CVAR_TERRAIN_LATCH cvars change. We handle it as a no-op
+     * since terrain quality changes apply automatically on next map load. */
+    ri.Cmd_AddCommand( "ter_restart", GR_TerrainRestart_f );
 
     return &re;
 }
