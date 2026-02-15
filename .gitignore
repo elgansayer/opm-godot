@@ -26,6 +26,7 @@ godot-cpp/gen/
 openmohaa/bin/libopenmohaa.so
 openmohaa/bin/libcgame.so
 project/bin/
+project/.godot/
 
 # Godot editor files
 .godot/
