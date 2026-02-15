@@ -17,7 +17,7 @@
 #include "../qcommon/qcommon.h"
 
 /* ── Renderer farplane accessor (godot_renderer.c) ── */
-extern void Godot_Renderer_GetFarplane(float *distance, float *color, int *cull);
+extern void Godot_Renderer_GetFarplane(float *distance, float *bias, float *color, int *cull);
 
 /* Default near clip plane in inches (matches upstream r_znear). */
 #define DEFAULT_ZNEAR_INCHES 4.0f
@@ -61,7 +61,7 @@ float Godot_DrawDistance_GetZFar(void)
 float Godot_DrawDistance_GetFarplane(void)
 {
     float dist = 0.0f;
-    Godot_Renderer_GetFarplane(&dist, NULL, NULL);
+    Godot_Renderer_GetFarplane(&dist, NULL, NULL, NULL);
     return dist;
 }
 
@@ -71,7 +71,7 @@ float Godot_DrawDistance_GetFarplane(void)
 void Godot_DrawDistance_GetFarplaneColor(float *r, float *g, float *b)
 {
     float color[3] = { 0.0f, 0.0f, 0.0f };
-    Godot_Renderer_GetFarplane(NULL, color, NULL);
+    Godot_Renderer_GetFarplane(NULL, NULL, color, NULL);
     if (r) *r = color[0];
     if (g) *g = color[1];
     if (b) *b = color[2];
@@ -84,7 +84,7 @@ void Godot_DrawDistance_GetFarplaneColor(float *r, float *g, float *b)
 int Godot_DrawDistance_GetFarplaneCull(void)
 {
     int cull = 0;
-    Godot_Renderer_GetFarplane(NULL, NULL, &cull);
+    Godot_Renderer_GetFarplane(NULL, NULL, NULL, &cull);
     return cull;
 }
 

@@ -2187,3 +2187,27 @@ correctness.  Full SCons build deferred (cloud environment lacks scons).
   - `code/cgame/cg_public.h`
   - `code/client/cl_cgame.cpp`
   - `code/cgame/cg_tempmodels.cpp`
+
+## Phase 137: Frustum Culling & Draw Distance Integration ✅
+
+- [x] **Task 137.1:** Fixed `Godot_Renderer_GetFarplane` signature mismatch in `godot_draw_distance_accessors.c` — extern declaration had 3 params but actual function in `godot_renderer.c` takes 4 (distance, bias, colour, cull). All three call sites now pass the correct 4-parameter form.
+- [x] **Task 137.2:** Integrated `godot_frustum_cull` module into MoHAARunner:
+  - Added `__has_include` guard and `HAS_FRUSTUM_CULL_MODULE` define in `MoHAARunner.h`
+  - Call `Godot_FrustumCull_Init()` in `_ready()` module init block
+  - Call `Godot_FrustumCull_UpdateCamera(camera)` each frame in `_process()` after camera update
+  - Call `Godot_FrustumCull_Shutdown()` in destructor shutdown block
+  - Added per-entity frustum sphere test in `update_entities()` after PVS culling — entities entirely outside the camera frustum are skipped (set invisible + continue). Uses a conservative 2 m bounding sphere. First-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) bypass the test.
+- [x] **Task 137.3:** Integrated `godot_draw_distance` module into MoHAARunner:
+  - Added `__has_include` guard and `HAS_DRAW_DISTANCE_MODULE` define in `MoHAARunner.h`
+  - Call `Godot_DrawDistance_Init()` in `_ready()` module init block
+  - Call `Godot_DrawDistance_Update(camera, env, delta)` each frame in `_process()` to apply cvar-driven near/far planes and fog
+  - Added per-entity draw distance culling in `update_entities()` — when `farplane_cull` is active and the entity is beyond the cull distance, it is hidden. First-person entities bypass the test.
+
+### Key technical details (Phase 137):
+
+**Bug fix:** `godot_draw_distance_accessors.c` declared `Godot_Renderer_GetFarplane` as `(float*, float*, int*)` but the real function in `godot_renderer.c` is `(float*, float*, float*, int*)` — a 4-parameter function. Fixed by adding the missing `bias` parameter to the extern declaration and passing `NULL` for it at each call site.
+
+### Files modified (Phase 137):
+- `code/godot/MoHAARunner.h` — added `HAS_FRUSTUM_CULL_MODULE` and `HAS_DRAW_DISTANCE_MODULE` conditional includes
+- `code/godot/MoHAARunner.cpp` — added init/update/shutdown calls for both modules; added per-entity frustum and distance culling in `update_entities()`
+- `code/godot/godot_draw_distance_accessors.c` — fixed `Godot_Renderer_GetFarplane` extern declaration (3 → 4 params) and all call sites

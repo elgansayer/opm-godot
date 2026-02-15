@@ -129,6 +129,16 @@
 #define HAS_SHADOW_MODULE 1
 #endif
 
+#if __has_include("godot_frustum_cull.h")
+#include "godot_frustum_cull.h"
+#define HAS_FRUSTUM_CULL_MODULE 1
+#endif
+
+#if __has_include("godot_draw_distance.h")
+#include "godot_draw_distance.h"
+#define HAS_DRAW_DISTANCE_MODULE 1
+#endif
+
 using namespace godot;
 
 // ── Game flow state machine (Phase 261) ──
