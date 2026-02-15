@@ -209,6 +209,12 @@ private:
     std::vector<MeshInstance3D *> terrain_mark_meshes;
     int active_terrain_mark_count = 0;
 
+    // Shadow blob projection
+    Node3D *shadow_blob_root = nullptr;
+    std::vector<MeshInstance3D *> shadow_blob_meshes;
+    int active_shadow_blob_count = 0;
+    Ref<StandardMaterial3D> shadow_blob_material;      // Shared dark semi-transparent material
+
     // Shader animation tracking (Phase 36)
     double shader_anim_time = 0.0;
 
@@ -311,6 +317,7 @@ private:
     void update_polys();      // Render captured polys (particles, effects)
     void update_swipe_effects(); // Render swipe trails (Phase 24)
     void update_terrain_marks(); // Render terrain mark decals (Phase 25)
+    void update_shadow_blobs();  // Project shadow blobs under RF_SHADOW entities
     void update_shader_animations(double delta); // Animate tcMod scrolling (Phase 36)
     void update_2d_overlay(); // Read 2D draw commands and queue redraw
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
