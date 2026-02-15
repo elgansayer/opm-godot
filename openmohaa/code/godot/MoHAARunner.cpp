@@ -3016,11 +3016,31 @@ void MoHAARunner::update_shader_animations(double delta) {
             if (!smat.is_valid()) continue;
 
             // Check resource metadata for shader name (stored during BSP build)
-            String shader_name = smat->get_meta("shader_name", "");
-            if (shader_name.is_empty()) continue;
+            // Phase 60: Cache shader props pointer to avoid per-frame string lookup
+            static const StringName meta_key_shader_name("shader_name");
+            static const StringName meta_key_shader_props_ptr("shader_props_ptr");
 
-            CharString cs = shader_name.ascii();
-            const GodotShaderProps *sp = Godot_ShaderProps_Find(cs.get_data());
+            uint64_t props_ptr = smat->get_meta(meta_key_shader_props_ptr, 0);
+            const GodotShaderProps *sp = nullptr;
+
+            if (props_ptr > 1) {
+                // Cached pointer found
+                sp = (const GodotShaderProps *)(props_ptr - 1);
+            } else if (props_ptr == 0) {
+                // Not computed yet
+                String shader_name = smat->get_meta(meta_key_shader_name, "");
+                if (!shader_name.is_empty()) {
+                    CharString cs = shader_name.ascii();
+                    sp = Godot_ShaderProps_Find(cs.get_data());
+                    // Cache it (add 1 to distinguish null from not-computed)
+                    smat->set_meta(meta_key_shader_props_ptr, (uint64_t)sp + 1);
+                } else {
+                    // No shader name, mark as computed but null (1)
+                    smat->set_meta(meta_key_shader_props_ptr, 1);
+                }
+            }
+            // If props_ptr == 1 (computed but null), sp remains null, loop continues
+
             if (!sp) continue;
 
             // Apply UV tcMod animation: scroll + turb
@@ -3050,6 +3070,10 @@ void MoHAARunner::update_shader_animations(double delta) {
             if (sp->has_animmap && sp->animmap_num_frames > 0 && sp->animmap_freq > 0.0f) {
                 int shader_handle = -1;
                 int shader_count = Godot_Renderer_GetShaderCount();
+
+                // Fetch shader name on-demand if we need to scan for handles
+                String shader_name = smat->get_meta(meta_key_shader_name, "");
+
                 for (int sh = 1; sh < shader_count; sh++) {
                     const char *sn = Godot_Renderer_GetShaderName(sh);
                     if (sn && shader_name == String(sn)) {

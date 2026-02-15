@@ -400,3 +400,20 @@ test_render_sort_prog = test_env.Program(
     target="bin/test_render_sort",
     source=test_render_sort_sources,
 )
+
+# Benchmark for shader property lookup
+bench_env = Environment() # Use a clean environment to avoid linking real godot-cpp
+bench_env.Append(CPPPATH=[
+    "code/godot",
+    "code/godot/tests/mock_godot_cpp"
+])
+bench_env.Append(CXXFLAGS=["-O2", "-std=c++17"])
+
+bench_sources = [
+    "code/godot/tests/benchmark_shader_lookup.cpp",
+]
+
+bench_prog = bench_env.Program(
+    target="bin/benchmark_shader_lookup",
+    source=bench_sources,
+)
