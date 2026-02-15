@@ -220,6 +220,10 @@ def should_exclude(filepath):
         if pat in fp:
             return True
 
+    # Exclude standalone tests
+    if "code/godot/tests" in fp:
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)
