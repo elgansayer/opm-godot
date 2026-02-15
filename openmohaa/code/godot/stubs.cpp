@@ -244,12 +244,25 @@ void GLimp_FrontEndSleep(void) {
 void GLimp_WakeRenderer(void *data) {
 }
 
-// Clipboard stubs
+// Clipboard — use a static buffer for Get since the engine expects the
+// pointer to remain valid until the next call.
+static char s_clipboard_buf[4096];
+
 const char *Sys_GetWholeClipboard(void) {
+    // Godot clipboard access requires C++ (DisplayServer).  We declare an
+    // accessor implemented in a C++ TU that can call Godot APIs.
+    extern int Godot_Clipboard_Get(char *buf, int bufSize);
+    if (Godot_Clipboard_Get(s_clipboard_buf, sizeof(s_clipboard_buf))) {
+        return s_clipboard_buf;
+    }
     return NULL;
 }
 
 void Sys_SetClipboard(const char *contents) {
+    extern void Godot_Clipboard_Set(const char *text);
+    if (contents) {
+        Godot_Clipboard_Set(contents);
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -287,10 +300,11 @@ qboolean CL_CDKeyValidate(const char *key, const char *checksum) {
 }
 
 // R_ImageExists — Global symbol referenced by some shared code paths.
-// The UI system uses re.ImageExists (= GR_ImageExists from godot_renderer.c)
-// which properly checks VFS.  This stub handles any remaining direct callers.
+// Forward to GR_ImageExists in godot_renderer.c which checks the shader table
+// and probes the VFS for actual image files.
+extern qboolean GR_ImageExists(const char *name);
 qboolean R_ImageExists(const char *name) {
-    return qfalse;
+    return GR_ImageExists(name);
 }
 
 // ──────────────────────────────────────────────
@@ -371,8 +385,11 @@ void Godot_ClearPendingCursorImage(void) {
     s_cursor_pending = 0;
 }
 
+// Return qtrue when the UI mouse is active (menus/console visible).
+// This matches the SDL implementation which checked the cursor visibility state.
+extern qboolean in_guimouse;
 qboolean IN_IsCursorActive(void) {
-    return qfalse;
+    return in_guimouse;
 }
 
 // ──────────────────────────────────────────────

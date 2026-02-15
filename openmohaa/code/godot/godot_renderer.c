@@ -283,6 +283,30 @@ static gr_dlight_t gr_dlights[GR_MAX_DLIGHTS];
 static int         gr_numDlights  = 0;
 
 /* -------------------------------------------------------------------
+ *  HUD model render requests (Phase 148)
+ *
+ *  CL_Draw3DModel() calls ClearScene + AddEntity + RenderScene with
+ *  RDF_HUD | RDF_NOWORLDMODEL to render a 3D model preview into a
+ *  UI widget rect.  We capture each such request into a separate
+ *  buffer so that world entities and camera are preserved.
+ * ---------------------------------------------------------------- */
+
+#define GR_MAX_HUD_MODELS 8
+
+typedef struct {
+    gr_entity_t entity;
+    float       vieworg[3];
+    float       viewaxis[3][3];
+    float       fov_x, fov_y;
+    float       rect_x, rect_y, rect_w, rect_h;
+} gr_hud_model_t;
+
+static gr_hud_model_t gr_hudModels[GR_MAX_HUD_MODELS];
+static int            gr_numHudModels = 0;
+static int            gr_mainSceneRendered = 0;
+static int            gr_hudEntityStart = 0;
+
+/* -------------------------------------------------------------------
  *  Poly capture — scene polys for particles, decals, effects (Phase 16)
  *
  *  GR_AddPolyToScene stores quads/tris here each frame.
@@ -612,6 +636,14 @@ static void GR_EndFrame( int *frontEndMsec, int *backEndMsec )
 
 static void GR_ClearScene( void )
 {
+    if ( gr_mainSceneRendered ) {
+        /* Phase 148: World scene already rendered this frame.
+         * This ClearScene is for a HUD model sub-render (CL_Draw3DModel).
+         * Don't clear world entities — note where HUD entities start. */
+        gr_hudEntityStart = gr_numEntities;
+        return;
+    }
+
     gr_numEntities  = 0;
     gr_numDlights   = 0;
     gr_numPolys     = 0;
@@ -619,6 +651,8 @@ static void GR_ClearScene( void )
     gr_numTerrainMarks     = 0;
     gr_numTerrainMarkVerts = 0;
     gr_bgActive     = 0;
+    gr_numHudModels = 0;
+    gr_mainSceneRendered = 0;
 }
 
 static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumber )
@@ -743,7 +777,44 @@ static void GR_RenderScene( const refdef_t *fd )
 {
     if ( !fd ) return;
 
-    /* Capture viewpoint for the Godot Camera3D bridge */
+    /* Phase 148: HUD model render (CL_Draw3DModel) — capture into
+     * separate buffer, don't overwrite world camera/entities. */
+    if ( fd->rdflags & 0x0001 /* RDF_NOWORLDMODEL */ ) {
+        if ( gr_numHudModels < GR_MAX_HUD_MODELS ) {
+            gr_hud_model_t *hm = &gr_hudModels[gr_numHudModels];
+
+            /* Copy entity data from the temporary slot(s) added after
+             * the world scene's entity list. */
+            if ( gr_numEntities > gr_hudEntityStart ) {
+                memcpy( &hm->entity, &gr_entities[gr_hudEntityStart],
+                        sizeof(gr_entity_t) );
+            } else {
+                memset( &hm->entity, 0, sizeof(gr_entity_t) );
+            }
+
+            /* Copy viewport parameters */
+            VectorCopy( fd->vieworg, hm->vieworg );
+            VectorCopy( fd->viewaxis[0], hm->viewaxis[0] );
+            VectorCopy( fd->viewaxis[1], hm->viewaxis[1] );
+            VectorCopy( fd->viewaxis[2], hm->viewaxis[2] );
+            hm->fov_x  = fd->fov_x;
+            hm->fov_y  = fd->fov_y;
+            hm->rect_x = (float)fd->x;
+            hm->rect_y = (float)fd->y;
+            hm->rect_w = (float)fd->width;
+            hm->rect_h = (float)fd->height;
+
+            gr_numHudModels++;
+        }
+
+        /* Remove HUD entities from world entity buffer */
+        gr_numEntities = gr_hudEntityStart;
+        return;
+    }
+
+    /* Normal world render — capture viewpoint for Godot Camera3D bridge */
+    gr_mainSceneRendered = 1;
+
     VectorCopy( fd->vieworg, gr_viewOrigin );
     VectorCopy( fd->viewaxis[0], gr_viewAxis[0] );
     VectorCopy( fd->viewaxis[1], gr_viewAxis[1] );
@@ -1639,11 +1710,66 @@ static void GR_CacheShaderDimensions( qhandle_t hShader )
     void *buf = NULL;
     int len;
     const char *name;
+    char resolved[MAX_QPATH];
 
     if ( hShader < 1 || hShader >= gr_numShaders ) return;
     if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
 
     name = gr_shaders[hShader].name;
+
+    /* Step 1: Resolve through .shader definition — the stage `map` directive
+     * holds the actual texture path, which may differ from the shader name.
+     * This mirrors the lookup that get_shader_texture() does in MoHAARunner. */
+    extern int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *out_path, int out_size);
+    if ( Godot_ShaderProps_GetTextureMap( name, resolved, sizeof(resolved) ) ) {
+        /* Try the resolved texture path */
+        len = ri.FS_ReadFile( va( "%s.tga", resolved ), &buf );
+        if ( len > 18 && buf ) {
+            const unsigned char *h = (const unsigned char *)buf;
+            int w = h[12] | (h[13] << 8);
+            int ht = h[14] | (h[15] << 8);
+            if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+                gr_shaderWidths[hShader]  = w;
+                gr_shaderHeights[hShader] = ht;
+            }
+            ri.FS_FreeFile( buf );
+            if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
+            buf = NULL;
+        }
+        if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
+
+        /* Try bare resolved path (may already have extension) */
+        len = ri.FS_ReadFile( resolved, &buf );
+        if ( len > 18 && buf ) {
+            const unsigned char *h = (const unsigned char *)buf;
+            if ( h[2] == 2 || h[2] == 10 ) {
+                int w = h[12] | (h[13] << 8);
+                int ht = h[14] | (h[15] << 8);
+                if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+                    gr_shaderWidths[hShader]  = w;
+                    gr_shaderHeights[hShader] = ht;
+                }
+            } else if ( h[0] == 0xFF && h[1] == 0xD8 && len > 10 ) {
+                for ( int i = 2; i < len - 9; i++ ) {
+                    if ( h[i] == 0xFF && (h[i+1] == 0xC0 || h[i+1] == 0xC2) ) {
+                        int ht = (h[i+5] << 8) | h[i+6];
+                        int w  = (h[i+7] << 8) | h[i+8];
+                        if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+                            gr_shaderWidths[hShader]  = w;
+                            gr_shaderHeights[hShader] = ht;
+                        }
+                        break;
+                    }
+                }
+            }
+            ri.FS_FreeFile( buf );
+            if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
+            buf = NULL;
+        }
+        if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
+    }
+
+    /* Step 2: Fall back to shader name directly (implicit shader, no .shader def) */
 
     /* Try .tga first (header has dimensions), then .jpg */
     len = ri.FS_ReadFile( va( "%s.tga", name ), &buf );
@@ -1728,7 +1854,7 @@ static const char *GR_GetModelName( qhandle_t hModel )
     return "godot_stub_model";
 }
 
-static qboolean GR_ImageExists( const char *name )
+qboolean GR_ImageExists( const char *name )
 {
     int i;
 
@@ -2706,6 +2832,95 @@ int Godot_Renderer_GetEntityAnim( int index,
 
     if ( outTiki )         *outTiki         = ge->tiki;
     if ( outEntityNumber ) *outEntityNumber = ge->entityNumber;
+    if ( outFrameInfo )    memcpy( outFrameInfo, ge->frameInfo, sizeof(ge->frameInfo) );
+    if ( outBoneTag )      memcpy( outBoneTag, ge->bone_tag, sizeof(ge->bone_tag) );
+    if ( outBoneQuat )     memcpy( outBoneQuat, ge->bone_quat, sizeof(ge->bone_quat) );
+    if ( outActionWeight ) *outActionWeight = ge->actionWeight;
+    if ( outScale )        *outScale        = ge->scale;
+
+    return 1;
+}
+
+/* ===================================================================
+ *  HUD model render request accessors (Phase 148)
+ *
+ *  Give MoHAARunner.cpp read access to the HUD model render requests
+ *  captured from CL_Draw3DModel() calls during UI rendering.
+ * ================================================================ */
+
+int Godot_Renderer_GetHudModelCount( void )
+{
+    return gr_numHudModels;
+}
+
+int Godot_Renderer_GetHudModel( int index,
+                                float *origin,      /* [3] */
+                                float *axis,        /* [9] */
+                                float *out_scale,   /* [1] */
+                                int   *hModel,      /* [1] */
+                                unsigned char *rgba, /* [4] */
+                                void **tiki,        /* [1] */
+                                float *rect,        /* [4] x,y,w,h */
+                                float *vieworg,     /* [3] */
+                                float *viewaxis,    /* [9] */
+                                float *fov )        /* [2] fov_x, fov_y */
+{
+    if ( index < 0 || index >= gr_numHudModels ) return 0;
+
+    const gr_hud_model_t *hm = &gr_hudModels[index];
+    const gr_entity_t *ge = &hm->entity;
+
+    if ( origin ) {
+        origin[0] = ge->origin[0];
+        origin[1] = ge->origin[1];
+        origin[2] = ge->origin[2];
+    }
+    if ( axis ) {
+        memcpy( axis, ge->axis, 9 * sizeof(float) );
+    }
+    if ( out_scale )  *out_scale = ge->scale;
+    if ( hModel )     *hModel    = ge->hModel;
+    if ( rgba ) {
+        rgba[0] = ge->shaderRGBA[0];
+        rgba[1] = ge->shaderRGBA[1];
+        rgba[2] = ge->shaderRGBA[2];
+        rgba[3] = ge->shaderRGBA[3];
+    }
+    if ( tiki )       *tiki = ge->tiki;
+    if ( rect ) {
+        rect[0] = hm->rect_x;
+        rect[1] = hm->rect_y;
+        rect[2] = hm->rect_w;
+        rect[3] = hm->rect_h;
+    }
+    if ( vieworg ) {
+        vieworg[0] = hm->vieworg[0];
+        vieworg[1] = hm->vieworg[1];
+        vieworg[2] = hm->vieworg[2];
+    }
+    if ( viewaxis ) {
+        memcpy( viewaxis, hm->viewaxis, 9 * sizeof(float) );
+    }
+    if ( fov ) {
+        fov[0] = hm->fov_x;
+        fov[1] = hm->fov_y;
+    }
+
+    return 1;
+}
+
+/* Return animation data for a HUD model entity */
+int Godot_Renderer_GetHudModelAnim( int index,
+                                    void *outFrameInfo,     /* frameInfo_t[MAX_FRAMEINFOS] */
+                                    int *outBoneTag,        /* [5] */
+                                    float *outBoneQuat,     /* [5][4] = [20] */
+                                    float *outActionWeight, /* [1] */
+                                    float *outScale )       /* [1] */
+{
+    if ( index < 0 || index >= gr_numHudModels ) return 0;
+
+    const gr_entity_t *ge = &gr_hudModels[index].entity;
+
     if ( outFrameInfo )    memcpy( outFrameInfo, ge->frameInfo, sizeof(ge->frameInfo) );
     if ( outBoneTag )      memcpy( outBoneTag, ge->bone_tag, sizeof(ge->bone_tag) );
     if ( outBoneQuat )     memcpy( outBoneQuat, ge->bone_quat, sizeof(ge->bone_quat) );

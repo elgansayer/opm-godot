@@ -25,6 +25,7 @@
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/sub_viewport.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 
@@ -284,6 +285,14 @@ private:
     CanvasLayer *hud_layer = nullptr;                     // Overlay layer for 2D elements
     Control *hud_control = nullptr;                       // Control node for custom draw
     std::unordered_map<int, Ref<ImageTexture>> shader_textures; // shader handle → loaded texture
+
+    // HUD model preview SubViewport (Phase 148)
+    SubViewport *hud_model_viewport = nullptr;            // Renders 3D model for UI preview
+    Camera3D *hud_model_camera = nullptr;                 // Camera in the SubViewport
+    DirectionalLight3D *hud_model_light = nullptr;        // Lighting for model preview
+    MeshInstance3D *hud_model_mesh = nullptr;              // Current model mesh
+    int hud_model_last_hmodel = -1;                        // Track model changes
+    uint64_t hud_model_last_anim_hash = 0;                 // Track animation changes
     
     // Viewport coordinate transformation (for HUD rendering and mouse input)
     // These are calculated once per frame and used for both rendering UI and transforming mouse coords
@@ -344,6 +353,7 @@ private:
     void update_shadow_blobs();  // Project shadow blobs under RF_SHADOW entities
     void update_shader_animations(double delta); // Animate tcMod scrolling (Phase 36)
     void update_2d_overlay(); // Read 2D draw commands and queue redraw
+    void update_hud_models(); // Render HUD model previews (Phase 148)
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
 

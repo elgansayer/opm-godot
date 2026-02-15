@@ -26,6 +26,8 @@
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/sub_viewport.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -262,6 +264,18 @@ extern "C" {
     float Godot_Renderer_GetEntityShadowPlane(int index);
     float Godot_Model_GetRadius(int hModel);
 
+    // Phase 148: HUD model render request accessors — from godot_renderer.c
+    int   Godot_Renderer_GetHudModelCount(void);
+    int   Godot_Renderer_GetHudModel(int index,
+                                     float *origin, float *axis, float *out_scale,
+                                     int *hModel, unsigned char *rgba, void **tiki,
+                                     float *rect, float *vieworg, float *viewaxis,
+                                     float *fov);
+    int   Godot_Renderer_GetHudModelAnim(int index,
+                                         void *outFrameInfo, int *outBoneTag,
+                                         float *outBoneQuat, float *outActionWeight,
+                                         float *outScale);
+
     // Phase 26: Shader remap query — from godot_renderer.c
     const char *Godot_Renderer_GetShaderRemap(const char *shaderName);
 
@@ -365,6 +379,28 @@ extern "C" void Godot_SysPrint(const char *msg) {
         // Before Godot is fully ready, fall back to stdout
         fputs(msg, stdout);
     }
+}
+
+// ──────────────────────────────────────────────
+//  Clipboard accessors — called from stubs.cpp
+// ──────────────────────────────────────────────
+extern "C" int Godot_Clipboard_Get(char *buf, int bufSize) {
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (!ds || bufSize <= 0) return 0;
+    godot::String clip = ds->clipboard_get();
+    if (clip.is_empty()) return 0;
+    godot::CharString utf8 = clip.utf8();
+    int len = utf8.length();
+    if (len >= bufSize) len = bufSize - 1;
+    memcpy(buf, utf8.get_data(), len);
+    buf[len] = '\0';
+    return 1;
+}
+
+extern "C" void Godot_Clipboard_Set(const char *text) {
+    DisplayServer *ds = DisplayServer::get_singleton();
+    if (!ds || !text) return;
+    ds->clipboard_set(godot::String(text));
 }
 
 // ──────────────────────────────────────────────
@@ -3737,6 +3773,297 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
     return wav;
 }
 
+/* ===================================================================
+ *  Phase 148: HUD model preview rendering
+ *
+ *  CL_Draw3DModel() renders 3D model previews into UI widget rects
+ *  (e.g., player model selection in multiplayer options).  We capture
+ *  these requests in godot_renderer.c and render them here using a
+ *  SubViewport + Camera3D + MeshInstance3D.  The viewport texture is
+ *  drawn into the 2D HUD overlay at the widget's screen rect.
+ * ================================================================ */
+
+void MoHAARunner::update_hud_models() {
+    int count = Godot_Renderer_GetHudModelCount();
+
+    /* If no HUD models requested, hide/disable the viewport */
+    if (count == 0) {
+        if (hud_model_viewport) {
+            hud_model_viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
+            if (hud_model_mesh) hud_model_mesh->set_visible(false);
+        }
+        return;
+    }
+
+    /* Process only the first HUD model (most common case) */
+    float origin[3], axis[9], ent_scale = 1.0f;
+    float rect[4], vieworg[3], viewaxis[9], fov[2];
+    int hModel = 0;
+    unsigned char rgba[4] = {255, 255, 255, 255};
+    void *tiki = nullptr;
+
+    if (!Godot_Renderer_GetHudModel(0, origin, axis, &ent_scale, &hModel, rgba, &tiki,
+                                    rect, vieworg, viewaxis, fov)) {
+        return;
+    }
+
+    /* Create SubViewport infrastructure on first use */
+    if (!hud_model_viewport) {
+        hud_model_viewport = memnew(SubViewport);
+        hud_model_viewport->set_name("HudModelViewport");
+        hud_model_viewport->set_transparent_background(true);
+        hud_model_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+        /* Own World3D so it doesn't render the main scene */
+        hud_model_viewport->set_use_own_world_3d(true);
+        add_child(hud_model_viewport);
+
+        hud_model_camera = memnew(Camera3D);
+        hud_model_camera->set_name("HudModelCamera");
+        hud_model_camera->set_near(0.01);
+        hud_model_camera->set_far(100.0);
+        hud_model_viewport->add_child(hud_model_camera);
+
+        hud_model_light = memnew(DirectionalLight3D);
+        hud_model_light->set_name("HudModelLight");
+        hud_model_light->set_color(Color(1.0, 1.0, 1.0, 1.0));
+        /* Angle light from above-left for model preview visibility */
+        hud_model_light->set_rotation(Vector3(Math::deg_to_rad(-30.0f),
+                                               Math::deg_to_rad(45.0f), 0));
+        hud_model_viewport->add_child(hud_model_light);
+
+        hud_model_mesh = memnew(MeshInstance3D);
+        hud_model_mesh->set_name("HudModelMesh");
+        hud_model_viewport->add_child(hud_model_mesh);
+
+        static bool logged_hud_model = false;
+        if (!logged_hud_model) {
+            UtilityFunctions::print("[MoHAA] HUD model SubViewport created.");
+            logged_hud_model = true;
+        }
+    }
+
+    /* Set viewport size proportional to widget rect */
+    int vp_w = Math::max((int)rect[2], 64);
+    int vp_h = Math::max((int)rect[3], 64);
+    hud_model_viewport->set_size(Vector2i(vp_w, vp_h));
+    hud_model_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+
+    /* ── Camera setup ── */
+    /* Convert vieworg from id coords to Godot coords */
+    Vector3 cam_pos = id_to_godot_position(vieworg[0], vieworg[1], vieworg[2]);
+
+    /* Build camera basis from viewaxis (forward/left/up in id coords) */
+    float *va_fwd = &viewaxis[0];
+    float *va_lft = &viewaxis[3];
+    float *va_up  = &viewaxis[6];
+    Vector3 forward_g = id_to_godot_point(va_fwd[0], va_fwd[1], va_fwd[2]);
+    Vector3 left_g    = id_to_godot_point(va_lft[0], va_lft[1], va_lft[2]);
+    Vector3 up_g      = id_to_godot_point(va_up[0],  va_up[1],  va_up[2]);
+
+    Vector3 right_g = -left_g;
+    Vector3 back_g  = -forward_g;
+    Basis cam_basis(right_g, up_g, back_g);
+    hud_model_camera->set_global_transform(Transform3D(cam_basis, cam_pos));
+
+    /* FOV — use fov_y for vertical FOV */
+    if (fov[1] > 1.0f && fov[1] < 170.0f) {
+        hud_model_camera->set_fov((double)fov[1]);
+    } else if (fov[0] > 1.0f && fov[0] < 170.0f) {
+        hud_model_camera->set_fov((double)fov[0]);
+    }
+
+    /* ── Build skeletal mesh for the entity ── */
+    if (tiki) {
+        /* Get animation data */
+        alignas(8) char frameInfoBuf[256];
+        int boneTagBuf[5];
+        float boneQuatBuf[20];
+        float actionWeight = 0, anim_scale = 1.0f;
+
+        bool has_anim = Godot_Renderer_GetHudModelAnim(
+            0, frameInfoBuf, boneTagBuf, boneQuatBuf,
+            &actionWeight, &anim_scale) != 0;
+
+        /* Compute anim hash to skip rebuild when pose unchanged */
+        uint64_t anim_hash = 14695981039346656037ULL;
+        auto fnv = [&anim_hash](const void *p, size_t n) {
+            const unsigned char *b = (const unsigned char *)p;
+            for (size_t j = 0; j < n; j++) {
+                anim_hash ^= b[j];
+                anim_hash *= 1099511628211ULL;
+            }
+        };
+        fnv(frameInfoBuf, sizeof(frameInfoBuf));
+        fnv(boneTagBuf, sizeof(boneTagBuf));
+        fnv(boneQuatBuf, sizeof(boneQuatBuf));
+        fnv(&actionWeight, sizeof(actionWeight));
+        fnv(&hModel, sizeof(hModel));
+
+        bool need_rebuild = (hModel != hud_model_last_hmodel) ||
+                            (anim_hash != hud_model_last_anim_hash);
+
+        if (need_rebuild && has_anim) {
+            int boneCount = 0;
+            void *boneCache = Godot_Skel_PrepareBones(
+                tiki, 1023 /* entityNumber from CL_Draw3DModel */,
+                (const void *)frameInfoBuf, boneTagBuf,
+                (const float *)boneQuatBuf,
+                actionWeight, &boneCount);
+
+            if (boneCache && boneCount > 0) {
+                Ref<ArrayMesh> mesh;
+                mesh.instantiate();
+
+                int meshCount = Godot_Skel_GetMeshCount(tiki);
+                float tikiScale = Godot_Skel_GetScale(tiki);
+
+                for (int m = 0; m < meshCount; m++) {
+                    int surfCount = Godot_Skel_GetSurfaceCount(tiki, m);
+                    for (int s = 0; s < surfCount; s++) {
+                        int numVerts = 0, numTris = 0;
+                        char surfName[128] = {0}, shaderName[128] = {0};
+                        Godot_Skel_GetSurfaceInfo(tiki, m, s,
+                            &numVerts, &numTris,
+                            surfName, sizeof(surfName),
+                            shaderName, sizeof(shaderName));
+                        if (numVerts <= 0 || numTris <= 0) continue;
+
+                        float *positions = (float *)malloc(numVerts * 3 * sizeof(float));
+                        float *normals   = (float *)malloc(numVerts * 3 * sizeof(float));
+                        float *texcoords = (float *)malloc(numVerts * 2 * sizeof(float));
+                        int   *indices   = (int *)malloc(numTris * 3 * sizeof(int));
+
+                        if (!positions || !normals || !texcoords || !indices) {
+                            ::free(positions); ::free(normals);
+                            ::free(texcoords); ::free(indices);
+                            continue;
+                        }
+
+                        if (!Godot_Skel_SkinSurface(tiki, m, s,
+                                boneCache, boneCount, positions, normals)) {
+                            ::free(positions); ::free(normals);
+                            ::free(texcoords); ::free(indices);
+                            continue;
+                        }
+
+                        Godot_Skel_GetSurfaceVertices(tiki, m, s,
+                            nullptr, nullptr, texcoords);
+                        Godot_Skel_GetSurfaceIndices(tiki, m, s, indices);
+
+                        PackedVector3Array gPos, gNrm;
+                        PackedVector2Array gUVs;
+                        PackedInt32Array   gIdx;
+                        gPos.resize(numVerts);
+                        gNrm.resize(numVerts);
+                        gUVs.resize(numVerts);
+                        gIdx.resize(numTris * 3);
+
+                        for (int v = 0; v < numVerts; v++) {
+                            Vector3 p = id_to_godot_point(
+                                positions[v*3+0], positions[v*3+1], positions[v*3+2])
+                                * tikiScale * MOHAA_UNIT_SCALE;
+                            Vector3 n = id_to_godot_point(
+                                normals[v*3+0], normals[v*3+1], normals[v*3+2]);
+                            if (n.length_squared() > 0.001f) n = n.normalized();
+
+                            gPos.set(v, p);
+                            gNrm.set(v, n);
+                            gUVs.set(v, Vector2(texcoords[v*2+0], texcoords[v*2+1]));
+                        }
+
+                        /* Reverse winding (id CW → Godot CCW) */
+                        for (int t = 0; t < numTris; t++) {
+                            gIdx.set(t*3+0, indices[t*3+0]);
+                            gIdx.set(t*3+1, indices[t*3+2]);
+                            gIdx.set(t*3+2, indices[t*3+1]);
+                        }
+
+                        Array arrays;
+                        arrays.resize(Mesh::ARRAY_MAX);
+                        arrays[Mesh::ARRAY_VERTEX] = gPos;
+                        arrays[Mesh::ARRAY_NORMAL] = gNrm;
+                        arrays[Mesh::ARRAY_TEX_UV] = gUVs;
+                        arrays[Mesh::ARRAY_INDEX]  = gIdx;
+                        mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+
+                        /* Apply material with texture */
+                        if (shaderName[0]) {
+                            Ref<StandardMaterial3D> mat;
+                            mat.instantiate();
+                            mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
+
+                            int sh = Godot_Renderer_RegisterShader(shaderName);
+                            if (sh > 0) {
+                                Ref<ImageTexture> tex = get_shader_texture(sh);
+                                if (tex.is_valid()) {
+                                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                                }
+                            }
+                            apply_shader_props_to_material(mat, shaderName);
+                            mesh->surface_set_material(mesh->get_surface_count() - 1, mat);
+                        }
+
+                        ::free(positions); ::free(normals);
+                        ::free(texcoords); ::free(indices);
+                    }
+                }
+
+                ::free(boneCache);
+
+                if (mesh.is_valid() && mesh->get_surface_count() > 0) {
+                    hud_model_mesh->set_mesh(mesh);
+                    hud_model_mesh->set_visible(true);
+                    hud_model_last_hmodel = hModel;
+                    hud_model_last_anim_hash = anim_hash;
+                }
+            }
+        } else if (!need_rebuild) {
+            /* Same model and pose — just ensure visibility */
+            hud_model_mesh->set_visible(true);
+        }
+    } else {
+        /* No tiki — hide the mesh */
+        if (hud_model_mesh) hud_model_mesh->set_visible(false);
+    }
+
+    /* ── Position the mesh in SubViewport space ── */
+    if (hud_model_mesh && hud_model_mesh->is_visible()) {
+        Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+
+        /* Build entity axis basis (same as normal entity transform) */
+        float *e_fwd = &axis[0];
+        float *e_lft = &axis[3];
+        float *e_up  = &axis[6];
+        Vector3 ef = id_to_godot_point(e_fwd[0], e_fwd[1], e_fwd[2]) * ent_scale;
+        Vector3 el = id_to_godot_point(e_lft[0], e_lft[1], e_lft[2]) * ent_scale;
+        Vector3 eu = id_to_godot_point(e_up[0],  e_up[1],  e_up[2])  * ent_scale;
+
+        Vector3 ent_right = -el;
+        Vector3 ent_back  = -ef;
+        Basis ent_basis(ent_right, eu, ent_back);
+
+        hud_model_mesh->set_global_transform(Transform3D(ent_basis, ent_pos));
+    }
+
+    /* ── Draw SubViewport texture into 2D overlay ── */
+    if (hud_layer && hud_control && hud_model_viewport) {
+        Ref<ViewportTexture> vp_tex = hud_model_viewport->get_texture();
+        if (vp_tex.is_valid()) {
+            RID ci = hud_control->get_canvas_item();
+            RenderingServer *rs = RenderingServer::get_singleton();
+
+            /* Transform rect from engine 640×480 coords to screen coords */
+            Rect2 screen_rect(
+                ui_offset_x + rect[0] * ui_scale_x,
+                ui_offset_y + rect[1] * ui_scale_y,
+                rect[2] * ui_scale_x,
+                rect[3] * ui_scale_y);
+
+            rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+        }
+    }
+}
+
 void MoHAARunner::update_audio(double delta) {
     if (!audio_root) return;
 
@@ -4273,6 +4600,9 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update 2D HUD overlay from captured draw commands (Phase 7h) ──
     update_2d_overlay();
+
+    // ── Update HUD model previews (Phase 148) ──
+    update_hud_models();
 
     // ── Update audio from captured sound events (Phase 8) ──
     update_audio(delta);

@@ -1205,3 +1205,28 @@ const char *Godot_ShaderProps_GetSkyEnv() {
     }
     return nullptr;
 }
+
+/* ── C-linkage helper for godot_renderer.c ── */
+extern "C" int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *out_path, int out_size) {
+    if (!shader_name || !out_path || out_size <= 0) return 0;
+
+    const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
+    if (!sp || sp->stage_count <= 0) return 0;
+
+    /* Find first non-lightmap stage with a valid map path */
+    for (int i = 0; i < sp->stage_count; i++) {
+        const MohaaShaderStage *st = &sp->stages[i];
+        if (st->isLightmap) continue;
+        if (st->map[0] == '\0') continue;
+        /* Skip $lightmap, $whiteimage, $blankimage */
+        if (st->map[0] == '$') continue;
+
+        int len = (int)strlen(st->map);
+        if (len >= out_size) len = out_size - 1;
+        memcpy(out_path, st->map, len);
+        out_path[len] = '\0';
+        return 1;
+    }
+
+    return 0;
+}

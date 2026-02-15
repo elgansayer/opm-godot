@@ -278,4 +278,19 @@ int Godot_ShaderProps_Count();
  */
 const char *Godot_ShaderProps_GetSkyEnv();
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * C-linkage helper: look up a shader's first non-lightmap stage `map`
+ * texture path.  Writes into the caller's buffer.
+ * Returns 1 if found, 0 if no shader definition or no valid stage.
+ */
+int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *out_path, int out_size);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* GODOT_SHADER_PROPS_H */
