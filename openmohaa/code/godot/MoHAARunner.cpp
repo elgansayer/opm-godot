@@ -25,6 +25,7 @@
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/viewport.hpp>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -387,9 +388,6 @@ MoHAARunner::~MoHAARunner() {
     }
 
     // ── Module shutdown hooks (defensive) ──
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
-    Godot_WeaponViewport::get().destroy();
-#endif
 #ifdef HAS_SPEAKER_ENTITIES_MODULE
     Godot_Speakers_Shutdown();
 #endif
@@ -552,9 +550,9 @@ void MoHAARunner::setup_3d_scene() {
     env->set_ambient_light_color(Color(0.3, 0.3, 0.3));
     env->set_ambient_light_energy(0.5);
 
-    // Phase 81: MOHAA's GL1 renderer has no tonemapping — it outputs
-    // texture × lightmap directly to the framebuffer.  Use LINEAR
-    // tonemapper with exposure 1.0 to avoid any colour distortion.
+    // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
+    // MOHAA uses 2x overbright on lightmaps. Linear tonemap with 1.0
+    // exposure gives the closest match to GL1 overbright rendering.
     env->set_tonemapper(Environment::TONE_MAPPER_LINEAR);
     env->set_tonemap_exposure(1.0);
     env->set_tonemap_white(1.0);
@@ -562,15 +560,6 @@ void MoHAARunner::setup_3d_scene() {
     game_world->add_child(world_env);
 
     UtilityFunctions::print("[MoHAA] 3D scene created (Camera3D + light + environment).");
-
-    // ── Phase 62: Create weapon SubViewport for first-person weapon rendering ──
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
-    {
-        int vp_w = 1280, vp_h = 720;  // Default; will be resized when window size is known
-        Godot_WeaponViewport::get().create(this, camera, vp_w, vp_h);
-        UtilityFunctions::print("[MoHAA] Weapon SubViewport created.");
-    }
-#endif
 }
 
 // ──────────────────────────────────────────────
@@ -650,10 +639,12 @@ void MoHAARunner::update_camera() {
             if (fog_dist < 1.0f) fog_dist = 1.0f;
             // Conservative density: ~63% fog at far plane, ~16% at bias
             float density = 1.0f / fog_dist;
-            env->set_fog_enabled(true);
-            env->set_fog_light_color(Color(fp_color[0], fp_color[1], fp_color[2]));
-            env->set_fog_density(density);
-            env->set_fog_sky_affect(1.0f);
+            if (!debug_fog_off) {
+                env->set_fog_enabled(true);
+                env->set_fog_light_color(Color(fp_color[0], fp_color[1], fp_color[2]));
+                env->set_fog_density(density);
+                env->set_fog_sky_affect(1.0f);
+            }
         }
     } else {
         // No fog configured — disable and use default far plane
@@ -1155,11 +1146,52 @@ void MoHAARunner::update_entities() {
 
     int ent_count = Godot_Renderer_GetEntityCount();
 
-    // Log entity count once when first entities appear
+    // Log entity breakdown once when first entities appear
     static bool logged_entity_count = false;
     if (!logged_entity_count && ent_count > 0) {
-        UtilityFunctions::print(String("[MoHAA] Entities in frame: ") +
-                                String::num_int64(ent_count));
+        int n_brush = 0, n_tiki = 0, n_sprite = 0, n_beam = 0, n_other = 0;
+        for (int ei = 0; ei < ent_count; ei++) {
+            float eo[3], ea[9], es = 1.0f;
+            int eh = 0, en = 0, erf = 0;
+            unsigned char ec[4] = {255,255,255,255};
+            int et = Godot_Renderer_GetEntity(ei, eo, ea, &es, &eh, &en, ec, &erf);
+            if (et == RT_MODEL && eh > 0) {
+                int mt = Godot_Model_GetType(eh);
+                if (mt == 1) n_brush++;
+                else n_tiki++;
+            } else if (et == RT_SPRITE) n_sprite++;
+            else if (et == RT_BEAM) n_beam++;
+            else n_other++;
+        }
+        UtilityFunctions::print(String("[MoHAA] Entity breakdown: ") +
+            String::num_int64(ent_count) + " total = " +
+            String::num_int64(n_brush) + " brush + " +
+            String::num_int64(n_tiki) + " tiki + " +
+            String::num_int64(n_sprite) + " sprite + " +
+            String::num_int64(n_beam) + " beam + " +
+            String::num_int64(n_other) + " other");
+
+        // Log first 10 brush model entities with their positions
+        if (n_brush > 0) {
+            int logged = 0;
+            for (int ei = 0; ei < ent_count && logged < 10; ei++) {
+                float eo[3], ea[9], es = 1.0f;
+                int eh = 0, en = 0, erf = 0;
+                unsigned char ec[4] = {255,255,255,255};
+                int et = Godot_Renderer_GetEntity(ei, eo, ea, &es, &eh, &en, ec, &erf);
+                if (et == RT_MODEL && eh > 0) {
+                    int mt = Godot_Model_GetType(eh);
+                    if (mt == 1) {
+                        const char *mn = Godot_Model_GetName(eh);
+                        UtilityFunctions::print(String("[MoHAA]   Brush ent #") +
+                            String::num_int64(ei) + ": model=" + String(mn ? mn : "?") +
+                            " pos=(" + String::num(eo[0], 1) + ", " +
+                            String::num(eo[1], 1) + ", " + String::num(eo[2], 1) + ")");
+                        logged++;
+                    }
+                }
+            }
+        }
         logged_entity_count = true;
     }
 
@@ -3541,13 +3573,6 @@ void MoHAARunner::_process(double delta) {
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
 
-    // ── Phase 62: Sync weapon viewport camera each frame ──
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
-    if (Godot_WeaponViewport::get().is_created()) {
-        Godot_WeaponViewport::get().sync_camera();
-    }
-#endif
-
     // ── Update entity debug meshes from captured render data (Phase 7e) ──
     update_entities();
     update_dlights();
@@ -4155,8 +4180,115 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         bool pressed = key_event->is_pressed();
         bool echo = key_event->is_echo();
 
-        // F5 — quick save
+        // ── DEBUG: Layer toggle keys to isolate double-rendering ──
+        // F1 — toggle BSP world mesh
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F1) {
+            if (bsp_map_node) {
+                bsp_map_node->set_visible(!bsp_map_node->is_visible());
+                UtilityFunctions::print(String("[DEBUG] BSP world mesh: ") +
+                    (bsp_map_node->is_visible() ? String("ON") : String("OFF")));
+            } else {
+                UtilityFunctions::print("[DEBUG] BSP world mesh: no bsp_map_node!");
+            }
+            return;
+        }
+        // F2 — toggle static models
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F2) {
+            if (static_model_root) {
+                static_model_root->set_visible(!static_model_root->is_visible());
+                UtilityFunctions::print(String("[DEBUG] Static models (") +
+                    String::num_int64(static_model_root->get_child_count()) +
+                    " children): " + (static_model_root->is_visible() ? String("ON") : String("OFF")));
+            }
+            return;
+        }
+        // F3 — toggle entities
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F3) {
+            if (entity_root) {
+                entity_root->set_visible(!entity_root->is_visible());
+                UtilityFunctions::print(String("[DEBUG] Entities (") +
+                    String::num_int64(entity_root->get_child_count()) +
+                    " children): " + (entity_root->is_visible() ? String("ON") : String("OFF")));
+            }
+            return;
+        }
+        // F4 — dump scene tree summary
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F4) {
+            UtilityFunctions::print("[DEBUG] === Scene Tree Dump ===");
+            if (game_world) {
+                UtilityFunctions::print(String("[DEBUG] game_world children: ") +
+                    String::num_int64(game_world->get_child_count()));
+                for (int ci = 0; ci < game_world->get_child_count(); ci++) {
+                    Node *child = game_world->get_child(ci);
+                    int gc = child ? child->get_child_count() : 0;
+                    UtilityFunctions::print(String("[DEBUG]   ") +
+                        String::num_int64(ci) + ": " + child->get_name() +
+                        " (" + child->get_class() + ", " +
+                        String::num_int64(gc) + " children)");
+                }
+            }
+            return;
+        }
+
+        // F5 — toggle fog
         if (pressed && !echo && key_event->get_keycode() == Key::KEY_F5) {
+            debug_fog_off = !debug_fog_off;
+            if (world_env) {
+                Ref<Environment> env = world_env->get_environment();
+                if (env.is_valid()) {
+                    env->set_fog_enabled(!debug_fog_off);
+                    UtilityFunctions::print(String("[DEBUG] Fog: ") +
+                        (!debug_fog_off ? String("ON") : String("OFF")));
+                }
+            }
+            return;
+        }
+        // F7 — toggle wireframe mode (viewport debug draw)
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F7) {
+            Viewport *vp = get_viewport();
+            if (vp) {
+                auto cur = vp->get_debug_draw();
+                if (cur == Viewport::DEBUG_DRAW_WIREFRAME) {
+                    vp->set_debug_draw(Viewport::DEBUG_DRAW_DISABLED);
+                    UtilityFunctions::print("[DEBUG] Wireframe: OFF");
+                } else {
+                    // Must enable wireframe generation first
+                    RenderingServer::get_singleton()->set_debug_generate_wireframes(true);
+                    vp->set_debug_draw(Viewport::DEBUG_DRAW_WIREFRAME);
+                    UtilityFunctions::print("[DEBUG] Wireframe: ON");
+                }
+            } else {
+                UtilityFunctions::print("[DEBUG] Wireframe: no viewport!");
+            }
+            return;
+        }
+        // F8 — toggle textures off (flat colour materials on BSP)
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F8) {
+            debug_notex = !debug_notex;
+            if (bsp_map_node) {
+                for (int ci = 0; ci < bsp_map_node->get_child_count(); ci++) {
+                    MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(bsp_map_node->get_child(ci));
+                    if (!mi) continue;
+                    Ref<Mesh> m = mi->get_mesh();
+                    if (m.is_null()) continue;
+                    for (int si = 0; si < m->get_surface_count(); si++) {
+                        Ref<Material> base = m->surface_get_material(si);
+                        Ref<StandardMaterial3D> smat = Object::cast_to<StandardMaterial3D>(base.ptr());
+                        if (smat.is_null()) continue;
+                        if (debug_notex) {
+                            smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
+                            smat->set_feature(BaseMaterial3D::FEATURE_DETAIL, false);
+                            smat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                        }
+                    }
+                }
+                UtilityFunctions::print(String("[DEBUG] BSP textures: ") +
+                    (!debug_notex ? String("ON (reload map to restore)") : String("OFF")));
+            }
+            return;
+        }
+        // F6 — quick save
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F6) {
             Godot_Save_QuickSave();
             UtilityFunctions::print("[MoHAA] Quick save requested");
             return;

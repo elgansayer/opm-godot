@@ -149,6 +149,7 @@ struct MohaaShaderStage {
 
     bool isClampMap;                 /* clampMap vs map */
     bool isLightmap;                 /* stage uses $lightmap */
+    bool hasNextBundleLightmap;      /* nextBundle contains $lightmap (multi-tex lightmap) */
 
     bool hasAlphaFunc;               /* alphaFunc present in this stage */
     float alphaFuncThreshold;        /* 0.01 for GT0, 0.5 for GE128/LT128 */

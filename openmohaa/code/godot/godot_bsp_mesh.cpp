@@ -527,26 +527,13 @@ static BezierVert bezier_eval(const bsp_drawvert_t *ctrl[3][3], float s, float t
             // Texture UVs
             result.uv  += Vector2(cv->st[0], cv->st[1]) * w;
             result.lm_uv += Vector2(cv->lightmap[0], cv->lightmap[1]) * w;
-            // Vertex colour — apply overbright shift per control point
-            // (matching R_ColorShiftLightingBytesAlpha at load time)
-            {
-                int vr = cv->color[0] << 1;
-                int vg = cv->color[1] << 1;
-                int vb = cv->color[2] << 1;
-                if ((vr | vg | vb) > 255) {
-                    int vmax = vr > vg ? vr : vg;
-                    vmax = vmax > vb ? vmax : vb;
-                    vr = vr * 255 / vmax;
-                    vg = vg * 255 / vmax;
-                    vb = vb * 255 / vmax;
-                }
-                result.col += Color(
-                    vr / 255.0f,
-                    vg / 255.0f,
-                    vb / 255.0f,
-                    cv->color[3] / 255.0f
+            // Vertex colour with overbright shift (overbrightBits=1)
+            result.col += Color(
+                fmin(1.0f, (cv->color[0] / 255.0f) * 2.0f),
+                fmin(1.0f, (cv->color[1] / 255.0f) * 2.0f),
+                fmin(1.0f, (cv->color[2] / 255.0f) * 2.0f),
+                cv->color[3] / 255.0f
                 ) * w;
-            }
         }
     }
 
@@ -806,22 +793,20 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
         uint8_t *dst = rgba.ptrw();
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
-            // Light-shift: exact match of R_ColorShiftLightingBytes
-            // with overbrightBits=1 (shift by 1 = multiply by 2).
-            // CRITICAL: normalize by max component instead of clamping!
-            // Simple clamping (if r>255 r=255) causes bright pixels to
-            // trend towards white, losing hue information. The engine
-            // preserves hue by dividing all channels by the maximum.
+            // Light-shift: mimic R_ColorShiftLightingBytes with overbrightBits=1
+            // Shift left by 1 (multiply by 2), then normalise to preserve
+            // colour ratios when any channel overflows.
             int r = src[p * 3 + 0] << 1;
             int g = src[p * 3 + 1] << 1;
             int b = src[p * 3 + 2] << 1;
-
-            if ((r | g | b) > 255) {
-                int max = r > g ? r : g;
-                max = max > b ? max : b;
-                r = r * 255 / max;
-                g = g * 255 / max;
-                b = b * 255 / max;
+            // Normalise by max-component to preserve hue
+            int mx = r;
+            if (g > mx) mx = g;
+            if (b > mx) mx = b;
+            if (mx > 255) {
+                r = r * 255 / mx;
+                g = g * 255 / mx;
+                b = b * 255 / mx;
             }
 
             dst[p * 4 + 0] = (uint8_t)r;
@@ -939,13 +924,11 @@ static Ref<ArrayMesh> batches_to_array_mesh(
         Ref<StandardMaterial3D> mat;
         mat.instantiate();
         // BSP world surfaces are single-sided (only front faces exist).
-        // Use CULL_DISABLED as default; shader overrides applied below.
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-
-        /* BSP world geometry uses baked lightmaps for all lighting.
-         * Set UNSHADED so Godot's dynamic lights (DirectionalLight3D,
-         * ambient) don't add a second layer of lighting on top of the
-         * lightmap detail texture, which would wash surfaces white. */
+        // Default to CULL_BACK; shader definitions may override.
+        mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
+        // MOHAA BSP lighting is fully baked into lightmaps and vertex
+        // colours.  Disable Godot's realtime lighting so surfaces whose
+        // normals face away from the DirectionalLight3D don't go dark.
         mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
 
         bool has_texture = false;
@@ -1070,13 +1053,10 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (surf->numIndexes <= 0) return false;
     }
 
-    // Get or create batch — keyed by (shaderNum, lightmapNum) so surfaces
-    // with the same shader but different lightmap pages get separate batches.
-    // This is critical: BSP surfaces reference specific lightmap pages, and
-    // their lightmap UVs point into that specific 128×128 atlas.  Using the
-    // wrong lightmap produces completely wrong lighting.
-    int64_t batch_key = ((int64_t)(uint32_t)surf->shaderNum << 32)
-                      | (int64_t)(uint32_t)(surf->lightmapNum + 2);
+    // Get or create batch — keyed by (shader + lightmap) composite.
+    // Each unique combination of shader and lightmap page gets its own
+    // batch so that every surface receives the correct lightmap texture.
+    int64_t batch_key = ((int64_t)surf->shaderNum << 16) | (int64_t)(surf->lightmapNum & 0xFFFF);
     ShaderBatch &batch = batches[batch_key];
     if (!batch.shader_name && surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
         batch.shader_name = shaders[surf->shaderNum].shader;
@@ -1085,6 +1065,8 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (shaders[surf->shaderNum].surfaceFlags & SURF_NOLIGHTMAP) {
             batch.nolightmap = true;
         }
+    }
+    if (batch.lightmap_num < 0 && surf->lightmapNum >= 0) {
         batch.lightmap_num = surf->lightmapNum;
     }
 
@@ -1103,24 +1085,12 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         batch.normals.push_back(id_to_godot_dir(dv->normal));
         batch.uvs.push_back(Vector2(dv->st[0], dv->st[1]));
         batch.lm_uvs.push_back(Vector2(dv->lightmap[0], dv->lightmap[1]));
-        /* Apply overbright shift to vertex colours, matching
-         * R_ColorShiftLightingBytesAlpha (tr_bsp.c).  The engine
-         * applies this to ALL BSP vertex colours during loading. */
-        {
-            int vr = dv->color[0] << 1;
-            int vg = dv->color[1] << 1;
-            int vb = dv->color[2] << 1;
-            if ((vr | vg | vb) > 255) {
-                int vmax = vr > vg ? vr : vg;
-                vmax = vmax > vb ? vmax : vb;
-                vr = vr * 255 / vmax;
-                vg = vg * 255 / vmax;
-                vb = vb * 255 / vmax;
-            }
-            batch.colors.push_back(Color(
-                vr / 255.0f, vg / 255.0f,
-                vb / 255.0f, dv->color[3] / 255.0f));
-        }
+        // Vertex colour with overbright shift (overbrightBits=1)
+        batch.colors.push_back(Color(
+            fmin(1.0f, (dv->color[0] / 255.0f) * 2.0f),
+            fmin(1.0f, (dv->color[1] / 255.0f) * 2.0f),
+            fmin(1.0f, (dv->color[2] / 255.0f) * 2.0f),
+            dv->color[3] / 255.0f));
     }
 
     for (int i = 0; i < surf->numIndexes; i++) {
@@ -1509,10 +1479,31 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     int processed      = 0;
     int processed_patches = 0;
 
+    // Determine world model surface range — model 0 defines which surfaces
+    // are world geometry.  Surfaces outside this range belong to sub-models.
+    int world_first = 0;
+    int world_count = num_surfaces;
+    if (bsp_models && num_models > 0) {
+        world_first = bsp_models[0].firstSurface;
+        world_count = bsp_models[0].numSurfaces;
+        UtilityFunctions::print(String("[BSP] Model 0 (world): firstSurface=") +
+            String::num_int64(world_first) + " numSurfaces=" +
+            String::num_int64(world_count) + " total_surfaces=" +
+            String::num_int64(num_surfaces));
+        if (world_count != num_surfaces) {
+            UtilityFunctions::print(String("[BSP] WARNING: model 0 has ") +
+                String::num_int64(world_count) + " surfaces but BSP has " +
+                String::num_int64(num_surfaces) +
+                " — extra surfaces may be sub-model surfaces!");
+        }
+    }
+    int world_end = world_first + world_count;
+    if (world_end > num_surfaces) world_end = num_surfaces;
+
     /* Phase 74: Collect flare surface positions */
     s_flares.clear();
 
-    for (int s = 0; s < num_surfaces; s++) {
+    for (int s = world_first; s < world_end; s++) {
         const bsp_surface_t *surf = &surfaces[s];
 
         // Skip surfaces belonging to brush sub-models — they render at
@@ -1615,14 +1606,14 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             // Skip patches with invalid lightmap scale
             if (patch->lmapScale == 0) continue;
 
-            // Get or create shader batch — keyed by (shader, lightmap) like
-            // BSP surfaces, so terrain patches with different lightmap pages
-            // get separate materials.
-            int64_t terrain_key = ((int64_t)(uint32_t)patch->iShader << 32)
-                                | (int64_t)(uint32_t)((int)patch->iLightMap + 2);
+            // Get or create shader batch — keyed by (shader + lightmap)
+            int lm_num = (patch->iLightMap > 0) ? (int)patch->iLightMap : -1;
+            int64_t terrain_key = ((int64_t)patch->iShader << 16) | (int64_t)(lm_num & 0xFFFF);
             ShaderBatch &batch = batches[terrain_key];
             if (!batch.shader_name) {
                 batch.shader_name = sh->shader;
+            }
+            if (batch.lightmap_num < 0 && patch->iLightMap > 0) {
                 batch.lightmap_num = (int)patch->iLightMap;
             }
 
@@ -1726,6 +1717,39 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     }
 
     // ── 6. Create world Godot ArrayMesh ──
+    /* Diagnostic: log how many batches have each transparency type */
+    {
+        int b_opaque = 0, b_alpha_test = 0, b_alpha_blend = 0, b_additive = 0, b_multi = 0, b_none = 0;
+        for (auto &kv : batches) {
+            const GodotShaderProps *sp = kv.second.shader_name ? Godot_ShaderProps_Find(kv.second.shader_name) : nullptr;
+            if (!sp) { b_none++; continue; }
+            switch (sp->transparency) {
+                case SHADER_OPAQUE: b_opaque++; break;
+                case SHADER_ALPHA_TEST: b_alpha_test++; break;
+                case SHADER_ALPHA_BLEND: b_alpha_blend++; break;
+                case SHADER_ADDITIVE: b_additive++; break;
+                case SHADER_MULTIPLICATIVE: b_multi++; break;
+            }
+        }
+        UtilityFunctions::print(String("[BSP] Batch transparency: ") +
+            String::num_int64(b_opaque) + " opaque, " +
+            String::num_int64(b_alpha_test) + " atest, " +
+            String::num_int64(b_alpha_blend) + " ablend, " +
+            String::num_int64(b_additive) + " add, " +
+            String::num_int64(b_multi) + " mul, " +
+            String::num_int64(b_none) + " no-def");
+        if (b_multi > 0 || b_alpha_blend > 0) {
+            for (auto &kv : batches) {
+                const GodotShaderProps *sp = kv.second.shader_name ? Godot_ShaderProps_Find(kv.second.shader_name) : nullptr;
+                if (sp && (sp->transparency == SHADER_MULTIPLICATIVE || sp->transparency == SHADER_ALPHA_BLEND)) {
+                    UtilityFunctions::print(String("[BSP]   TRANS batch: ") +
+                        String(kv.second.shader_name) +
+                        " t=" + String::num_int64((int)sp->transparency) +
+                        " verts=" + String::num_int64((int)kv.second.positions.size()));
+                }
+            }
+        }
+    }
     int tex_loaded = 0, tex_failed = 0;
     Ref<ArrayMesh> mesh = batches_to_array_mesh(batches, &tex_loaded, &tex_failed);
     int surface_idx = mesh->get_surface_count();
@@ -1747,6 +1771,13 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         for (int m = 1; m < num_models; m++) {
             int first = bsp_models[m].firstSurface;
             int count = bsp_models[m].numSurfaces;
+
+            if (m <= 15) {
+                UtilityFunctions::print(String("[BSP] Sub-model *") +
+                    String::num_int64(m) + " first=" + String::num_int64(first) +
+                    " count=" + String::num_int64(count) +
+                    " (total_surfaces=" + String::num_int64(num_surfaces) + ")");
+            }
 
             std::unordered_map<int64_t, ShaderBatch> bm_batches;
             int bm_skip_nd = 0, bm_skip_sky = 0;

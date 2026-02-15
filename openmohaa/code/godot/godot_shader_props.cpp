@@ -216,7 +216,12 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                      * Don't overwrite stg->map — keep the diffuse path.
                      * If this bundle is $lightmap, the stage is a combined
                      * diffuse+lightmap multi-texture pass, NOT a pure
-                     * lightmap stage (isLightmap stays false). */
+                     * lightmap stage (isLightmap stays false).
+                     * Record the fact for post-parse transparency analysis
+                     * so blendFunc filter in this stage is recognised as
+                     * lightmap modulation rather than transparent overlay. */
+                    if (!Q_stricmp(token, "$lightmap"))
+                        stg->hasNextBundleLightmap = true;
                 }
             }
         }
@@ -1015,10 +1020,13 @@ void Godot_ShaderProps_Load() {
          * (matching the real renderer's SortNewShader).  alphaFunc
          * is preserved since it's set from stage parsing. */
         if (props.transparency != SHADER_ALPHA_TEST && props.stage_count > 0) {
-            /* Detect whether a lightmap stage exists */
+            /* Detect whether a lightmap stage exists — either as a
+             * dedicated $lightmap stage (standard Q3 two-pass) OR as a
+             * nextBundle $lightmap within a combined multi-texture stage
+             * (MOHAA single-pass pattern). */
             bool has_lightmap_stage = false;
             for (int s = 0; s < props.stage_count; s++) {
-                if (props.stages[s].isLightmap) {
+                if (props.stages[s].isLightmap || props.stages[s].hasNextBundleLightmap) {
                     has_lightmap_stage = true;
                     break;
                 }
@@ -1074,6 +1082,45 @@ void Godot_ShaderProps_Load() {
     }
 
     free(big_buf);
+
+    /* ── Diagnostic: count transparency classifications ── */
+    {
+        int n_opaque = 0, n_alpha_test = 0, n_alpha_blend = 0;
+        int n_additive = 0, n_multiplicative = 0;
+        for (auto &kv : s_shader_props) {
+            switch (kv.second.transparency) {
+                case SHADER_OPAQUE:        n_opaque++; break;
+                case SHADER_ALPHA_TEST:    n_alpha_test++; break;
+                case SHADER_ALPHA_BLEND:   n_alpha_blend++; break;
+                case SHADER_ADDITIVE:      n_additive++; break;
+                case SHADER_MULTIPLICATIVE: n_multiplicative++; break;
+            }
+        }
+        UtilityFunctions::print(String("[ShaderProps] Transparency: ") +
+            String::num_int64(n_opaque) + " opaque, " +
+            String::num_int64(n_alpha_test) + " alphaTest, " +
+            String::num_int64(n_alpha_blend) + " alphaBlend, " +
+            String::num_int64(n_additive) + " additive, " +
+            String::num_int64(n_multiplicative) + " multiplicative");
+        /* Log some example multiplicative shaders for diagnosis */
+        if (n_multiplicative > 0) {
+            int logged = 0;
+            for (auto &kv : s_shader_props) {
+                if (kv.second.transparency == SHADER_MULTIPLICATIVE && logged < 10) {
+                    const char *lm_info = "no-lm";
+                    for (int s2 = 0; s2 < kv.second.stage_count; s2++) {
+                        if (kv.second.stages[s2].isLightmap) { lm_info = "lm-stage"; break; }
+                        if (kv.second.stages[s2].hasNextBundleLightmap) { lm_info = "nb-lm"; break; }
+                    }
+                    UtilityFunctions::print(String("[ShaderProps]   MUL: ") +
+                        String(kv.first.c_str()) + " stages=" +
+                        String::num_int64(kv.second.stage_count) +
+                        " " + String(lm_info));
+                    logged++;
+                }
+            }
+        }
+    }
 
     UtilityFunctions::print(String("[ShaderProps] Loaded ") +
                             String::num_int64(files_loaded) + " shader files (" +

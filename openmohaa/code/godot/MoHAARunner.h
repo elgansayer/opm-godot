@@ -61,11 +61,6 @@
 #define HAS_ENTITY_LIGHTING_MODULE 1
 #endif
 
-#if __has_include("godot_weapon_viewport.h")
-#include "godot_weapon_viewport.h"
-#define HAS_WEAPON_VIEWPORT_MODULE 1
-#endif
-
 #if __has_include("godot_ui_system.h")
 #include "godot_ui_system.h"
 #define HAS_UI_SYSTEM_MODULE 1
@@ -165,6 +160,8 @@ private:
     // Input state (Phase 6)
     bool mouse_captured = false;  // Whether mouse is in relative/captured mode
     bool hud_visible = true;        // F9 toggles HUD overlay visibility
+    bool debug_fog_off = false;     // F5 toggles fog off for debugging
+    bool debug_notex = false;       // F8 toggles textures off for debugging
     bool last_ui_cursor_shown = false; // Phase 59: track cursor state for mode transitions
 
     // 3D scene nodes (Phase 7a — camera bridge)
