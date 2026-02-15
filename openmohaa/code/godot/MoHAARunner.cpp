@@ -2690,10 +2690,14 @@ void MoHAARunner::update_shadow_blobs() {
         arrays[Mesh::ARRAY_COLOR]  = gCol;
         arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-        Ref<ArrayMesh> smesh;
-        smesh.instantiate();
+        Ref<ArrayMesh> smesh = Object::cast_to<ArrayMesh>(mi->get_mesh().ptr());
+        if (smesh.is_valid()) {
+            smesh->clear_surfaces();
+        } else {
+            smesh.instantiate();
+            mi->set_mesh(smesh);
+        }
         smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-        mi->set_mesh(smesh);
         mi->set_surface_override_material(0, shadow_blob_material);
 
         mi->set_global_transform(Transform3D());
