@@ -205,6 +205,9 @@ extern "C" {
     int  Godot_Client_GetPaused(void);
     void Godot_Client_ForceUnpause(void);
     int  Godot_Client_IsAnyOverlayActive(void);
+    void Godot_Client_SetMousePos(int x, int y);
+    int  Godot_Client_IsUIStarted(void);
+    int  Godot_Client_IsMenuUp(void);
 
     // Save/load bridge — from godot_save_accessors.c
     void Godot_Save_QuickSave(void);
@@ -284,6 +287,7 @@ extern "C" {
 #ifndef HAS_UI_SYSTEM_MODULE
     int   Godot_UI_Update(void);
     int   Godot_UI_IsActive(void);
+    int   Godot_UI_IsMenuActive(void);
     int   Godot_UI_ShouldShowCursor(void);
     void  Godot_UI_OnMapLoad(void);
     int   Godot_UI_IsLoading(void);
@@ -528,6 +532,10 @@ void MoHAARunner::_bind_methods() {
     godot::ClassDB::bind_method(godot::D_METHOD("close_menu"), &MoHAARunner::close_menu);
     godot::ClassDB::bind_method(godot::D_METHOD("push_menu", "menu_name"), &MoHAARunner::push_menu);
     godot::ClassDB::bind_method(godot::D_METHOD("show_menu", "menu_name", "force"), &MoHAARunner::show_menu, false);
+    godot::ClassDB::bind_method(godot::D_METHOD("toggle_menu", "menu_name"), &MoHAARunner::toggle_menu);
+    godot::ClassDB::bind_method(godot::D_METHOD("pop_menu", "restore_cvars"), &MoHAARunner::pop_menu, false);
+    godot::ClassDB::bind_method(godot::D_METHOD("hide_menu", "menu_name"), &MoHAARunner::hide_menu);
+    godot::ClassDB::bind_method(godot::D_METHOD("is_menu_active"), &MoHAARunner::is_menu_active);
 
     // Properties
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::STRING, "basepath"), "set_basepath", "get_basepath");
@@ -4093,6 +4101,15 @@ void MoHAARunner::update_input_routing() {
     // Detect overlay transitions and reset mouse tracking to avoid jumps
     if (overlay_active != overlay_was_active) {
         Godot_ResetMousePosition();
+        // When transitioning TO overlay (menu), centre the engine cursor
+        // so the UI starts with the pointer in a sensible position.
+        if (overlay_active) {
+            int rw = 0, rh = 0;
+            Godot_Renderer_GetVidSize(&rw, &rh);
+            if (rw > 0 && rh > 0) {
+                Godot_Client_SetMousePos(rw / 2, rh / 2);
+            }
+        }
         overlay_was_active = overlay_active;
     }
 
@@ -4673,6 +4690,31 @@ void MoHAARunner::show_menu(const String &menu_name, bool force) {
         cmd = String("showmenu ") + String(name.get_data()) + String("\n");
     }
     Cbuf_AddText(cmd.utf8().get_data());
+}
+
+void MoHAARunner::toggle_menu(const String &menu_name) {
+    if (!initialized || menu_name.is_empty()) return;
+    CharString name = menu_name.utf8();
+    String cmd = String("togglemenu ") + String(name.get_data()) + String("\n");
+    Cbuf_AddText(cmd.utf8().get_data());
+}
+
+void MoHAARunner::pop_menu(bool restore_cvars) {
+    if (!initialized) return;
+    String cmd = String("popmenu ") + String(restore_cvars ? "1" : "0") + String("\n");
+    Cbuf_AddText(cmd.utf8().get_data());
+}
+
+void MoHAARunner::hide_menu(const String &menu_name) {
+    if (!initialized || menu_name.is_empty()) return;
+    CharString name = menu_name.utf8();
+    String cmd = String("hidemenu ") + String(name.get_data()) + String("\n");
+    Cbuf_AddText(cmd.utf8().get_data());
+}
+
+bool MoHAARunner::is_menu_active() const {
+    if (!initialized) return false;
+    return Godot_UI_IsMenuActive() != 0;
 }
 
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {

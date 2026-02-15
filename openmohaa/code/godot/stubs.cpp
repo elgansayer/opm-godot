@@ -168,15 +168,12 @@ void Sys_UnloadCGame(void) {
 }
 
 // ──────────────────────────────────────────────
-//  UI stubs — referenced by common.c when DEDICATED is undef'd.
-//  These will be real once the UI system is fully wired.
+//  UI stubs — residual symbols not provided by the real UI code.
+//  UI_ClearResource is defined in cl_ui.cpp (the real implementation).
 // ──────────────────────────────────────────────
 
 qboolean UI_GameCommand(void) {
     return qfalse;
-}
-
-void UI_ClearResource(void) {
 }
 
 // ──────────────────────────────────────────────
