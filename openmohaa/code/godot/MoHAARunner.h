@@ -251,17 +251,8 @@ private:
     };
     std::vector<EntityCacheKey> entity_cache_keys;
 
-    // Phase 60: Skeletal mesh caching by entity number + animation state hash
-    struct SkelMeshCacheEntry {
-        uint64_t anim_hash = 0;
-        int mesh_surfaces = 0;             // surface count as a lightweight mesh identity
-        Ref<ArrayMesh> mesh;
-    };
-    std::unordered_map<int, SkelMeshCacheEntry> skel_mesh_cache; // entityNumber → cached skinned mesh
-
-    // Phase 61: Tinted material cache — avoid per-frame material duplication
-    // Key = (hModel << 20) | (surfIdx << 12) | quantised_rgba
-    std::unordered_map<uint64_t, Ref<StandardMaterial3D>> tinted_mat_cache;
+    // Phase 60/61: Frame counter for singleton mesh & material cache eviction
+    uint64_t frame_counter_ = 0;
 
     // 2D HUD overlay (Phase 7h)
     CanvasLayer *hud_layer = nullptr;                     // Overlay layer for 2D elements
