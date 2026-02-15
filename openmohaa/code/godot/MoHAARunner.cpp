@@ -526,6 +526,8 @@ void MoHAARunner::_bind_methods() {
     // Menu control (Phase 261)
     godot::ClassDB::bind_method(godot::D_METHOD("open_main_menu"), &MoHAARunner::open_main_menu);
     godot::ClassDB::bind_method(godot::D_METHOD("close_menu"), &MoHAARunner::close_menu);
+    godot::ClassDB::bind_method(godot::D_METHOD("push_menu", "menu_name"), &MoHAARunner::push_menu);
+    godot::ClassDB::bind_method(godot::D_METHOD("show_menu", "menu_name", "force"), &MoHAARunner::show_menu, false);
 
     // Properties
     ADD_PROPERTY(godot::PropertyInfo(godot::Variant::STRING, "basepath"), "set_basepath", "get_basepath");
@@ -4646,12 +4648,31 @@ int MoHAARunner::get_vsync_mode() const {
 
 void MoHAARunner::open_main_menu() {
     if (!initialized) return;
-    Cbuf_AddText("togglemenu 1\n");
+    Cbuf_AddText("pushmenu main\n");
 }
 
 void MoHAARunner::close_menu() {
     if (!initialized) return;
-    Cbuf_AddText("togglemenu 0\n");
+    Cbuf_AddText("popmenu 0\n");
+}
+
+void MoHAARunner::push_menu(const String &menu_name) {
+    if (!initialized || menu_name.is_empty()) return;
+    CharString name = menu_name.utf8();
+    String cmd = String("pushmenu ") + String(name.get_data()) + String("\n");
+    Cbuf_AddText(cmd.utf8().get_data());
+}
+
+void MoHAARunner::show_menu(const String &menu_name, bool force) {
+    if (!initialized || menu_name.is_empty()) return;
+    CharString name = menu_name.utf8();
+    String cmd;
+    if (force) {
+        cmd = String("showmenu ") + String(name.get_data()) + String(" 1\n");
+    } else {
+        cmd = String("showmenu ") + String(name.get_data()) + String("\n");
+    }
+    Cbuf_AddText(cmd.utf8().get_data());
 }
 
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {

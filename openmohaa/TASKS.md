@@ -1945,3 +1945,29 @@ The `spawns[]` table in `g_spawn.cpp` contains entries for `SP_trigger_always`, 
 
 ### Files modified:
 - `code/fgame/trigger.cpp` — fixed TriggerReverb CLASS_DECLARATION classname from `"trigger_music"` to `"trigger_reverb"`
+
+## Phase 132: Menu Command Parity Wrappers ✅
+
+- [x] **Task 132.1:** Fixed `MoHAARunner::open_main_menu()` to use a valid UI command (`pushmenu main`) instead of invalid `togglemenu 1`.
+- [x] **Task 132.2:** Fixed `MoHAARunner::close_menu()` to use valid pop command syntax (`popmenu 0`) instead of invalid `togglemenu 0`.
+- [x] **Task 132.3:** Added explicit script-facing wrappers:
+  - `push_menu(menu_name)` → issues `pushmenu <menu_name>`
+  - `show_menu(menu_name, force)` → issues `showmenu <menu_name> [1]`
+- [x] **Task 132.4:** Bound new methods via `ClassDB` so Godot scripts can invoke menu stack operations directly.
+
+### Key technical details (Phase 132):
+- Source-traced UI command semantics from `code/client/cl_ui.cpp`:
+  - `UI_ToggleMenu_f` requires `togglemenu <menuname>` (not numeric)
+  - `UI_PopMenu_f` requires `popmenu <restore_cvars>`
+  - `UI_ShowMenu_f` accepts optional numeric force flag (`0/1`)
+- This fixes broken menu-control APIs in the GDExtension wrapper and restores parity with engine console command contracts.
+
+### Files modified (Phase 132):
+- `code/godot/MoHAARunner.cpp` — corrected menu command strings, added `push_menu`/`show_menu`, bound methods
+- `code/godot/MoHAARunner.h` — added method declarations
+
+### Build verification (Phase 132):
+- `scons platform=linux target=template_debug -j$(nproc) dev_build=yes` completed and produced targets.
+
+### Next priority:
+- Full UI parity validation pass for in-game menu flow (`ESC` menu stack, team/weapon selection, and loading/menu background transitions) with runtime command-path checks for `pushmenu`/`showmenu` usage from scripts and UI events.

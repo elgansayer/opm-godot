@@ -430,6 +430,8 @@ public:
     // Main menu control (Phase 261)
     void open_main_menu();
     void close_menu();
+    void push_menu(const String &menu_name);
+    void show_menu(const String &menu_name, bool force = false);
 };
 
 #endif
