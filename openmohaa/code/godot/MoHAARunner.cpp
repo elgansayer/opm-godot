@@ -2,6 +2,7 @@
 #include "godot_bsp_mesh.h"
 #include "godot_skel_model.h"
 #include "godot_shader_props.h"
+#include "godot_weapon_effects.h"
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -404,6 +405,9 @@ MoHAARunner::~MoHAARunner() {
 #endif
 #ifdef HAS_MUSIC_MODULE
     Godot_Music_Shutdown();
+#endif
+#ifdef HAS_WEAPON_EFFECTS_MODULE
+    Godot_WeaponEffects_Cleanup();
 #endif
 
     if (initialized) {
@@ -3803,6 +3807,9 @@ void MoHAARunner::_ready() {
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Init(game_world);
 #endif
+#ifdef HAS_WEAPON_EFFECTS_MODULE
+    Godot_WeaponEffects_Init(game_world);
+#endif
 
     UtilityFunctions::print("[MoHAA] Engine initialised.");
 }
@@ -3911,6 +3918,10 @@ void MoHAARunner::_process(double delta) {
 #endif
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Update(delta);
+#endif
+#ifdef HAS_WEAPON_EFFECTS_MODULE
+    Godot_MuzzleFlash_Update((float)delta);
+    Godot_ShellCasing_Update((float)delta);
 #endif
 #ifdef HAS_DEBUG_RENDER_MODULE
     Godot_DebugRender_Update(delta);

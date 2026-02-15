@@ -2089,6 +2089,23 @@ static void GR_Set2DInitialShaderTime( float startTime )
     gr_2dShaderStartTime = startTime;
 }
 
+/* -------------------------------------------------------------------
+ *  Godot VFX hooks (Phase 224)
+ * ---------------------------------------------------------------- */
+
+extern void Godot_MuzzleFlash_Spawn_C(const float *pos, const float *dir, float intensity);
+extern void Godot_ShellCasing_Eject_C(const float *pos, const float *vel, int type);
+
+static void GR_Godot_MuzzleFlash_Spawn(const vec3_t pos, const vec3_t dir, float intensity)
+{
+    Godot_MuzzleFlash_Spawn_C(pos, dir, intensity);
+}
+
+static void GR_Godot_ShellCasing_Eject(const vec3_t pos, const vec3_t vel, int type)
+{
+    Godot_ShellCasing_Eject_C(pos, vel, type);
+}
+
 /* ===================================================================
  *  Camera bridge C accessors (Phase 7a)
  *
@@ -2786,6 +2803,10 @@ refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
     re.LoadRawImage        = GR_LoadRawImage;
     re.FreeRawImage        = GR_FreeRawImage;
     re.Set2DInitialShaderTime = GR_Set2DInitialShaderTime;
+
+    /* Godot VFX hooks */
+    re.Godot_MuzzleFlash_Spawn = GR_Godot_MuzzleFlash_Spawn;
+    re.Godot_ShellCasing_Eject = GR_Godot_ShellCasing_Eject;
 
     return &re;
 }

@@ -385,9 +385,63 @@ void CG_ViewModelAnimation(refEntity_t *pModel)
             break;
         case VM_ANIM_FIRE:
             pszAnimSuffix = "fire";
+#ifdef GODOT_GDEXTENSION
+            if (cgi.Godot_MuzzleFlash_Spawn) {
+                vec3_t muzzleOrigin;
+                VectorMA(cg.refdef.vieworg, 20.0f, cg.refdef.viewaxis[0], muzzleOrigin);
+                // Offset slightly right/down for better visibility
+                VectorMA(muzzleOrigin, 4.0f, cg.refdef.viewaxis[1], muzzleOrigin);
+                VectorMA(muzzleOrigin, -2.0f, cg.refdef.viewaxis[2], muzzleOrigin);
+                cgi.Godot_MuzzleFlash_Spawn(muzzleOrigin, cg.refdef.viewaxis[0], 2.0f);
+            }
+            if (cgi.Godot_ShellCasing_Eject) {
+                vec3_t shellOrigin, shellVel;
+                // Eject from slightly right and down of view
+                VectorMA(cg.refdef.vieworg, 12.0f, cg.refdef.viewaxis[0], shellOrigin);
+                VectorMA(shellOrigin, 6.0f, cg.refdef.viewaxis[1], shellOrigin);
+                VectorMA(shellOrigin, -4.0f, cg.refdef.viewaxis[2], shellOrigin);
+
+                // Velocity: Right + Up + Random
+                VectorScale(cg.refdef.viewaxis[1], 120.0f, shellVel);
+                VectorMA(shellVel, 60.0f, cg.refdef.viewaxis[2], shellVel);
+
+                // Determine type based on weapon class (available in local scope from earlier)
+                // iWeaponClass is calculated at top of function but not passed down.
+                // We can re-read it from cg.snap
+                int wClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+                int shellType = 0; // Pistol/SMG
+                if ((wClass & WEAPON_CLASS_RIFLE) || (wClass & WEAPON_CLASS_MG) || (wClass & WEAPON_CLASS_HEAVY)) {
+                    shellType = 1; // Rifle
+                }
+                cgi.Godot_ShellCasing_Eject(shellOrigin, shellVel, shellType);
+            }
+#endif
             break;
         case VM_ANIM_FIRE_SECONDARY:
             pszAnimSuffix = "fire_secondary";
+#ifdef GODOT_GDEXTENSION
+            if (cgi.Godot_MuzzleFlash_Spawn) {
+                vec3_t muzzleOrigin;
+                VectorMA(cg.refdef.vieworg, 20.0f, cg.refdef.viewaxis[0], muzzleOrigin);
+                cgi.Godot_MuzzleFlash_Spawn(muzzleOrigin, cg.refdef.viewaxis[0], 2.0f);
+            }
+            // Secondary fire often ejects too (e.g. BAR slow fire), unless it's a bash
+            if (cgi.Godot_ShellCasing_Eject) {
+                vec3_t shellOrigin, shellVel;
+                VectorMA(cg.refdef.vieworg, 12.0f, cg.refdef.viewaxis[0], shellOrigin);
+                VectorMA(shellOrigin, 6.0f, cg.refdef.viewaxis[1], shellOrigin);
+                VectorMA(shellOrigin, -4.0f, cg.refdef.viewaxis[2], shellOrigin);
+                VectorScale(cg.refdef.viewaxis[1], 120.0f, shellVel);
+                VectorMA(shellVel, 60.0f, cg.refdef.viewaxis[2], shellVel);
+
+                int wClass = cg.snap->ps.stats[STAT_EQUIPPED_WEAPON];
+                int shellType = 0;
+                if ((wClass & WEAPON_CLASS_RIFLE) || (wClass & WEAPON_CLASS_MG) || (wClass & WEAPON_CLASS_HEAVY)) {
+                    shellType = 1;
+                }
+                cgi.Godot_ShellCasing_Eject(shellOrigin, shellVel, shellType);
+            }
+#endif
             break;
         case VM_ANIM_RECHAMBER:
             pszAnimSuffix = "rechamber";

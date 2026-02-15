@@ -403,3 +403,35 @@ void Godot_ShellCasing_Clear() {
     }
     s_casing_next = 0;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ *  C-linkage wrappers for renderer hooks (godot_renderer.c)
+ * ───────────────────────────────────────────────────────────────────────── */
+
+extern "C" {
+
+static constexpr float MOHAA_UNIT_SCALE = 1.0f / 39.37f;
+
+/* Convert id Tech 3 coordinates (inches, Z-up) to Godot coordinates (metres, Y-up) */
+static inline Vector3 id_to_godot(const float *v) {
+    /* id X=Forward, Y=Left, Z=Up
+       Godot X=Right, Y=Up, -Z=Forward
+       Godot X = -idY, Godot Y = idZ, Godot Z = -idX */
+    return Vector3(-v[1], v[2], -v[0]) * MOHAA_UNIT_SCALE;
+}
+
+/* Convert direction vector (no scale) */
+static inline Vector3 id_to_godot_dir(const float *v) {
+    return Vector3(-v[1], v[2], -v[0]);
+}
+
+void Godot_MuzzleFlash_Spawn_C(const float *pos, const float *dir, float intensity) {
+    Godot_MuzzleFlash_Spawn(id_to_godot(pos), id_to_godot_dir(dir), intensity);
+}
+
+void Godot_ShellCasing_Eject_C(const float *pos, const float *vel, int type) {
+    /* Scale velocity by unit scale too, as it's units/second */
+    Godot_ShellCasing_Eject(id_to_godot(pos), id_to_godot_dir(vel), type);
+}
+
+} /* extern "C" */

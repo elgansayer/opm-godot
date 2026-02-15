@@ -180,6 +180,10 @@ typedef struct {
     void (*FreeRawImage)(byte *pic);
 
     void (*Set2DInitialShaderTime)(float startTime);
+
+    // Godot VFX hooks
+    void (*Godot_MuzzleFlash_Spawn)(const vec3_t pos, const vec3_t dir, float intensity);
+    void (*Godot_ShellCasing_Eject)(const vec3_t pos, const vec3_t vel, int type);
 } refexport_t;
 
 //

@@ -602,6 +602,28 @@ void CL_ClearSavedCgameState() {
 
 /*
 ====================
+CL_Godot_MuzzleFlash_Spawn
+====================
+*/
+void CL_Godot_MuzzleFlash_Spawn(const vec3_t pos, const vec3_t dir, float intensity) {
+    if (re.Godot_MuzzleFlash_Spawn) {
+        re.Godot_MuzzleFlash_Spawn(pos, dir, intensity);
+    }
+}
+
+/*
+====================
+CL_Godot_ShellCasing_Eject
+====================
+*/
+void CL_Godot_ShellCasing_Eject(const vec3_t pos, const vec3_t vel, int type) {
+    if (re.Godot_ShellCasing_Eject) {
+        re.Godot_ShellCasing_Eject(pos, vel, type);
+    }
+}
+
+/*
+====================
 CL_InitCGameDLL
 ====================
 */
@@ -832,6 +854,9 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->HudDrawElements			= cls.HudDrawElements;
 	cgi->anim						= &cls.anim;
 	cgi->stopWatch					= &cls.stopwatch;
+    cgi->Godot_MuzzleFlash_Spawn    = CL_Godot_MuzzleFlash_Spawn;
+    cgi->Godot_ShellCasing_Eject    = CL_Godot_ShellCasing_Eject;
+
 	// FIXME
 	//cgi->pUnknownVar				= NULL;
 
