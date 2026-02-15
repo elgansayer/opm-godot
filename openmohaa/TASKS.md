@@ -1872,706 +1872,77 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
 
-## Phase 263: Multiplayer Server Browser + Hosting ✅
+## Audit: Path, Script, and Animate Entity Families ✅
 
-Wired the engine's existing GameSpy master server query and server hosting into Godot-accessible functions via C accessors and GDScript-callable methods.
+### Scope
+Reviewed all source files in the path, script, and animate entity families for Godot GDExtension compatibility, shutdown safety, memory management, and missing preprocessor guards.
 
-### Implementation details:
-- **`godot_multiplayer_accessors.c/.h`** — C accessor layer exposing `Godot_MP_ConnectToServer()`, `Godot_MP_Disconnect()`, `Godot_MP_HostServer()`, `Godot_MP_RefreshServerList()`, `Godot_MP_RefreshLAN()`, `Godot_MP_GetServerCount()`
-- **MoHAARunner methods** — `host_server(map, maxplayers, gametype)`, `refresh_server_list()`, `refresh_lan()`, `get_server_count()` bound to GDScript via ClassDB
-- Existing `connect_to_server()` and `disconnect_from_server()` updated to route through accessor layer
-- Uses `Cbuf_ExecuteText(EXEC_APPEND, ...)` to queue engine commands for connect, disconnect, host, and server list refresh
-- Server count reads `cls.numlocalservers` from client state via accessor
+**Files audited:**
+- `code/fgame/animate.h`, `code/fgame/animate.cpp` — animation management
+- `code/fgame/scriptmaster.h`, `code/fgame/scriptmaster.cpp` — script VM and thread manager
+- `code/fgame/scriptthread.h`, `code/fgame/scriptthread.cpp` — script execution threads
+- `code/fgame/scriptslave.h`, `code/fgame/scriptslave.cpp` — scripted mover entity
+- `code/fgame/gamescript.h`, `code/fgame/gamescript.cpp` — compiled game script objects
+- `code/fgame/scriptdelegate.h`, `code/fgame/scriptdelegate.cpp` — script delegation
+- `code/fgame/scripttimer.h`, `code/fgame/scripttimer.cpp` — script timing
+- `code/fgame/scriptflags.h`, `code/fgame/scriptflags.cpp` — script flag management
+- `code/fgame/actorpath.h`, `code/fgame/actorpath.cpp` — actor pathfinding
+- `code/fgame/gravpath.h`, `code/fgame/gravpath.cpp` — gravity/current path nodes
+- `code/fgame/navigation_path.h`, `code/fgame/navigation_path.cpp` — pathfinding interface
+- `code/fgame/navigation_legacy_path.h`, `code/fgame/navigation_legacy_path.cpp` — legacy pathfinding
+- `code/fgame/navigation_recast_path.h`, `code/fgame/navigation_recast_path.cpp` — Recast pathfinding
 
-### Files created (Phase 263):
-- `code/godot/godot_multiplayer_accessors.c`
-- `code/godot/godot_multiplayer_accessors.h`
+### Global objects with destructors
 
-### Files modified (Phase 263):
-- `code/godot/MoHAARunner.h` — added `host_server`, `refresh_server_list`, `refresh_lan`, `get_server_count` declarations + `HAS_MULTIPLAYER_MODULE` guard
-- `code/godot/MoHAARunner.cpp` — added new method implementations and bind_method entries
+Three global objects in these families have non-trivial destructors that run during library unload:
 
-## Phase 221: VFX Manager Foundation ✅
+| Global | File | Destructor action |
+|--------|------|-------------------|
+| `Director` (ScriptMaster) | scriptmaster.cpp:74 | Calls `Reset(false)` → `ScriptClass_allocator.FreeAll()`, `CloseGameScript()`, `StringDict.clear()`, `InitConstStrings()` |
+| `gravPathManager` (GravPathManager) | gravpath.cpp:35 | Calls `Reset()` → deletes GravPath objects, frees pathList |
+| `pathMaster` (RecastPathMaster) | navigation_recast_path.cpp:42 | Empty stubs — no-op destructor |
 
-- [x] **Task 221.1:** Created `code/godot/godot_vfx_accessors.c` — C accessor layer that filters `gr_entities[]` for `RT_SPRITE` entities via the existing `Godot_Renderer_GetEntity()` / `Godot_Renderer_GetEntitySprite()` accessors. Provides `Godot_VFX_GetSpriteCount()` (scans and caches sprite indices) and `Godot_VFX_GetSprite()` (returns origin, radius, resolved shader handle, rotation, RGBA).
-- [x] **Task 221.2:** Created `code/godot/godot_vfx.h` — public API header declaring the C++ management functions (`Godot_VFX_Init`, `Godot_VFX_Update`, `Godot_VFX_Shutdown`, `Godot_VFX_Clear`) and C-linkage accessor prototypes.
-- [x] **Task 221.3:** Created `code/godot/godot_vfx.cpp` — VFX manager with a pool of 512 `MeshInstance3D` billboard quads. Each frame: reads sprites via accessor → assigns to pool slots → applies `StandardMaterial3D` with `BILLBOARD_ENABLED`, `TRANSPARENCY_ALPHA`, unshaded, no depth write. Texture loaded from VFS (TGA/JPG/PNG) with shader remap support and caching. Unused slots hidden. `Godot_VFX_Clear()` hides all on map change.
+**Finding: All three are safe under the existing shutdown mechanism.**
 
-### Key technical details (Phase 221):
-- **Coordinate conversion:** id Tech 3 (X-fwd, Y-left, Z-up, inches) → Godot (X-right, Y-up, -Z-fwd, metres) via `MOHAA_UNIT_SCALE = 1/39.37`
-- **Shared unit quad mesh:** All pool slots share a single 1×1 `ArrayMesh` quad; per-sprite size is applied via node scale (`radius × 2 × MOHAA_UNIT_SCALE`)
-- **Texture cache:** `std::unordered_map<int, Ref<ImageTexture>>` keyed by shader handle, with VFS loading and magic-byte format detection (mirrors `MoHAARunner::get_shader_texture`)
-- **Shader resolve:** `customShader` takes priority over `hModel`; shader remap applied via `Godot_Renderer_GetShaderRemap()`
-- **No shadows:** Pool nodes use `SHADOW_CASTING_SETTING_OFF` — sprites are VFX, not geometry
-- **Build integration:** Files are automatically included via recursive `add_sources("code/godot")` in SConstruct — no build system changes needed
+Shutdown sequence:
+1. `uninitialize_openmohaa_module()` → `Com_Shutdown()` → `SV_Shutdown()` → `SV_ShutdownGameProgs()` → `G_ShutdownGame()` → `level.CleanUp()` → `Director.Reset()` + entity deletion (clears all GravPath instances)
+2. `Z_MarkShutdown()` — makes `Z_Free` a no-op, `Z_TagMalloc` falls back to system `malloc`
+3. Global C++ destructors run — find empty containers, second `Reset()` calls are effectively no-ops
 
-### Files created (Phase 221):
-- `code/godot/godot_vfx_accessors.c` — C accessor: sprite filter + data extraction
-- `code/godot/godot_vfx.h` — public API declarations
-- `code/godot/godot_vfx.cpp` — VFX manager: sprite pool, lifecycle, update
+The `InitConstStrings()` call from the second `Reset(false)` (during global destruction) is protected by the `Listener::EventSystemStarted` check (set to `false` by `L_ShutdownEvents()` during step 1), so it returns early without accessing the event system.
 
-### MoHAARunner Integration Required (Phase 221):
-1. **In `_ready()` or `check_world_load()`:** Call `Godot_VFX_Init(game_world)` to create the sprite pool.
-2. **In `_process()`:** Call `Godot_VFX_Update(delta)` each frame to sync sprites.
-3. **On map change:** Call `Godot_VFX_Clear()` to hide all pool slots.
-4. **On shutdown:** Call `Godot_VFX_Shutdown()` to free pool nodes and caches.
+### Memory management
 
-## Phase 222: Impact Effects ✅
-- [x] **Task 222.1:** Created `ImpactSurfaceType` enum covering all engine surface types (metal, wood, stone, dirt, grass, water, glass, flesh, sand, snow, mud, gravel, foliage, carpet, paper, grill).
-- [x] **Task 222.2:** Defined `ImpactTemplate` struct with particle count, velocity, lifetime, colour, size, decal texture, decal size, decal lifetime, gravity scale, and spread angle.
-- [x] **Task 222.3:** Populated per-surface templates with visually distinct parameters (e.g. metal = bright-orange sparks, wood = brown splinters, water = white droplets with no decal).
-- [x] **Task 222.4:** Implemented `Godot_Impact_Init()` — pre-allocates a pool of 256 particle MeshInstance3D nodes and 64 decal MeshInstance3D nodes under an "ImpactEffects" Node3D.
-- [x] **Task 222.5:** Implemented `Godot_Impact_Spawn()` — spawns N billboard-quad particles with randomised velocity in a cone around the hit normal, plus a surface-aligned decal quad.
-- [x] **Task 222.6:** Implemented `Godot_Impact_Update(delta)` — animates particle positions (velocity + gravity), fades alpha over lifetime, fades decals in last 20% of life, recycles expired particles/decals.
-- [x] **Task 222.7:** Implemented `Godot_Impact_Shutdown()` — cleans up all nodes and resets state.
-- [x] **Task 222.8:** Implemented `Godot_Impact_SurfaceFromFlags()` — converts engine SURF_* bit-masks to ImpactSurfaceType enum values.
+| Pattern | Routing under GODOT_GDEXTENSION | Shutdown safety |
+|---------|--------------------------------|-----------------|
+| `Container` alloc/free | `CONTAINER_Alloc` → `Z_Malloc`, `CONTAINER_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
+| `MEM_BlockAlloc` (ScriptClass_allocator) | `MEM_Alloc` → `Z_Malloc`, `MEM_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
+| `gi.Malloc`/`gi.Free` (gamescript.cpp) | → `SV_Malloc` → `Z_TagMalloc(TAG_GAME)`, → `SV_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
+| C++ `new`/`delete` (actorpath, scriptslave) | Standard allocator (not zone) | Safe — independent of engine zone |
 
-### Key technical details (Phase 222):
-- Particle pool uses a ring buffer (s_next_particle wraps around MAX_IMPACT_PARTICLES=256) to avoid per-frame allocation.
-- Decal pool similarly uses a ring buffer of MAX_DECALS=64 entries.
-- Billboard materials are unshaded with alpha transparency; particle quads are billboarded via BaseMaterial3D::BILLBOARD_ENABLED.
-- Decals are oriented to face along the surface normal with a 0.005m offset to avoid z-fighting.
-- Gravity applied at 9.8 m/s² to all particles (scaled by per-template gravity_scale — not yet exposed but available for tuning).
-- All positions/normals expected in Godot coordinates (Y-up, metres).
-- Standalone Node3D parent ("ImpactEffects") — integrates with Agent 12's VFX foundation when available.
+All memory paths in these entity families are routed through `Z_Malloc`/`Z_Free` (directly or via `gi`/`SV_*` wrappers), which are protected by `Z_MarkShutdown()`.
 
-### Files created (Phase 222):
-- `code/godot/godot_impact_effects.h` — Public API: enums, struct, Init/Spawn/Update/Shutdown/SurfaceFromFlags
-- `code/godot/godot_impact_effects.cpp` — Full implementation with particle pool, decal pool, per-surface templates
+### Error handling
 
-### MoHAARunner integration point (Phase 222):
-1. **In `_ready()` or `check_world_load()`:** Call `Godot_Impact_Init(scene_root)` after the 3D scene is set up.
-2. **In `_process()`:** Call `Godot_Impact_Update(delta)` each frame.
-3. **When processing impacts:** Call `Godot_Impact_SurfaceFromFlags(surfaceFlags)` to get the type, then `Godot_Impact_Spawn(type, position, normal)`.
-4. **On map unload / shutdown:** Call `Godot_Impact_Shutdown()`.
+- **No `gi.Error(ERR_FATAL)` calls** in any audited file — no risk of `exit()` under Godot
+- **`gi.Error(ERR_DROP)` calls** in gravpath.cpp (3 instances: lines 303, 326, 356) and scriptmaster.cpp — correctly handled by longjmp recovery under Godot
+- **`ScriptError()` calls** in animate.cpp and scriptslave.cpp — uses C++ exception mechanism (`ScriptException`), not process termination
+- **No `exit()` or `abort()` calls** in any audited file
 
-## Phase 223: Explosion Effects ✅
+### GODOT_GDEXTENSION guards
 
-Implemented explosion visual effects and a camera shake API in
-`code/godot/godot_explosion_effects.{h,cpp}`.
+**None of the 26 audited files contain or require `#ifdef GODOT_GDEXTENSION` guards.** The Godot-specific behaviour is handled at lower levels:
+- `container.h` — routes `CONTAINER_Alloc`/`CONTAINER_Free` to `Z_Malloc`/`Z_Free`
+- `mem_blockalloc.cpp` — routes `MEM_Alloc`/`MEM_Free` to `Z_Malloc`/`Z_Free`
+- `con_arrayset.h`, `con_set.h` — route `ARRAYSET_Alloc`/`SET_Alloc` to `Z_Malloc`/`Z_Free`
+- `memory.c` — `Z_MarkShutdown()` guard for safe teardown
 
-### Camera Shake API
-- `Godot_CameraShake_Trigger()` — queue a shake event with intensity, duration,
-  falloff distance, and source position.
-- `Godot_CameraShake_Update()` — apply accumulated shake to Camera3D each frame;
-  offset is restored on the next call. Linear decay over duration, distance
-  attenuation from source, random per-axis offset. Multiple shakes stack
-  additively with total offset capped to ±0.15 m.
-- `Godot_CameraShake_Clear()` — reset all pending shake events.
+### Minor notes (non-blocking)
 
-### Explosion System
-- `Godot_Explosion_Init()` — create a pool of 16 explosion node hierarchies
-  (fireball sphere, smoke torus, omni light, 10 debris box chunks each).
-- `Godot_Explosion_Spawn()` — activate a pool slot at a world position with
-  configurable radius and intensity. Automatically triggers camera shake.
-- `Godot_Explosion_Update()` — per-frame update of three visual phases:
-  - Phase 1 (0–0.2 s): Expanding bright-orange fireball sphere.
-  - Phase 2 (0.1–0.8 s): Dark smoke ring expanding outward, alpha fading.
-  - Phase 3 (0–0.5 s): 5–10 debris chunks with parabolic arcs and alpha fade.
-  - Short-lived OmniLight3D (orange, 0.3 s, energy from intensity parameter).
-- `Godot_Explosion_Clear()` — hide all active explosions without freeing pools.
-- `Godot_Explosion_Shutdown()` — free pooled nodes and shared materials.
+1. **Static allocation in scriptslave.cpp** (line ~1886): `static cSpline<4, 512> *pTmpPath = new cSpline<4, 512>;` — allocated once, never freed. Pre-existing upstream pattern; single allocation, negligible impact. Not Godot-specific.
+2. **Static `Container` objects in gamescript.cpp** (lines 358–360): `archivedEvents`, `archivedStrings`, `archivedPointerFixup` — destructors call `CONTAINER_Free` → `Z_Free` → no-op after `Z_MarkShutdown()`. Safe.
+3. **`gi.Hidemenu` call path in ScriptMaster::Reset()** — during global destruction, `m_menus` is empty (cleared during step 1), so the `Hidemenu()` loop body never executes. Safe.
 
-### Debris Chunks
-- Small BoxMesh (0.05–0.15 m), dark grey-brown colour.
-- Parabolic arc: random outward + upward initial velocity, gravity applied each frame.
-- Alpha fades over 1–2 s randomised lifetime, then recycled.
+### Conclusion
 
-### Integration
-Call `Godot_Explosion_Init(parent)` after map load and
-`Godot_Explosion_Update(delta)` + `Godot_CameraShake_Update(delta, camera)`
-each frame.  `Godot_Explosion_Shutdown()` on map unload or module teardown.
-
-## Phase 224: Muzzle Flash & Shell Casings ✅
-
-- [x] **Task 224.1:** Muzzle flash system — pooled billboard quads (max 8) with additive blending and warm yellow-white colour, plus OmniLight3D (3 m range) that fades over 0.08 s.
-- [x] **Task 224.2:** Shell casing system — pooled brass-coloured cylinder meshes (max 32) ejected with parabolic gravity (9.8 m/s²), random spin (720°/s), single ground bounce (0.3× velocity retention), and 2 s lifetime with scale fade-out.
-- [x] **Task 224.3:** Shared StandardMaterial3D instances: flash material (unshaded, additive, billboard) and casing material (metallic=0.8, roughness=0.3, brass albedo).
-- [x] **Task 224.4:** Three casing sizes: pistol (0.01×0.005 m), rifle (0.014×0.006 m), shotgun (0.018×0.01 m).
-- [x] **Task 224.5:** Ring-buffer pool recycling for both systems — oldest slot reused when pool is full.
-
-### Key technical details (Phase 224):
-- `Godot_MuzzleFlash_Spawn()` places a billboard quad + OmniLight3D at the muzzle position; `Godot_MuzzleFlash_Update()` fades both via scale and energy over `MUZZLE_FLASH_LIFETIME` (0.08 s)
-- `Godot_ShellCasing_Eject()` spawns a CylinderMesh sized per casing type; `Godot_ShellCasing_Update()` integrates velocity with gravity, applies spin rotation via `Basis::rotated()`, and handles a single bounce at Y=0
-- All scene nodes pre-created during `Godot_WeaponEffects_Init()` and reused — no per-frame allocation
-- Visual fade uses `set_scale()` since MeshInstance3D does not support `set_modulate()` (which is a CanvasItem method)
-
-### Files created (Phase 224):
-- `code/godot/godot_weapon_effects.h` — public API: spawn/update/clear/init/cleanup
-- `code/godot/godot_weapon_effects.cpp` — muzzle flash pool (8 slots) + shell casing pool (32 slots) with physics simulation
-
-## Phase 227: Screen Effects ✅
-- [x] **Task 227.1:** Created `godot_screen_effects.h` — public API for damage flash, underwater tint, flash-bang, and pain flinch.
-- [x] **Task 227.2:** Created `godot_screen_effects.cpp` — screen effect manager with CanvasLayer (z_index 100) and independent ColorRect overlays.
-- [x] **Task 227.3:** Damage flash: red overlay (intensity × 0.4 alpha), additive stacking capped at 0.6, fades over 0.3s.
-- [x] **Task 227.4:** Underwater tint: persistent blue-green overlay (Color 0.0, 0.1, 0.3) with sine-wave alpha oscillation (0.25–0.35 at 0.5 Hz).
-- [x] **Task 227.5:** Flash-bang: white overlay fading over 2.0s, stacks with damage flash via separate ColorRect.
-- [x] **Task 227.6:** Pain flinch: temporary camera pitch offset with smooth interpolation back to zero over 0.2s.
-
-### Key technical details (Phase 227):
-- All overlays use a single `CanvasLayer` at z_index 100 with three independent `ColorRect` children
-- `MOUSE_FILTER_IGNORE` on all rects to avoid blocking input
-- `PRESET_FULL_RECT` anchor for automatic viewport fill
-- Pain flinch applies additive pitch rotation to camera (does not modify position)
-- Engine integration points: `v_dmg_time`/`v_dmg_pitch`/`v_dmg_roll` in cgame, `CG_PointContents()` for underwater detection
-
-### MoHAARunner Integration Required (Phase 227):
-1. Call `Godot_ScreenFX_Init()` once after scene setup
-2. Call `Godot_ScreenFX_Update(delta, camera)` each frame in `_process()`
-3. Call `Godot_ScreenFX_DamageFlash(intensity)` when damage is detected (via cgame `v_dmg_time` changes)
-4. Call `Godot_ScreenFX_UnderwaterTint(active)` based on camera position content test
-5. Call `Godot_ScreenFX_FlashBang(intensity)` when flash-bang event is detected
-6. Call `Godot_ScreenFX_PainFlinch(pitch_offset)` when `v_dmg_pitch` changes
-7. Call `Godot_ScreenFX_Shutdown()` on map unload or exit
-
-## Phase 56: Cinematic Playback Stub ✅
-- [x] **Task 56.1:** Created `godot_cinematic.cpp` / `godot_cinematic.h` — standalone cinematic skip-hint overlay module.
-- [x] **Task 56.2:** Detects cinematic playback via existing `Godot_Renderer_IsCinematicActive()` accessor (reads `gr_cin_active` flag set by `GR_DrawStretchRaw` in `godot_renderer.c`).
-- [x] **Task 56.3:** Fullscreen black `ColorRect` on `CanvasLayer` z_index 200 (above HUD and cinematic frame display).
-- [x] **Task 56.4:** "Press ESC to skip" label centred at bottom with smooth alpha pulse animation.
-- [x] **Task 56.5:** Overlay auto-shows when cinematic starts, auto-hides when cinematic ends.
-- [x] **Task 56.6:** No CIN_* stubs needed — real RoQ decoder in `cl_cin.cpp` handles all cinematic functions.
-
-### Key technical details (Phase 56):
-- Public API: `Godot_Cinematic_Init(Node*)`, `Godot_Cinematic_Update(delta)`, `Godot_Cinematic_Shutdown()`, `Godot_Cinematic_IsActive()`
-- The overlay complements MoHAARunner's Phase 11 cinematic frame display (layer 11) by adding the skip hint on layer 200
-- ESC key input is already handled by the engine's `SCR_StopCinematic()` path — no additional input injection needed
-- Label alpha oscillates between 0.3 and 1.0 at 2.5 rad/s using `sinf()`
-- Auto-discovered by SConstruct's recursive source walk of `code/godot/`
-
-### Files created (Phase 56):
-- `code/godot/godot_cinematic.cpp` — Cinematic skip-hint overlay implementation
-- `code/godot/godot_cinematic.h` — Public API header
-
-### Files modified (Phase 56):
-- `TASKS.md` — Added Phase 56 documentation
-
-## Phase 80: Lightmap Styles ✅
-
-Implemented BSP lightmap style support.  MOHAA maps can have up to 4 lightmap styles per surface (stored in `lightmapStyles[4]`), controlled by server configstrings.  Light switches, flickering lights, and pulsing lights use alternate lightmap styles baked by the map compiler.
-
-- [x] **Task 80.1:** C accessor (`godot_lightmap_styles_accessors.c`) — reads lightstyle pattern strings from `sv.configstrings[CS_LIGHTSTYLES + index]` and evaluates brightness at the current server time.  Pattern characters map `'a'` = 0 (off) through `'z'` = 255 (full), advancing at 10 Hz.
-- [x] **Task 80.2:** Lightmap style manager (`godot_lightmap_styles.cpp`) — tracks 64 styles (MAX_LIGHTSTYLES × 2), polls engine brightness each frame via the C accessor, and interpolates between steps for smooth transitions (INTERP_SPEED = 10.0).
-- [x] **Task 80.3:** Public API header (`godot_lightmap_styles.h`) — declares `Godot_LightStyles_Init()`, `Godot_LightStyles_Update(delta)`, `Godot_LightStyles_Shutdown()`, `Godot_LightStyles_GetBrightness(style_index)`, plus C accessor declarations.
-- [x] **Task 80.4:** Documentation of integration points for BSP lightmap rendering.
-
-### Key technical details (Phase 80):
-- Style 0 = always full brightness (1.0); style 255 = unused slot (0.0)
-- Styles 1–31 are switchable via `SV_SetLightStyle()` / `gi.SetLightStyle()`
-- Pattern format: each character is a brightness frame, 'a'=0.0 through 'z'=1.0, cycling at 10 Hz
-- Smooth interpolation prevents jarring brightness jumps between pattern steps
-- Final surface light = sum of (lightmap_i × brightness_i) for each active style slot
-
-### Integration points for MoHAARunner / BSP renderer:
-1. **Init:** Call `Godot_LightStyles_Init()` at map load time (in `check_world_load()`).
-2. **Update:** Call `Godot_LightStyles_Update(delta)` once per frame in `_process()`.
-3. **Query:** Call `Godot_LightStyles_GetBrightness(style_index)` when building/updating lightmap data for each BSP surface.
-4. **Shutdown:** Call `Godot_LightStyles_Shutdown()` on map unload or engine shutdown.
-5. **For StandardMaterial3D:** Modulate lightmap texture brightness by the returned multiplier.
-6. **For ShaderMaterial:** Set a `lightstyle_brightness` uniform with the brightness value.
-
-### Files created (Phase 80):
-- `code/godot/godot_lightmap_styles.cpp` — lightmap style manager
-- `code/godot/godot_lightmap_styles.h` — public API header
-- `code/godot/godot_lightmap_styles_accessors.c` — C accessor for configstring light state
-
-## Phase 83: Draw Distance ✅
-- [x] **Task 83.1:** Created `godot_draw_distance_accessors.c` — C accessors for `r_znear`, `r_zfar`, `cg_farplane`, `cg_farplane_color`, `farplane_cull`.
-- [x] **Task 83.2:** Created `godot_draw_distance.h` — public API header (`Godot_DrawDistance_Init`, `Godot_DrawDistance_Update`, `Godot_DrawDistance_GetCullDistance`).
-- [x] **Task 83.3:** Created `godot_draw_distance.cpp` — draw distance manager: maps engine cvars to Camera3D near/far planes and Environment fog.
-- [x] **Task 83.4:** Near plane: `r_znear` (default 4 inches) converted to metres via `÷39.37`, applied to `camera->set_near()`.
-- [x] **Task 83.5:** Far plane: `cg_farplane` overrides `r_zfar`; converted to metres, applied to `camera->set_far()`. Default 1000m when both are 0.
-- [x] **Task 83.6:** Fog: when `cg_farplane > 0`, enables Environment fog with colour from `cg_farplane_color` and density `2.3/distance` for ~90% opacity at the far plane.
-- [x] **Task 83.7:** Far plane culling: `Godot_DrawDistance_GetCullDistance()` returns cull distance in metres when `farplane_cull=1`; MoHAARunner should check entity distance before spawning MeshInstance3D nodes.
-- [x] **Task 83.8:** Update frequency: cvars polled once per second via delta accumulator, not every frame.
-
-### Key technical details (Phase 83):
-- `r_znear` and `r_zfar` are read via `Cvar_Get()` (created with defaults if not already registered by the stub renderer)
-- `cg_farplane`, `farplane_color`, and `farplane_cull` are read from the per-frame refdef capture in `godot_renderer.c` via `Godot_Renderer_GetFarplane()`
-- Fog density formula: `exp(-density * dist) = 0.1` → `density = 2.3 / dist_metres`
-- Coordinate conversion: inches → metres via `INCHES_TO_METRES = 1/39.37`
-- Near plane clamped to minimum 0.001m to avoid rendering artefacts
-
-### MoHAARunner integration points (Phase 83):
-1. **In `_ready()`:** Call `Godot_DrawDistance_Init()` after engine initialisation.
-2. **In `_process()`:** Call `Godot_DrawDistance_Update(camera, env, delta)` each frame (internally rate-limited).
-3. **Entity culling:** Before spawning entity MeshInstance3D, call `Godot_DrawDistance_GetCullDistance()` — if > 0, skip entities beyond that distance from the camera.
-
-### Files created (Phase 83):
-- `code/godot/godot_draw_distance_accessors.c` — C accessor layer (~90 lines)
-- `code/godot/godot_draw_distance.h` — public API header
-- `code/godot/godot_draw_distance.cpp` — draw distance manager (~140 lines)
-
-## Phase 84: Debug Rendering ✅
-
-Implements developer debug overlays controlled by engine cvars:
-
-- **r_showtris** — toggles viewport wireframe debug draw (`Viewport::DEBUG_DRAW_WIREFRAME`)
-- **r_shownormals** — draws entity orientation axes as coloured lines at entity origins using `ImmediateMesh` (blue forward axis, max 32 entities, distance-culled to 20m)
-- **r_speeds** — displays per-frame stats overlay on `CanvasLayer` (z=150): FPS, entity counts (total/skeletal/static), mesh cache hit rate, draw calls, polygon estimate. Updated every 10 frames for readability.
-- **r_lockpvs** — accessor exposed (PVS freeze logic is in the BSP culling path)
-- **r_showbbox** — draws wireframe bounding boxes around entities using `ImmediateMesh` with `PRIMITIVE_LINES` (green=static, yellow=dynamic)
-
-All cvars are read via thin C accessor functions (`godot_debug_render_accessors.c`) using `Cvar_Get()` with `CVAR_CHEAT` flag, matching upstream renderer behaviour. The C++ manager (`godot_debug_render.cpp`) creates and manages Godot scene nodes (CanvasLayer, Label, MeshInstance3D pools) without modifying MoHAARunner.
-
-### Files created:
-- `code/godot/godot_debug_render_accessors.c` — C cvar accessors for r_showtris, r_shownormals, r_speeds, r_lockpvs, r_showbbox
-- `code/godot/godot_debug_render.h` — Public API: Init/Update/Shutdown + extern "C" accessor declarations
-- `code/godot/godot_debug_render.cpp` — Debug render manager: wireframe toggle, stats overlay, normal lines, bbox wireframes
-
-### MoHAARunner Integration Required:
-1. **In `_ready()`:** Call `Godot_DebugRender_Init(this)` after 3D scene setup.
-2. **In `_process()`:** Call `Godot_DebugRender_Update(delta)` each frame.
-3. **In destructor/map unload:** Call `Godot_DebugRender_Shutdown()`.
-
-## Phase 241-242: Animation Events ✅
-- [x] **Task 241.1:** Created C accessor layer (`godot_animation_event_accessors.cpp`) for TIKI animation event data — reads `dtikianimdef_t` / `dtikicmd_t` structures via `dtiki_t *` pointer, exposing animation count, aliases, event count, and per-event frame number + type + parameters.
-- [x] **Task 241.2:** Created animation event dispatcher (`godot_animation_events.cpp`) with per-entity tracking state — detects animation changes, fires ENTRY/EXIT/EVERY/frame events, handles animation looping (frame wrap to 0).
-- [x] **Task 242.1:** Event type classification: `sound`, `footstep`, `effect`/`tagspawn`, `bodyfall` — mapped to typed constants for downstream handlers.
-- [x] **Task 242.2:** Fired-event output queue (`godot_anim_fired_event_t[256]`) with accessor API — MoHAARunner can drain per frame and route to audio/VFX systems.
-
-### Key technical details (Phases 241-242):
-- TIKI frame constants: `TIKI_FRAME_ENTRY` (-3), `TIKI_FRAME_EXIT` (-2), `TIKI_FRAME_EVERY` (-1), `TIKI_FRAME_FIRST` (0+)
-- Server commands are indexed first, then client commands, in a flat event index space
-- Per-entity state tracks: current_anim, last_fired_frame, entry_fired, tiki_ptr — detects animation transitions and fires exit→entry sequence
-- Loop handling: when current_frame < last_fired_frame, fires remaining events from old cycle tail then new cycle head
-
-### Files created (Phases 241-242):
-- `code/godot/godot_animation_events.h` — public API header
-- `code/godot/godot_animation_event_accessors.cpp` — C accessor for TIKI animation event data
-- `code/godot/godot_animation_events.cpp` — animation event dispatcher with per-entity tracking
-
-### MoHAARunner Integration Required (Phases 241-242):
-1. **In `_ready()`:** Call `Godot_AnimEvents_Init()` after `Com_Init()`.
-2. **In `update_entities()`:** For each animated entity, call `Godot_AnimEvents_Fire(entity_index, tikiPtr, anim_index, current_frame, pos)`.
-3. **After entity update:** Call `Godot_AnimEvents_GetFiredCount()` / `Godot_AnimEvents_GetFiredEvents()` to drain the queue — route sound events to the audio pipeline, effect events to VFX, footstep events to surface-type lookup + audio.
-4. **After draining:** Call `Godot_AnimEvents_ClearFired()`.
-5. **In shutdown:** Call `Godot_AnimEvents_Shutdown()`.
-
-## Phase 241: Animation Blending ✅
-
-- [x] **Task 241.1:** Audit existing CPU skinning pipeline (`godot_skel_model_accessors.cpp`) — confirmed that `Godot_Skel_PrepareBones()` correctly passes all 16 `frameInfo[]` channels and `actionWeight` through to `ri.TIKI_SetPoseInternal()`, which performs multi-channel blending internally.
-- [x] **Task 241.2:** Create `godot_anim_blend.h` — public API with `AnimBlendInput` struct (frame indices, weights, times, action_weight, active channel count, per-group weight sums) and `AnimBlendValidation` struct (diagnostic output).
-- [x] **Task 241.3:** Create `godot_anim_blend.cpp` — implementation of extraction, validation, bone computation wrapper, and debug logging helpers.
-- [x] **Task 241.4:** `Godot_AnimBlend_ExtractFromEntity()` reads entity buffer via `Godot_Renderer_GetEntityAnim()`, splits channels into group A (0–7, action/upper body) and group B (8–15, legs/movement), and computes per-group weight sums.
-- [x] **Task 241.5:** `Godot_AnimBlend_Validate()` checks weight sanity: at least one active channel, actionWeight in [0,1], per-group weight sums ≈ 1.0 (tolerance 0.1).
-- [x] **Task 241.6:** `Godot_AnimBlend_ComputeBones()` convenience wrapper reconstructs `frameInfo_t[]` from `AnimBlendInput`, delegates to `Godot_Skel_PrepareBones()` (engine-internal blending), and copies result to caller buffer.
-- [x] **Task 241.7:** `Godot_AnimBlend_DebugLogEntity()` logs per-channel state and validation results via `Com_Printf` for runtime debugging.
-
-### Key technical details (Phase 241):
-- MOHAA uses `MAX_FRAMEINFOS` = 16 channels (not 4), split at `FRAMEINFO_BLEND` = 8 into action (group A) and movement (group B) groups.
-- `actionWeight` blends group A vs group B: 0.0 = all action, 1.0 = all movement.
-- The engine's skeletor (`ri.TIKI_SetPoseInternal`) already performs correct weighted blending of all channels internally — no Godot-side quaternion blending is needed.
-- `Godot_Skel_PrepareBones()` correctly delegates the full `frameInfo[16]` array and `actionWeight` to the engine; bone cache output already reflects multi-channel blended transforms.
-- Vertex skinning in `Godot_Skel_SkinSurface()` correctly applies per-vertex bone weights from the blended bone cache.
-
-### Verification findings (Phase 241):
-- All 16 frameInfo channels are captured by `GR_AddRefEntityToScene()` via `memcpy(ge->frameInfo, re->frameInfo, sizeof(ge->frameInfo))`.
-- `Godot_Renderer_GetEntityAnim()` exposes the full `frameInfo[MAX_FRAMEINFOS]` to the Godot layer.
-- No fixes required in `godot_skel_model_accessors.cpp` — the existing pipeline is correct.
-
-### Files created (Phase 241):
-- `code/godot/godot_anim_blend.h` — public API (AnimBlendInput, AnimBlendValidation, 5 exported functions)
-- `code/godot/godot_anim_blend.cpp` — implementation (extraction, validation, bone computation, debug logging)
-
-## Phase 251: Transparent Sort Order ✅
-
-- [x] **Task 251.1:** Created `godot_render_sort.h` with `SortableEntity` struct and public API (`Init`, `SortEntities`, `ApplyPriority`, `Shutdown`).
-- [x] **Task 251.2:** Implemented sort comparator: primary key = shader sort value (ascending), secondary key = camera distance (front-to-back for opaque, back-to-front for transparent/additive).
-- [x] **Task 251.3:** Implemented Godot `render_priority` mapping: opaque → 0, transparent → 1–100 (distance-based), additive → 101–127.
-- [x] **Task 251.4:** `Godot_RenderSort_ApplyPriority()` iterates surface override materials on a `MeshInstance3D` and sets `render_priority` per the distance mapping.
-
-### Key technical details (Phase 251):
-- Sort keys from `.shader` files parsed by `godot_shader_props.cpp` (`sort_key` field in `GodotShaderProps`): 0=portal, 2=opaque, 6=decal, 8=see-through, 9=banner, 12=underwater, 14–15=blend, 16=additive.
-- Transparent surfaces (sort_key > 2) are rendered back-to-front: furthest entities get the lowest `render_priority` (rendered first), nearest get the highest (rendered last).
-- Additive surfaces (sort_key ≥ 16) are placed in the 101–127 priority range, ensuring they render after all standard transparents.
-- Distance normalisation uses a max squared distance of 64 516 m² (~254 m, or ~10 000 id units) — entities beyond this all receive minimum priority.
-- `std::sort` with a custom comparator handles the two-level sort (sort_key then distance).
-
-### MoHAARunner Integration Required (Phase 251):
-1. In `update_entities()`, after building the entity list, construct a `SortableEntity` array for transparent entities.
-2. Call `Godot_RenderSort_SortEntities()` with the camera position to sort the array.
-3. For each entity, call `Godot_RenderSort_ApplyPriority(mesh, sort_key, distance_sq)` to set `render_priority` on the `MeshInstance3D`.
-4. Only entities with `TRANSPARENCY_ALPHA` or `TRANSPARENCY_ALPHA_DEPTH_PRE_PASS` materials need sorting.
-
-### Files created (Phase 251):
-- `code/godot/godot_render_sort.h` — Public API: `SortableEntity`, sort key thresholds, function declarations (~105 lines)
-- `code/godot/godot_render_sort.cpp` — Sort + priority implementation (~170 lines)
-
-## Phase 258: Frustum Culling ✅
-
-Camera frustum culling for entities and effects.  Extracts 6 frustum
-planes from the active Camera3D's view-projection matrix and provides
-fast AABB / sphere visibility tests.  Entities or effects whose bounding
-volumes fall entirely outside the frustum can be skipped, reducing draw
-calls when many objects exist off-screen.
-
-### Public API (`godot_frustum_cull.h`)
-
-| Function | Purpose |
-|----------|---------|
-| `Godot_FrustumCull_Init()` | Initialise internal state (planes, stats). |
-| `Godot_FrustumCull_UpdateCamera(Camera3D*)` | Extract 6 frustum planes from camera; reset per-frame stats. |
-| `Godot_FrustumCull_TestAABB(AABB)` | Return true if AABB intersects or is inside frustum. |
-| `Godot_FrustumCull_TestSphere(Vector3, float)` | Return true if sphere intersects or is inside frustum. |
-| `Godot_FrustumCull_GetStats(int*, int*)` | Retrieve per-frame tested/culled counters. |
-| `Godot_FrustumCull_Shutdown()` | Release internal state. |
-
-### Implementation details
-- **Plane extraction:** Combined view-projection matrix (proj × view) →
-  Gribb/Hartmann method for left/right/bottom/top/near/far planes, each
-  normalised.
-- **AABB test:** "p-vertex" method — for each plane, pick the AABB corner
-  most in the direction of the plane normal.  If that vertex is behind the
-  plane, the box is entirely outside.
-- **Sphere test:** Signed distance from centre to each plane; if
-  distance < −radius for any plane, sphere is outside.
-- **Stats:** Per-frame counters (`tested`, `culled`) reset by
-  `UpdateCamera()`, queried via `GetStats()`.
-
-### MoHAARunner Integration Required
-In `update_entities()`, for each entity:
-1. Compute entity AABB from model bounds + position.
-2. Call `Godot_FrustumCull_TestAABB(aabb)`.
-3. If false, skip mesh creation/update for that entity.
-
-### Files created
-- `code/godot/godot_frustum_cull.h`
-- `code/godot/godot_frustum_cull.cpp`
-
-## Phase 86: Player Movement Physics Audit ✅
-
-Audited player movement physics (`bg_pmove.cpp`, `bg_slidemove.cpp`, `bg_public.h`, `bg_local.h`, `player.cpp`, `playerbot.cpp`) for correctness under the `GODOT_GDEXTENSION` build. **No code changes required** — all movement code is architecture-agnostic.
-
-### 1. Gravity & sv_fps ✅
-- `pm->ps->gravity` correctly set from `sv_gravity` cvar in `player.cpp:4112`: `client->ps.gravity = sv_gravity->value * gravity` (entity gravity multiplier defaults to `1.0`).
-- `pml.frametime` derived from command timestamp delta (`pml.msec = pmove->cmd.serverTime - pm->ps->commandTime`), NOT hardcoded 20Hz. Frame step chopping via `pmove_fixed`/`pmove_msec` cvars (clamped 8–33ms).
-- `pm->ps->speed` set per stance in `player.cpp:4067–4099` using `sv_runspeed`, `sv_walkspeedmult`, `sv_crouchspeedmult`, weapon movement speed, zoom movement, and DM speed multiplier.
-
-### 2. Walk/Run/Sprint ✅
-- `PM_WalkMove()` (line 554): forward/backward via `PM_GetMove()` (applies `pm_backspeed` 0.80× and `pm_strafespeed` 0.85×), ground-plane projected, then `PM_Accelerate()` + `PM_StepSlideMove()`.
-- `PM_Accelerate()` (line 232): standard Quake-style model — `canPush = accel * frametime * wishspeed`.
-- `PM_Friction()` (line 166): ground friction `pm_friction=6.0`, slick `pm_slipperyfriction=0.25`, water friction scaled by `waterlevel`.
-- `BUTTON_RUN` flag distinguishes walking/running (line 572). `pm->ps->pm_time` accumulates while sprinting forward.
-
-### 3. Crouch/Prone ✅
-- `PM_CheckDuck()` (line 1014): sets `mins`/`maxs`/`viewheight` per `PMF_DUCKED`, `PMF_VIEW_PRONE`, `PMF_VIEW_DUCK_RUN`, `PMF_VIEW_JUMP_START` flags.
-- AA (protocol < MOHTA): full prone support (`PRONE_MAXS_Z=20`, `PRONE_VIEWHEIGHT=16`), crouch-run (`CROUCH_RUN_MAXS_Z=60`), crouch-prone (`CROUCH_MAXS_Z=54`, `CROUCH_VIEWHEIGHT=48`).
-- SH/BT (protocol >= MOHTA): prone removed — only crouch (`CROUCH_MAXS_Z=54`) and jump-start (`JUMP_START_VIEWHEIGHT=52`).
-- Stance flags set in `player.cpp:4039–4051` from actual `maxs.z` and `viewheight` values.
-
-### 4. Jump ✅
-- Jump initiation through player entity movement control (not in bg_pmove.cpp directly). `JUMP_VELOCITY=270` defined in `bg_local.h`.
-- `PM_AirMove()` (line 391): standard air acceleration (`pm_airaccelerate=1.0`), ground-plane clipping, step-slide.
-- `PM_CrashLand()` (line 746): fall damage from landing velocity delta — `EV_FALL_SHORT` (>20), `EV_FALL_MEDIUM` (>40), `EV_FALL_FAR` (>80), `EV_FALL_FATAL` (>100). Water reduces damage (×0.5 at level 1, ×0.25 at level 2). `SURF_NODAMAGE` surfaces skip damage.
-- `PM_CheckTerminalVelocity()` (line 295): triggers `EV_TERMINAL_VELOCITY` event when speed exceeds `TERMINAL_VELOCITY=1200`.
-- Double-jump prevention: `Pmove()` (line 1514) chops commands into ≤66ms steps; no explicit double-jump prevention in pmove — controlled by player entity movement state machine.
-
-### 5. Lean ✅
-- Lean handling in `PmoveSingle()` (lines 1349–1413): `BUTTON_LEAN_LEFT`/`BUTTON_LEAN_RIGHT` input.
-- Lean speed/recovery/max controlled by `pm->leanSpeed`, `pm->leanRecoverSpeed`, `pm->leanAdd`, `pm->leanMax` fields.
-- Lean restricted when moving (forward/right/up ≠ 0) unless `pm->alwaysAllowLean` (multiplayer DF_ALLOW_LEAN_MOVEMENT).
-- Camera offset via bone angles: `PmoveAdjustAngleSettings()` applies lean to pelvis (0.8×), torso (0.2×), arms tags.
-- Lean zeroed when dead, on ladder (`PM_CLIMBWALL`), or `PMF_NO_HUD` set.
-- No lean collision traces — lean is a camera/bone rotation effect, not a position shift.
-
-### 6. Water/Ladder ✅
-- `PM_SetWaterLevel()` (line 970): uses `pm->pointcontents()` for 3-level water detection (feet/waist/head).
-- Water movement: `PM_WalkMove()` scales `wishspeed` by 0.80 (level 1) or 0.50 (level 2+). `PM_Friction()` applies `pm_waterfriction=2.0` scaled by `waterlevel` (5× for slime).
-- `PM_WaterEvents()` (line 1153): generates `EV_WATER_TOUCH`/`LEAVE`/`UNDER`/`CLEAR` events.
-- Ladder: `PM_CLIMBWALL` pm_type (line 1323) — zeroes lean, restricts view angles via `PmoveAdjustViewAngleSettings_OnLadder()`.
-
-### 7. #ifdef / Build Configuration ✅
-- **No `#ifdef GODOT_GDEXTENSION`** guards in any `bg_*` files, `player.cpp`, or `playerbot.cpp` — none needed.
-- `GAME_DLL` defined in SConstruct (line 63) for main .so build. `bg_pmove.cpp` does not use `GAME_DLL` directly.
-- `bg_pmove.cpp` and `bg_slidemove.cpp` compiled into **both** main .so (`GAME_DLL`) and cgame.so (`CGAME_DLL`) per SConstruct lines 342–344.
-- `pm->trace` set to `gi.trace` (server game interface) in `Player::SetMoveInfo()` (line 3678). Never NULL at runtime — `gi` populated by `SV_InitGameProgs()`.
-- `pm->pointcontents` set to `gi.pointcontents` (line 3684). Never NULL at runtime.
-- Syntax-only compilation verified: both `bg_pmove.cpp` and `bg_slidemove.cpp` pass `g++ -fsyntax-only` with `GAME_DLL + GODOT_GDEXTENSION` and `CGAME_DLL` defines.
-
-### Files audited (Phase 86):
-- `code/fgame/bg_pmove.cpp` (1760 lines) — core movement physics
-- `code/fgame/bg_slidemove.cpp` (309 lines) — slide/step movement
-- `code/fgame/bg_public.h` — movement constants, pmove_t struct, PMF flags
-- `code/fgame/bg_local.h` — pml_t struct, local movement defines
-- `code/fgame/player.cpp` — Player::ClientMove(), SetMoveInfo(), GetMoveInfo()
-- `code/fgame/playerbot.cpp` — bot movement (uses same usercmd_t interface)
-
-### Files created (Phase 86):
-- None — no accessor files needed. Movement state is fully server-side and requires no Godot-side access.
-
-## Phase 87: Weapon Mechanics Audit ✅
-- [x] **Task 87.1:** Audited `weapon.h` / `weapon.cpp` — Weapon class (inherits Item) with full event table (Fire, Shoot, Reload, Idle, etc.), spread/recoil system, and multi-firemode support. No `#ifdef GODOT_GDEXTENSION` guards needed — no engine-specific code.
-- [x] **Task 87.2:** Audited fire mechanics — `Fire()` (line 2153) sets animation + uses ammo; `Shoot()` (line 1346) dispatches by firetype: `FT_BULLET` → `BulletAttack()`, `FT_PROJECTILE` → `ProjectileAttack()`, `FT_MELEE` → `MeleeAttack()`, `FT_HEAVY` → `HeavyAttack()`. All operational under GODOT_GDEXTENSION.
-- [x] **Task 87.3:** Audited hitscan — `BulletAttack()` in `weaputils.cpp` (line 2137) uses `G_Trace()` → `gi.trace()` for raycasting with bullet penetration, damage falloff through surfaces, and multi-hit mechanics. `G_Trace()` wrapper in `g_utils.cpp` (line 366) delegates to `gi.trace` — function pointer populated by `GetGameAPI()`.
-- [x] **Task 87.4:** Audited projectile spawning — `ProjectileAttack()` in `weaputils.cpp` (line 1896) spawns entity with `MOVETYPE_BOUNCE`, velocity from charge fraction, and configurable life/speed. No GODOT_GDEXTENSION issues.
-- [x] **Task 87.5:** Audited spread and recoil — Per-weapon spread via `bulletspread[mode]` / `bulletspreadmax[mode]` with time-decaying `m_fFireSpreadMult` (amount/falloff/cap/timecap). View kick via `viewkickmin[]` / `viewkickmax[]` applied randomly to view angles. Zoom reduces spread. Movement increases spread via `GetSpreadFactor()`.
-- [x] **Task 87.6:** Audited reload — `StartReloading()` (line 2924) plays "reload" anim, sets `WEAPON_RELOADING` state; `DoneReloading()` (line 2943) resets to `WEAPON_READY`. `FillAmmoClip` / `EmptyAmmoClip` / `AddToAmmoClip` events handle ammo transfer. Reload cancel handled by weapon state machine (switching weapons interrupts reload state).
-- [x] **Task 87.7:** Audited weapon switching — Player weapon selection via `EV_Player_PrevWeapon` / `EV_Player_NextWeapon` events (player.cpp lines 247–263). Holster/draw via `EV_Player_Holster` / `EV_Player_SafeHolster` events. Weapon raise/lower animations via `DoneRaising` / `DoneLowering` events.
-- [x] **Task 87.8:** Audited melee — `MeleeAttack()` in `weaputils.cpp` (line 46) uses `G_Trace()` for world collision + `G_TraceEntities()` for entity hit detection within bounding box. Applies `Damage()` to all victims in range. Weapon.cpp `Shoot()` melee branch (line 1566) calculates melee position/end from forward vector and `bulletrange[mode]`.
-- [x] **Task 87.9:** Audited turret weapons — `TurretGun` (weapturret.cpp line 352) extends Weapon with AI burst-fire logic (`AI_DoFiring`), configurable burst time/delay, player camera attachment, and view model support. No GODOT_GDEXTENSION guards needed.
-- [x] **Task 87.10:** Audited weapon scripts — TIKI weapon files load via Item base class; weapon events (`EV_Weapon_AmmoType`, `EV_Weapon_StartAmmo`, `EV_Weapon_SetBulletSpread`, etc.) set per-weapon properties from `.tik` definitions. Script engine in `code/script/` has no GODOT_GDEXTENSION guards — operates identically in both builds.
-- [x] **Task 87.11:** Audited item pickup/drop — `item.cpp` `ItemPickup()` (line 570) adds to Sentient inventory via `giveItem()`, plays sound, handles respawn. `Drop()` (line 491) detaches from owner with physics. No `gi.Malloc`/`gi.Free` in weapon or item code.
-- [x] **Task 87.12:** Verified `gi.Malloc`/`gi.Free` safety — weapon files (weapon.cpp, weapturret.cpp, weaputils.cpp, item.cpp) do NOT use `gi.Malloc`/`gi.Free` directly. Memory allocation uses C++ `new`/`delete` through the class system. Safe wrappers in `g_main.h` (lines 39–46) are available but not needed by weapon code.
-- [x] **Task 87.13:** Verified `G_Trace` validity — `G_Trace()` in `g_utils.cpp` wraps `gi.trace()`, populated by `GetGameAPI()` (g_main.cpp line 1647: `gi = *import`). Function pointer is valid throughout game lifetime. No GODOT_GDEXTENSION guards needed.
-- [x] **Task 87.14:** Verified class registration — `Weapon` (weapon.cpp:473), `TurretGun` (weapturret.cpp:352), `InventoryItem` (inventoryitem.cpp:47) all use `CLASS_DECLARATION` macro. Class hierarchy: Trigger → Item → Weapon → TurretGun/InventoryItem. Auto-registered via static initialisation — works identically under GODOT_GDEXTENSION.
-- [x] **Task 87.15:** Build verification — all weapon files (weapon.cpp, weapturret.cpp, weaputils.cpp, player.cpp, item.cpp, g_items.cpp) pass syntax check with full GODOT_GDEXTENSION defines (`-DDEDICATED -DBOTLIB -DGAME_DLL -DARCHIVE_SUPPORTED -DWITH_SCRIPT_ENGINE -DAPP_MODULE -DGODOT_GDEXTENSION`). Zero errors, zero warnings.
-
-### Key technical details (Phase 87):
-- **No code changes required** — all weapon mechanics compile and operate correctly under GODOT_GDEXTENSION
-- Weapon code is pure game logic that communicates through the `gi` (game_import_t) interface, which is fully populated by the engine's `SV_InitGameProgs()` → `GetGameAPI()` path
-- The `gi.trace` function pointer used by all weapon trace calls is valid throughout the game's lifetime — set once by `GetGameAPI()` and never cleared until `G_ShutdownGame()`
-- No `gi.Malloc`/`gi.Free` calls exist in weapon files — C++ `new`/`delete` used instead, managed by the class system's memory pool
-- No new accessor files needed — weapon state is entirely server-side game logic, not read by MoHAARunner
-
-## Phase 88: Hit Detection & Damage Audit ✅
-- [x] **Task 88.1:** Hitscan traces — `G_Trace()` (two overloads in `g_utils.cpp`) properly delegates to `gi.trace()` function pointer, which is assigned to `SV_Trace` in `sv_game.c`. Entity results mapped via `g_entities[trace.entityNum]` with NULL checks.
-- [x] **Task 88.2:** Bullet traces — `BulletAttack()` (`weaputils.cpp`) performs hitscan with penetration via `G_Trace()` calls, supports wood/metal pass-through, tracer visuals, and per-bullet location-based damage.
-- [x] **Task 88.3:** Melee traces — `MeleeAttack()` (`weaputils.cpp`) uses `G_Trace()` for world-blocking check then `G_TraceEntities()` for entity sweeps, properly filters by `takedamage`.
-- [x] **Task 88.4:** Radius damage — `RadiusDamage()` (`weaputils.cpp`) enumerates entities via `findradius()`, performs per-target `G_SightTrace()` LOS checks, applies linear distance falloff, and reduces self-damage to 90%.
-- [x] **Task 88.5:** Location-based damage — `hitloc_t` enum defines 19 body zones (head, torso, limbs); `Sentient::ArmorDamage()` applies per-location multipliers from `m_fDamageMultipliers[]` array (e.g. head=5.0×, limbs=0.5–0.8×).
-- [x] **Task 88.6:** MOD types — 30 means-of-death constants (MOD_NONE through MOD_LANDMINE) with string table in `g_utils.cpp`; `MOD_string_to_int()` provides lookup.
-- [x] **Task 88.7:** Damage pipeline — `Entity::Damage()` queues `EV_Damage` → `Entity::DamageEvent()` processes damage, checks immunity, deducts health → fires `EV_Killed` (health ≤ 0) or `EV_Pain` (alive). `Sentient::ArmorDamage()` applies location multipliers and armour reduction.
-- [x] **Task 88.8:** Death handling — `Player::Killed()` sets death state, fires pain event for death anim, calls `Obituary()` for kill feed, sets respawn timer (1–2s in DM). NPC death via `Entity::Killed()` virtual dispatch.
-- [x] **Task 88.9:** `#ifdef` verification — No `#ifdef DEDICATED` or `#ifdef GODOT_GDEXTENSION` guards exist in the damage pipeline (`entity.cpp`, `sentient.cpp`, `player.cpp`, `weaputils.cpp`, `g_utils.cpp`). None are needed: the entire pipeline operates through the `gi` function-pointer interface which `sv_game.c` initialises unconditionally before game code runs.
-- [x] **Task 88.10:** Function pointer safety — `gi.trace`, `gi.pointcontents`, `gi.AreaEntities`, `gi.SightTrace` all assigned in `SV_InitGameProgs()` (`sv_game.c`) before `GetGameAPI()` returns. No NULL pointer risk during normal gameplay.
-- [x] **Task 88.11:** Accessor assessment — No `godot_game_damage.h` accessor needed. The damage system runs entirely server-side via `gi` function pointers; `MoHAARunner.cpp` does not read damage state.
-
-### Key technical details (Phase 88):
-- **No code changes required.** The hit detection and damage pipeline is fully functional under the GDExtension build.
-- Damage flow: `BulletAttack()`/`MeleeAttack()`/`RadiusDamage()` → `Entity::Damage()` → `EV_Damage` → `DamageEvent()`/`ArmorDamage()` → health deduction → `EV_Killed`/`EV_Pain`
-- All trace functions (`G_Trace`, `G_SightTrace`, `G_TraceEntities`) use the `gi` interface which bridges to the server's `SV_Trace` (collision detection via BSP/CM system)
-- `g_entities[]` array indexing for trace results is bounds-safe (ENTITYNUM_NONE check)
-- The `gi_Malloc_Safe`/`gi_Free_Safe` wrappers in `g_main.h` are not needed in the damage pipeline (no allocator calls in hot damage path)
-
-## Phase 91: Game Mode Audit ✅
-
-Audited game mode initialisation, round logic, scoring, warmup, and intermission for all multiplayer modes (FFA, TDM, Team Rounds, Objective, TOW, Liberation). Created accessor layer so `MoHAARunner.cpp` can query game mode state without including fgame headers.
-
-### Audit findings
-
-**Game type initialisation (`g_main.cpp`, `gamecvars.cpp`):**
-- `g_gametype` cvar maps: 0=SP, 1=FFA, 2=TDM, 3=TeamRounds, 4=Objective, 5=TOW, 6=Liberation
-- `G_InitGame()` allocates entity pool, initialises DM manager via `level.SpawnEntities()` for multiplayer modes
-- Entity spawn filtering by game type handled in `g_spawn.cpp` (notfree/notteam/notsingle spawnflags)
-
-**FFA (Free For All):**
-- Spawns at `info_player_deathmatch`; no team assignment
-- Scoring via `fraglimit` cvar; kills tracked per-player in FFA team
-
-**TDM (Team Deathmatch):**
-- Team selection: Allies/Axis/Auto via `DM_Manager::JoinTeam()`
-- Team spawn points: `info_player_allied` / `info_player_axis`
-- Friendly fire controlled by `g_teamdamage` cvar
-
-**Round-based modes (TeamRounds, Objective, TOW, Liberation):**
-- `DM_Manager::m_bRoundBasedGame` flag set during `InitGame()`
-- Round lifecycle: `StartRound()` → `m_bRoundActive=true` → `CheckEndMatch()` → `EndRound()`
-- Warmup: `g_warmup` cvar (default 20s), `CS_WARMUP` configstring set via `GetMatchStartTime()`
-- Score limits: `roundlimit` cvar for round-based; `fraglimit` for FFA/TDM
-
-**Intermission:**
-- `level.intermissiontime` set when match ends
-- `g_maxintermission` controls duration before next map
-
-### Files created
-- `code/godot/godot_game_modes.h` — C-linkage accessor declarations
-- `code/godot/godot_game_modes.cpp` — Accessor implementations (7 functions)
-
-### Accessor API
-| Function | Returns |
-|----------|---------|
-| `Godot_GameMode_GetType()` | `g_gametype` cvar value (0–6) |
-| `Godot_GameMode_GetRoundState()` | 0=inactive, 1=warmup, 2=active, 3=intermission |
-| `Godot_GameMode_GetScoreLimit()` | `fraglimit` or `roundlimit` depending on mode |
-| `Godot_GameMode_GetTimeLimit()` | `timelimit` cvar value (minutes) |
-| `Godot_GameMode_GetTeamScore(team)` | Team win count (0=allies, 1=axis) |
-| `Godot_GameMode_IsWarmup()` | 1 if warmup/pre-round period is active |
-| `Godot_GameMode_GetPlayerCount()` | Number of active players in DM manager |
-
-## Phase 96-98: SP Features Audit ✅
-
-Audited single-player campaign features: scripted camera cutscenes, NPC AI
-pathfinding, and save/load game functionality.
-
-### Script camera (cutscenes)
-- [x] `Camera` class exists in `camera.cpp` / `camera.h` with `CameraThink`, `CameraMoveState`, BSpline interpolation.
-- [x] Letterbox mode tracked via `level.m_letterbox_fraction` / `m_letterbox_dir`; exposed to clients through `STAT_LETTERBOX`.
-- [x] `STAT_CINEMATIC` carries bit 0 (`level.cinematic`) and bit 1 (`actor_camera`).
-- [x] Script commands (`cam setpath`, `cam follow`, `cam setfov`) handled via the event/listener system.
-- [x] No `#ifdef GODOT_GDEXTENSION` guards needed — camera code compiles as-is.
-
-### NPC AI
-- [x] `Actor` class hierarchy (`Actor → SimpleActor → Sentient → Animate → Entity → Listener`) compiles.
-- [x] `Actor::Think()` / `IdleThink()` / `Think_Idle()` state machine present with 56+ actor flags.
-- [x] `PathSearch` grid-based navigation in `navigate.cpp` (MOHAA's own pathfinding, not Recast/Detour).
-- [x] Combat AI: spot enemy, take cover, shoot, flee — implemented via actor state machine.
-- [x] No header conflicts under `GODOT_GDEXTENSION`.
-
-### Recast/Detour
-- [x] Recast/Detour source in `code/thirdparty/recast-detour/` compiles.
-- [x] MOHAA primarily uses its own `PathSearch` grid; Recast/Detour is available but secondary.
-
-### Save/Load
-- [x] `SV_SaveGame()` / `SV_Loadgame_f()` in `sv_ccmds.c` serialise entity states, player inventory, script threads.
-- [x] Save files: `.ssv` (server), `.sav` (level), `.spv` (persistant), `.tga` (screenshot).
-- [x] `SV_AllowSaveGame()` guarded by `#ifndef DEDICATED` — always returns `qfalse` under Godot build (DEDICATED defined). New `Godot_SP_CanSave()` accessor reimplements checks without that guard.
-- [x] Memory safety: `gi_Malloc_Safe`/`gi_Free_Safe` already applied in allocator sites reachable from save/load paths.
-
-### Accessor files created
-- `code/godot/godot_game_sp.h` — declarations for 5 SP state accessors.
-- `code/godot/godot_game_sp.c` — implementations:
-  - `Godot_SP_IsCutsceneActive()` — reads `STAT_CINEMATIC` and `STAT_LETTERBOX` from first client.
-  - `Godot_SP_GetObjectiveCount()` — stub (objectives live in C++ entity layer).
-  - `Godot_SP_GetObjectiveComplete(i)` — stub (same reason).
-  - `Godot_SP_CanSave()` — mirrors `SV_AllowSaveGame` logic, works under `GODOT_GDEXTENSION`.
-  - `Godot_SP_CanLoad()` — checks for quick-save `.ssv` file via `FS_ReadFileEx`.
-
-### #ifdef audit
-- [x] `SV_AllowSaveGame` in `sv_ccmds.c` uses `#ifndef DEDICATED` — entire body compiled out under Godot. New accessor provides equivalent checks.
-- [x] `g_main.h` already has `gi_Malloc_Safe`/`gi_Free_Safe` guards for allocator teardown.
-- [x] Actor AI headers compile without conflicts under `GODOT_GDEXTENSION`.
-- [x] Recast/Detour compiles under `GODOT_GDEXTENSION` with no issues.
-
-## Phase 102: func_* Audit ✅
-- [x] **Task 102.1:** Audited all `func_*` entity types — 37 active entities registered via CLASS_DECLARATION, all fully implemented.
-- [x] **Task 102.2:** Verified door entities: `func_door` (SlidingDoor), `func_rotatingdoor` (RotatingDoor), `script_door` (ScriptDoor) — open/close/block/lock/sound all implemented.
-- [x] **Task 102.3:** Verified mover base: `Mover` class provides `MoveTo()`, `LinearInterpolate()`, `MoveDone()`, `Stop()` — core movement engine for all func_* movers.
-- [x] **Task 102.4:** Verified breakable/explodable entities: `func_explodingwall`, `func_exploder`, `func_multi_exploder`, `func_explodeobject`, `func_window`, `func_barrel`, `func_crate` — destruction, debris, and damage all implemented.
-- [x] **Task 102.5:** Verified vehicle entities: `script_vehicle` (Vehicle), `script_drivablevehicle` (DrivableVehicle) — enter/exit/physics all implemented.
-- [x] **Task 102.6:** Verified beam entity: `func_beam` (FuncBeam) — beam rendering, damage, shader configuration all implemented.
-- [x] **Task 102.7:** Verified miscellaneous func_* entities: ladders, monkey bars, push objects, spawners, cameras, emitters, rain, fulcrums, objectives — all implemented.
-- [x] **Task 102.8:** Confirmed legacy Q3 spawn table (`spawns[]`, `G_CallSpawn()`, `SP_func_*`) is disabled within `#if 0` block (g_spawn.cpp:607–1312) — no linker errors.
-- [x] **Task 102.9:** Confirmed BSP model accessors available: `Godot_BSP_GetBrushModelMesh()`, `Godot_BSP_GetInlineModelBounds()`, `Godot_BSP_MarkFragmentsForInlineModel()`.
-- [x] **Task 102.10:** Confirmed no `#ifdef GODOT_GDEXTENSION` guards needed in func_* files — pure game logic with no platform-specific behaviour.
-
-### Key technical details (Phase 102):
-- Entity spawning uses CLASS_DECLARATION macro system exclusively — `SpawnArgs::getClassDef()` resolves classID strings to C++ class definitions
-- Legacy Q3 C-style spawn table is dead code in `#if 0` block — MOHAA replaced it with object-oriented class registration
-- `func_breakable`, `func_explodable`, `func_vehicle`, `func_plat`, `func_train`, `func_rotating`, `func_pendulum` do not exist as CLASS_DECLARATION entries — MOHAA uses different classnames (see audit document for equivalents)
-- Door state machine: `STATE_CLOSED` → `STATE_OPENING` → `STATE_OPEN` → `STATE_CLOSING` → `STATE_CLOSED`
-- Movement pipeline: engine entity state → `godot_renderer.c` capture buffer → `MoHAARunner::update_entities()` → `MeshInstance3D` transform update
-
-### Files created (Phase 102):
-- `code/godot/godot_func_audit.md` — comprehensive audit of all 37 active func_* entities
-
-## Phase 116-120: Collision & Physics Audit ✅
-- [x] **BSP collision (CM_BoxTrace):** `CM_BoxTrace()` traces boxes through BSP world correctly. `CM_PointContents()` returns content flags. Brush collision (solid, water, lava, clip), patch collision hulls from Bézier patches, and terrain heightfield traces all function correctly. No `#ifdef GODOT_GDEXTENSION` guards needed — compiled identically for Godot and native.
-- [x] **Entity collision:** `SV_Trace()` wraps `CM_BoxTrace` with entity clipping via `SV_ClipMoveToEntities()`. Entity clip models (bounding boxes and BSP sub-models) handled by `SV_ClipHandleForEntity()`. Pusher entities (doors, elevators) use `G_Push()` with rollback on blocking. Trigger touches detected via `G_TouchTriggers()`. `CONTENTS_BODY`, `CONTENTS_SOLID`, `CONTENTS_PLAYERCLIP` masks used correctly.
-- [x] **Projectile physics:** Grenades use `MOVETYPE_BOUNCE` with engine gravity and surface-aware bounce sounds. Rockets travel straight-line and detonate on impact with `RadiusDamage()` splash. Bullets use instant-hit `G_Trace()` with material penetration (up to 5 layers). Per-weapon definitions loaded from TIKI files via `SpawnArgs`. Projectile–entity collision applies damage with knockback and means-of-death tracking.
-- [x] **Water physics:** `PM_WaterMove()` applies velocity scaling (80%/50% by water level) and water friction. Water level detection via `PM_SetWaterLevel()` (0–3 tiers). Drowning damage in `P_WorldEffects()` scales from 2–15 HP/tick. Transition sounds: `EV_WATER_TOUCH`, `EV_WATER_LEAVE`, `EV_WATER_UNDER`, `EV_WATER_CLEAR`.
-- [x] **Fall damage:** `PM_CrashLand()` uses kinematic delta calculation with four severity tiers (short/medium/far/fatal). Water reduces fall damage by 50–75%. `SURF_NODAMAGE` suppresses damage on bounce pads. Terminal velocity event at 1200 ups.
-- [x] **Kill triggers and world damage:** `trigger_hurt` applies configurable damage with `DAMAGE_NO_ARMOR`. Lava deals 30×waterlevel, slime deals 10×waterlevel per frame via `P_WorldEffects()`. Out-of-world kills handled by map-placed `trigger_hurt` volumes (standard id Tech 3 practice).
-
-### Audit documentation:
-- `code/godot/godot_physics_audit.md` — full audit results with per-subsystem findings
-
-## Phase 268: Entity Lighting Integration ✅
-
-Wired `godot_entity_lighting.cpp` into `MoHAARunner::update_entities()` so entities are properly lit by the BSP lightgrid **and** dynamic lights (muzzle flashes, explosions).
-
-### Changes
-- **`godot_renderer.c`:** Added `lightingOrigin[3]` field to `gr_entity_t`, captured from `refEntity_t::lightingOrigin` in `GR_AddRefEntityToScene()`. Added `Godot_Renderer_GetEntityLightingOrigin()` accessor.
-- **`MoHAARunner.cpp`:** Replaced direct `Godot_BSP_LightForPoint()` call with `Godot_EntityLight_Combined()` (guarded by `HAS_ENTITY_LIGHTING_MODULE`). Handles `RF_LIGHTING_ORIGIN` (0x0080) — when set, samples lightgrid at `lightingOrigin` instead of render origin. Fallback to old `Godot_BSP_LightForPoint()` path when module is absent.
-
-### Technical Details
-- `Godot_EntityLight_Combined(pos, 4, &r, &g, &b)` samples lightgrid ambient+directed and accumulates up to 4 closest dynamic lights with linear attenuation.
-- Dynamic lights already rendered as `OmniLight3D` nodes in `update_dlights()`; this adds per-entity material modulation for more accurate lighting.
-- Existing tinted material cache (Phase 61) works unchanged — the quantised light key captures the combined lighting colour.
-
-## Phase 300: MoHAARunner Module Integration ✅
-Full integration of all standalone agent modules into MoHAARunner.cpp.
-
-- [x] **Task 300.1:** Added `__has_include` guards for `godot_ubersound.h`, `godot_speaker_entities.h`, `godot_sound_occlusion.h` in `MoHAARunner.h`.
-- [x] **Task 300.2:** Integrated UI system (`godot_ui_system.h`/`godot_ui_input.h`) — `Godot_UI_Update()` called in `_process()`, cursor mode toggled via `Godot_UI_ShouldShowCursor()`.
-- [x] **Task 300.3:** Integrated UI input routing in `_unhandled_input()` — when `Godot_UI_ShouldCaptureInput()` returns true, key/mouse/char events route through `Godot_UI_Handle*()` functions.
-- [x] **Task 300.4:** Integrated render statistics (`Godot_RenderStats_BeginFrame()`/`EndFrame()`) and per-frame mesh/material cache eviction in `_process()`.
-- [x] **Task 300.5:** Integrated entity lighting (`Godot_EntityLight_Combined()`) in `update_entities()` — replaces manual `Godot_BSP_LightForPoint` calls with combined lightgrid + dynamic light sampling.
-- [x] **Task 300.6:** Integrated weapon SubViewport (`Godot_WeaponViewport`) — created in `setup_3d_scene()`, camera synced in `_process()`, RF_FIRST_PERSON/RF_DEPTHHACK entities reparented to weapon root.
-- [x] **Task 300.7:** Integrated ubersound alias system — `Godot_Ubersound_Init()` called in `setup_audio()`, alias resolution in `load_wav_from_vfs()` when direct VFS load fails.
-- [x] **Task 300.8:** Integrated speaker entities — `Godot_Speakers_Init()`/`LoadFromEntities()` called on map load, `Godot_Speakers_Update()` called per frame.
-- [x] **Task 300.9:** Integrated sound occlusion — `Godot_SoundOcclusion_Check()` applied to 3D sound volume before playback.
-- [x] **Task 300.10:** Added `Godot_BSP_GetEntityString()` accessor to `godot_bsp_mesh.cpp`/`.h` for speaker entity parsing.
-- [x] **Task 300.11:** Fixed pre-existing Weather and Music init call signature mismatches (`Godot_Weather_Init(game_world)`, `Godot_Music_Init((void*)this)`).
-- [x] **Task 300.12:** Added module shutdown hooks in `~MoHAARunner()`: weapon viewport destroy, speaker shutdown, ubersound shutdown, cache clearing, shader cache clearing.
-- [x] **Task 300.13:** Integrated UI map load notification — `Godot_UI_OnMapLoad()` called in `check_world_load()`.
-- [x] **Task 300.14:** Integrated shader material cache clearing on map change via `Godot_Shader_ClearCache()`.
-
-### Key technical details (Phase 300):
-- All module calls are guarded by `#ifdef HAS_<MODULE>_MODULE` preprocessor checks generated by `__has_include` in `MoHAARunner.h`
-- Entity lighting uses `Godot_EntityLight_Combined()` which samples both BSP lightgrid and dynamic lights (Phase 63+64)
-- Weapon viewport reparents entities with `RF_FIRST_PERSON` (0x02) or `RF_DEPTHHACK` (0x04) renderfx flags
-- Sound occlusion factor applied as volume offset: `vol_db += 20 * log10(occlusion_factor)`
-- Ubersound alias resolution is a fallback — tried only when direct VFS file load fails
-- Frame counter for cache eviction uses a local `static uint64_t` incremented each `_process()` call
-
-### Modules integrated:
-| Module | Header | Purpose | Integration Points |
-|--------|--------|---------|--------------------|
-| UI System | `godot_ui_system.h` | UI state machine, cursor control | `_process()`, `check_world_load()` |
-| UI Input | `godot_ui_input.h` | Input routing to menus/console/chat | `_unhandled_input()` |
-| Mesh Cache | `godot_mesh_cache.h` | Entity mesh caching + eviction | `_process()`, `check_world_load()` |
-| Material Cache | `godot_mesh_cache.h` | Material sharing + eviction | `_process()`, `check_world_load()` |
-| Render Stats | `godot_mesh_cache.h` | Per-frame performance counters | `_process()` |
-| Entity Lighting | `godot_entity_lighting.h` | Lightgrid + dlight sampling | `update_entities()` |
-| Weapon Viewport | `godot_weapon_viewport.h` | SubViewport for first-person weapons | `setup_3d_scene()`, `_process()`, `update_entities()` |
-| Ubersound | `godot_ubersound.h` | Sound alias resolution | `setup_audio()`, `load_wav_from_vfs()` |
-| Speaker Entities | `godot_speaker_entities.h` | BSP ambient sound entities | `check_world_load()`, `_process()` |
-| Sound Occlusion | `godot_sound_occlusion.h` | BSP trace-based attenuation | `update_audio()` |
-| Shader Material | `godot_shader_material.h` | Cache clear on map change | `check_world_load()`, `~MoHAARunner()` |
-
-### Files modified (Phase 300):
-- `code/godot/MoHAARunner.h` — added `__has_include` guards for ubersound, speakers, occlusion
-- `code/godot/MoHAARunner.cpp` — integrated all module hooks (262 lines added)
-- `code/godot/godot_bsp_mesh.h` — added `Godot_BSP_GetEntityString()` declaration
-- `code/godot/godot_bsp_mesh.cpp` — added `Godot_BSP_GetEntityString()` implementation
-
-## Phase 59: MoHAARunner UI System Integration ✅
-- [x] **Task 59.1:** Added `extern "C"` declarations for all `Godot_UI_*` and `Godot_ResetMousePosition` functions in MoHAARunner.cpp (guarded with `#ifndef HAS_UI_SYSTEM_MODULE` / `HAS_UI_INPUT_MODULE` to avoid conflicts when headers are available).
-- [x] **Task 59.2:** Call `Godot_UI_Update()` each frame in `_process()` immediately after `Com_Frame()` — polls engine keyCatchers and updates the UI state machine.
-- [x] **Task 59.3:** Cursor management: `Godot_UI_ShouldShowCursor()` checked each frame — toggles between `MOUSE_MODE_VISIBLE` (UI active) and `MOUSE_MODE_CAPTURED` (game mode). Calls `Godot_ResetMousePosition()` on transitions to prevent cursor jumps.
-- [x] **Task 59.4:** `_unhandled_input()` now checks `Godot_UI_ShouldCaptureInput()` — routes keyboard, mouse button, mouse motion, and character events through `Godot_UI_Handle*()` when UI is active; falls through to direct `Godot_Inject*()` for game mode.
-- [x] **Task 59.5:** `check_world_load()` calls `Godot_UI_OnMapLoad()` when a new BSP load begins — activates `GODOT_UI_LOADING` state in the UI state machine.
-- [x] **Task 59.6:** Removed hardcoded input-fix logic in `_process()` (forcible keyCatcher clearing, ForceUnpause) — now superseded by the UI state machine's automatic cursor/input mode management.
-- [x] **Task 59.7:** Added `last_ui_cursor_shown` tracking member to MoHAARunner to detect cursor state transitions and avoid redundant mode switches.
-
-### Key technical details (Phase 59):
-- UI state machine (`godot_ui_system.cpp`) polls `Godot_Client_GetKeyCatchers()` each frame via `Godot_UI_Update()` and derives the UI state (NONE, MAIN_MENU, CONSOLE, LOADING, SCOREBOARD, MESSAGE)
-- Input routing is decided once per event in `_unhandled_input()` — the `Godot_UI_Handle*()` functions internally delegate to the same `Godot_Inject*()` calls but mark events as consumed
-- The engine's own key dispatch in `cl_keys.c` routes events to `Console_Key()`, `UI_KeyEvent()`, `Message_Key()`, or `CG_KeyEvent()` based on the keyCatchers flags — the UI input module does not bypass this
-- Mouse mode transitions use `Godot_ResetMousePosition()` to clear absolute mouse tracking state in `godot_input_bridge.c`, preventing position jumps when switching between UI (absolute) and game (relative) input modes
-- Background rendering (item 3 above) and dedicated UI CanvasLayer (item 5) remain as future work — the engine's 2D command buffer already captures background/loading screen content
-
-### Files modified (Phase 59):
-- `code/godot/MoHAARunner.cpp` — UI update, cursor management, input routing, map load notification
-- `code/godot/MoHAARunner.h` — added `last_ui_cursor_shown` member
-
-## Phase 262: Save/Load Game Integration ✅
-- [x] **Task 262.1:** Created `code/godot/godot_save_accessors.c` — C accessor wrapping engine `savegame`/`loadgame` console commands via `Cbuf_ExecuteText(EXEC_APPEND, ...)`.
-- [x] **Task 262.2:** Created `code/godot/godot_save_accessors.h` — header with extern "C" declarations for `Godot_Save_QuickSave`, `Godot_Save_QuickLoad`, `Godot_Save_SaveToSlot`, `Godot_Save_LoadFromSlot`, `Godot_Save_SlotExists`.
-- [x] **Task 262.3:** Wired F5 (quick save) and F9 (quick load) key handlers in `MoHAARunner::_unhandled_input()`. Moved HUD toggle from F9 to F10.
-- [x] **Task 262.4:** `Godot_Save_SlotExists` uses `Com_GetArchiveFileName` + `FS_ReadFile` to check for save slot `.sav` files.
-
-### Key technical details (Phase 262):
-- Save/load commands are queued via `Cbuf_ExecuteText(EXEC_APPEND, ...)` — engine's `SV_Savegame_f`/`SV_Loadgame_f` (in `sv_ccmds.c`) handle all serialisation.
-- Slot-based saves use names `slot0`–`slotN`; quick save/load uses name `quick`.
-- `Godot_Save_SlotExists` checks `save/<config>/<slotN>.sav` via `Com_GetArchiveFileName` and `FS_ReadFile(path, NULL)`.
-- No SConstruct changes needed — `code/godot/` is already in `src_dirs` and `add_sources()` recursively collects `.c`/`.cpp`.
-
-### Files created (Phase 262):
-- `code/godot/godot_save_accessors.c`
-- `code/godot/godot_save_accessors.h`
-
-### Files modified (Phase 262):
-- `code/godot/MoHAARunner.cpp` — added save accessor extern declarations, F5/F9 key handlers, moved HUD toggle to F10
-
-## Phase 264: Settings Accessors (Cvar/Keybind Bridge) ✅
-
-Created a C accessor layer (`code/godot/godot_settings_accessors.c/.h`) that exposes the engine's cvar-based settings system to Godot. GDScript can now read/write all player-configurable settings:
-
-- **Generic cvar access:** `Godot_Settings_GetFloat`, `Godot_Settings_GetInt`, `Godot_Settings_GetString`, `Godot_Settings_Set` — thin wrappers around `Cvar_FindVar` / `Cvar_Set`.
-- **Audio:** `Godot_Settings_GetMasterVolume` / `SetMasterVolume` (`s_volume`), `GetMusicVolume` / `SetMusicVolume` (`s_musicvolume`).
-- **Video:** `Godot_Settings_GetTextureQuality` / `SetTextureQuality` (`r_picmip`).
-- **Network:** `Godot_Settings_GetRate` / `SetRate` (`rate`).
-- **Key bindings:** `Godot_Settings_BindKey` / `GetKeyBinding` — delegates to `Key_SetBinding` / `Key_GetBinding`.
-- **Config persistence:** `Godot_Settings_WriteConfig` — appends `writeconfig mohaaconfig.cfg` to the command buffer.
+The path, script, and animate entity families are **fully compatible** with the Godot GDExtension build. The existing safety mechanisms (`Z_MarkShutdown`, `CONTAINER_Free`→`Z_Free` redirect, `gi`→`SV_*`→`Z_*` routing, `EventSystemStarted` guard) provide comprehensive protection. No code changes are required for these entity families.
