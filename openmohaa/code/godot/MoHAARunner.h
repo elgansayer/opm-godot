@@ -285,17 +285,6 @@ private:
     };
     std::vector<PlayerSlotInfo> player_slot_info;                    // Size = MAX_3D_PLAYERS
 
-    // Music playback (Phase 17, improved Phase 39)
-    AudioStreamPlayer *music_player = nullptr;                       // Background music player
-    String current_music_name;                                       // Currently playing soundtrack name
-    float music_target_volume = 1.0f;                                // Target volume for fading
-    // Smooth fade state (Phase 39)
-    float music_fade_from = 1.0f;                                    // Volume at fade start (linear)
-    float music_fade_to = 1.0f;                                      // Volume at fade end (linear)
-    float music_fade_duration = 0.0f;                                // Total fade time (seconds)
-    float music_fade_elapsed = 0.0f;                                 // Elapsed fade time (seconds)
-    bool music_fading = false;                                       // Whether a fade is in progress
-
     void setup_audio();                                              // Create audio player pools
     void update_audio(double delta);                                 // Process sound events + loops
     Ref<AudioStream> load_wav_from_vfs(int sfxHandle);                // Load WAV/MP3 via engine VFS

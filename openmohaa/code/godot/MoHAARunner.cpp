@@ -180,6 +180,14 @@ extern "C" {
     void  Godot_Sound_ClearTriggeredAction(void);
     int   Godot_Sound_FindSfxIndex(int handle);
 
+    // Sound occlusion (Phase 48) — from godot_sound_occlusion.c
+    float Godot_SoundOcclusion_Check(float listener_x, float listener_y,
+                                     float listener_z,
+                                     float origin_x, float origin_y,
+                                     float origin_z);
+    void  Godot_SoundOcclusion_SetEnabled(int enabled);
+    int   Godot_SoundOcclusion_IsEnabled(void);
+
     // Model bridge (Phase 9) — from godot_renderer.c + godot_skel_model_accessors.cpp
     void *Godot_Model_GetTikiPtr(int hModel);
     int   Godot_Model_GetType(int hModel);
@@ -388,6 +396,9 @@ MoHAARunner::MoHAARunner() {
 MoHAARunner::~MoHAARunner() {
 #ifdef HAS_WEAPON_VIEWPORT_MODULE
     Godot_WeaponViewport::get().destroy();
+#endif
+#ifdef HAS_MUSIC_MODULE
+    Godot_Music_Shutdown();
 #endif
 
     if (initialized) {
@@ -751,6 +762,7 @@ void MoHAARunner::check_world_load() {
 #ifdef HAS_WEATHER_MODULE
             Godot_Weather_Shutdown();
 #endif
+            Godot_SoundOcclusion_SetEnabled(0);   // Disable occlusion when BSP unloaded
             pvs_current_cluster = -1;             // Reset PVS state
             pvs_log_count = 0;
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
@@ -798,6 +810,9 @@ void MoHAARunner::check_world_load() {
 #ifdef HAS_WEATHER_MODULE
         Godot_Weather_Init(game_world);
 #endif
+        // Enable sound occlusion now that BSP collision data is available
+        Godot_SoundOcclusion_SetEnabled(1);
+        UtilityFunctions::print("[MoHAA] Sound occlusion enabled.");
 
     } else {
         UtilityFunctions::printerr("[MoHAA] Failed to load BSP world.");
@@ -3324,10 +3339,14 @@ void MoHAARunner::update_audio(double delta) {
     if (!audio_root) return;
 
     // -- 1. Update listener position from engine camera --
+    float listener_id_space[3] = {0, 0, 0};  // Listener in id-space for occlusion checks
     {
         float lo[3], la[9];
         int lent;
         Godot_Sound_GetListener(lo, la, &lent);
+        listener_id_space[0] = lo[0];
+        listener_id_space[1] = lo[1];
+        listener_id_space[2] = lo[2];
         Vector3 listener_pos = id_to_godot_position(lo[0], lo[1], lo[2]);
         if (audio_listener) {
             audio_listener->set_global_position(listener_pos);
@@ -3461,7 +3480,12 @@ void MoHAARunner::update_audio(double delta) {
                 AudioStreamPlayer3D *p = sfx_players_3d[pi];
                 Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
                 p->set_global_position(pos);
-                float vol_db = (volume > 0.001f) ? (20.0f * log10f(volume)) : -80.0f;
+                // Apply sound occlusion attenuation for looping sounds
+                float occ = Godot_SoundOcclusion_Check(listener_id_space[0], listener_id_space[1],
+                                                        listener_id_space[2],
+                                                        origin[0], origin[1], origin[2]);
+                float adj_vol = volume * occ;
+                float vol_db = (adj_vol > 0.001f) ? (20.0f * log10f(adj_vol)) : -80.0f;
                 p->set_volume_db(vol_db);
             }
         } else {
@@ -3498,7 +3522,12 @@ void MoHAARunner::update_audio(double delta) {
             p->set_stream(loop_stream);
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
             p->set_global_position(pos);
-            float vol_db = (volume > 0.001f) ? (20.0f * log10f(volume)) : -80.0f;
+            // Apply sound occlusion attenuation for new looping sounds
+            float occ = Godot_SoundOcclusion_Check(listener_id_space[0], listener_id_space[1],
+                                                    listener_id_space[2],
+                                                    origin[0], origin[1], origin[2]);
+            float adj_vol = volume * occ;
+            float vol_db = (adj_vol > 0.001f) ? (20.0f * log10f(adj_vol)) : -80.0f;
             p->set_volume_db(vol_db);
             p->set_pitch_scale(pitch > 0.01f ? pitch : 1.0f);
             float max_m = (maxDist > 0) ? (maxDist * MOHAA_UNIT_SCALE) : 50.0f;
@@ -3520,130 +3549,7 @@ void MoHAARunner::update_audio(double delta) {
         }
     }
 
-    // -- 4. Music playback (Phase 17) --
-    if (music_player) {
-        int music_action = Godot_Sound_GetMusicAction();
-        if (music_action != 0) {
-            if (music_action == 1) {
-                const char *mus_name_raw = Godot_Sound_GetMusicName();
-                String name_str(mus_name_raw ? mus_name_raw : "");
-                if (name_str.length() > 0 && name_str != current_music_name) {
-                    String mus_base = name_str;
-                    if (mus_base.begins_with("sound/")) mus_base = mus_base.substr(6);
-                    if (!mus_base.begins_with("music/")) mus_base = "music/" + mus_base;
-                    if (mus_base.ends_with(".mus")) mus_base = mus_base.substr(0, mus_base.length() - 4);
-                    String mus_vfs_path = mus_base + ".mus";
-
-                    void *mus_buf = nullptr;
-                    long mus_len = Godot_VFS_ReadFile(mus_vfs_path.utf8().get_data(), &mus_buf);
-                    UtilityFunctions::print("[MoHAA] Music: read .mus '" + mus_vfs_path + "' len=" + String::num_int64(mus_len));
-
-                    String track_path;
-                    bool should_loop = false;
-                    float mus_volume = 1.0f;
-
-                    if (mus_len > 0 && mus_buf) {
-                        String mus_text = String::utf8((const char *)mus_buf, mus_len);
-                        String base_dir;
-                        String track_file;
-                        PackedStringArray mlines = mus_text.split("\n");
-                        for (int li = 0; li < mlines.size(); li++) {
-                            String line = mlines[li].strip_edges();
-                            if (line.begins_with("path ")) {
-                                base_dir = line.substr(5).strip_edges();
-                            } else if (line.begins_with("normal ") && !line.begins_with("!normal")) {
-                                track_file = line.substr(7).strip_edges();
-                            } else if (line.begins_with("!normal volume ")) {
-                                mus_volume = line.substr(15).strip_edges().to_float();
-                            } else if (line == "!normal loop") {
-                                should_loop = true;
-                            }
-                        }
-                        if (track_file.length() > 0) {
-                            if (base_dir.length() > 0) {
-                                track_path = base_dir + "/" + track_file;
-                            } else {
-                                track_path = "sound/music/" + track_file;
-                            }
-                        }
-                        Godot_VFS_FreeFile(mus_buf);
-                    } else {
-                        if (mus_buf) Godot_VFS_FreeFile(mus_buf);
-                        track_path = "sound/" + mus_base + ".mp3";
-                    }
-
-                    if (track_path.length() > 0) {
-                        void *mp3_buf = nullptr;
-                        long mp3_len = Godot_VFS_ReadFile(track_path.utf8().get_data(), &mp3_buf);
-                        if (mp3_len > 0 && mp3_buf) {
-                            PackedByteArray mp3_data;
-                            mp3_data.resize(mp3_len);
-                            memcpy(mp3_data.ptrw(), mp3_buf, mp3_len);
-                            Godot_VFS_FreeFile(mp3_buf);
-
-                            Ref<AudioStreamMP3> stream;
-                            stream.instantiate();
-                            stream->set_data(mp3_data);
-                            stream->set_loop(should_loop);
-
-                            music_player->set_stream(stream);
-                            float vol_db = (mus_volume > 0.001f) ? (20.0f * log10f(mus_volume)) : -80.0f;
-                            music_player->set_volume_db(vol_db);
-                            music_target_volume = mus_volume;
-                            music_player->play();
-                            current_music_name = name_str;
-                            UtilityFunctions::print("[MoHAA] Music: playing '" + track_path +
-                                "' (loop=" + String(should_loop ? "yes" : "no") +
-                                ", vol=" + String::num(mus_volume, 2) + ")");
-                        } else {
-                            if (mp3_buf) Godot_VFS_FreeFile(mp3_buf);
-                            UtilityFunctions::print("[MoHAA] Music: track not found: " + track_path);
-                        }
-                    }
-                }
-            } else if (music_action == 2) {
-                if (music_player->is_playing()) music_player->stop();
-                current_music_name = "";
-                UtilityFunctions::print("[MoHAA] Music: stopped.");
-            } else if (music_action == 3) {
-                // Phase 39: Smooth volume fading using fadeTime
-                float new_vol = Godot_Sound_GetMusicVolume();
-                float fade_time = Godot_Sound_GetMusicFadeTime();
-                if (fade_time > 0.01f) {
-                    // Start a gradual fade
-                    music_fade_from = music_target_volume;
-                    music_fade_to = new_vol;
-                    music_fade_duration = fade_time;
-                    music_fade_elapsed = 0.0f;
-                    music_fading = true;
-                } else {
-                    // Instant volume change
-                    music_target_volume = new_vol;
-                    float vol_db = (new_vol > 0.001f) ? (20.0f * log10f(new_vol)) : -80.0f;
-                    music_player->set_volume_db(vol_db);
-                    music_fading = false;
-                }
-            }
-            Godot_Sound_ClearMusicAction();
-        }
-
-        // Phase 39: Per-frame music volume fade interpolation
-        if (music_fading && music_fade_duration > 0.0f) {
-            float dt = (float)delta;
-            music_fade_elapsed += dt;
-            float t = music_fade_elapsed / music_fade_duration;
-            if (t >= 1.0f) {
-                t = 1.0f;
-                music_fading = false;
-            }
-            float cur_vol = music_fade_from + (music_fade_to - music_fade_from) * t;
-            music_target_volume = cur_vol;
-            float vol_db = (cur_vol > 0.001f) ? (20.0f * log10f(cur_vol)) : -80.0f;
-            music_player->set_volume_db(vol_db);
-        }
-    }
-
-    // -- 5. Sound fade (Phase 50) --
+    // -- 4. Sound fade (Phase 50) --
     if (Godot_Sound_GetFadeActive()) {
         float fade_time = Godot_Sound_GetFadeTime();
         if (fade_time > 0.0f) {
@@ -3654,46 +3560,7 @@ void MoHAARunner::update_audio(double delta) {
         Godot_Sound_ClearFade();
     }
 
-    // -- 6. Triggered music (Phase 51) --
-    if (music_player) {
-        int trig_action = Godot_Sound_GetTriggeredAction();
-        if (trig_action > 0) {
-            if (trig_action == 2) {  /* START */
-                const char *trig_name = Godot_Sound_GetTriggeredName();
-                if (trig_name && trig_name[0]) {
-                    String trig_str(trig_name);
-                    /* Try to load as MP3 from VFS */
-                    void *mp3_buf = nullptr;
-                    long mp3_len = Godot_VFS_ReadFile(trig_str.utf8().get_data(), &mp3_buf);
-                    if (mp3_len > 0 && mp3_buf) {
-                        PackedByteArray mp3_data;
-                        mp3_data.resize(mp3_len);
-                        memcpy(mp3_data.ptrw(), mp3_buf, mp3_len);
-                        Godot_VFS_FreeFile(mp3_buf);
-
-                        Ref<AudioStreamMP3> stream;
-                        stream.instantiate();
-                        stream->set_data(mp3_data);
-                        stream->set_loop(Godot_Sound_GetTriggeredLoopCount() != 0);
-                        music_player->set_stream(stream);
-                        music_player->play();
-                        UtilityFunctions::print("[MoHAA] Triggered music: playing '" + trig_str + "'");
-                    } else {
-                        if (mp3_buf) Godot_VFS_FreeFile(mp3_buf);
-                    }
-                }
-            } else if (trig_action == 3) {  /* STOP */
-                if (music_player->is_playing()) music_player->stop();
-            } else if (trig_action == 4) {  /* PAUSE */
-                music_player->set_stream_paused(true);
-            } else if (trig_action == 5) {  /* UNPAUSE */
-                music_player->set_stream_paused(false);
-            }
-            Godot_Sound_ClearTriggeredAction();
-        }
-    }
-
-    // -- 7. Log sound stats once --
+    // -- 5. Log sound stats once --
     static bool logged_audio = false;
     if (!logged_audio && evt_count > 0) {
         int sfx_count = Godot_Sound_GetSfxCount();
