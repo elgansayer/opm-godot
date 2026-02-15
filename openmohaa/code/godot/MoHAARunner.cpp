@@ -2912,6 +2912,54 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     return tex;
 }
 
+// ──────────────────────────────────────────────
+//  UI Viewport Coordinate Transformation
+// ──────────────────────────────────────────────
+// Calculate the transformation from engine's 640×480 virtual space to actual viewport,
+// including letterbox/pillarbox offsets. Used by both update_2d_overlay() for rendering
+// and _unhandled_input() for mouse coordinate transformation.
+void MoHAARunner::update_ui_transform() {
+    // Get engine's virtual resolution (always 640×480 in MOHAA)
+    Godot_Renderer_GetVidSize(&ui_vid_w, &ui_vid_h);
+    if (ui_vid_w < 1) ui_vid_w = 640;
+    if (ui_vid_h < 1) ui_vid_h = 480;
+    
+    // Get actual viewport size
+    Vector2 viewport_size(0, 0);
+    if (hud_control) {
+        viewport_size = hud_control->get_size();
+    }
+    
+    // Fallback chain if Control hasn't been laid out yet
+    if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
+        Rect2 visible_rect = get_viewport()->get_visible_rect();
+        viewport_size = visible_rect.size;
+        
+        if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
+            Vector2i win = DisplayServer::get_singleton()->window_get_size();
+            viewport_size = Vector2(win);
+        }
+    }
+    
+    // Calculate aspect-ratio-preserving scale with letterbox/pillarbox
+    float engine_aspect = (float)ui_vid_w / (float)ui_vid_h;
+    float viewport_aspect = viewport_size.x / viewport_size.y;
+    
+    if (viewport_aspect > engine_aspect) {
+        // Viewport wider than engine → pillarbox (bars on sides)
+        ui_scale_y = viewport_size.y / (float)ui_vid_h;
+        ui_scale_x = ui_scale_y;  // uniform scaling
+        ui_offset_x = (viewport_size.x - (float)ui_vid_w * ui_scale_x) * 0.5f;
+        ui_offset_y = 0.0f;
+    } else {
+        // Viewport taller than engine → letterbox (bars top/bottom)
+        ui_scale_x = viewport_size.x / (float)ui_vid_w;
+        ui_scale_y = ui_scale_x;  // uniform scaling
+        ui_offset_x = 0.0f;
+        ui_offset_y = (viewport_size.y - (float)ui_vid_h * ui_scale_y) * 0.5f;
+    }
+}
+
 void MoHAARunner::update_2d_overlay() {
     int cmd_count = Godot_Renderer_Get2DCmdCount();
     if (cmd_count == 0 && !hud_layer) return;
@@ -2935,6 +2983,10 @@ void MoHAARunner::update_2d_overlay() {
             logged_hud = true;
         }
     }
+
+    // Update viewport transformation (calculates ui_scale_x/y, ui_offset_x/y)
+    // Used both for rendering below and for mouse input transformation
+    update_ui_transform();
 
     if (cmd_count == 0) return;
 
@@ -2981,8 +3033,8 @@ void MoHAARunner::update_2d_overlay() {
             }
 
             if (bg_tex.is_valid()) {
+                // Use actual viewport size for fullscreen background
                 Vector2 vp = hud_control->get_size();
-                // Fallback to viewport size if Control hasn't been laid out yet
                 if (vp.x < 1.0f || vp.y < 1.0f) {
                     Rect2 visible_rect = get_viewport()->get_visible_rect();
                     vp = visible_rect.size;
@@ -2993,47 +3045,8 @@ void MoHAARunner::update_2d_overlay() {
         }
     }
 
-    // Engine uses glconfig.vidWidth × vidHeight coords — scale to actual viewport
-    // Since we set vidWidth=640, vidHeight=480, all engine 2D coordinates
-    // are in 640×480 virtual space (matching the original MOHAA design).
-    int vid_w = 640, vid_h = 480;
-    Godot_Renderer_GetVidSize(&vid_w, &vid_h);
-    if (vid_w < 1) vid_w = 640;
-    if (vid_h < 1) vid_h = 480;
-    
-    // Get actual viewport size (Control size preferred, fallback to viewport)
-    Vector2 viewport_size = hud_control->get_size();
-    if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
-        // Control hasn't been laid out yet — query actual viewport/window size
-        Rect2 visible_rect = get_viewport()->get_visible_rect();
-        viewport_size = visible_rect.size;
-        
-        // Additional safety: if viewport still invalid, query window size directly
-        if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
-            Vector2i win = DisplayServer::get_singleton()->window_get_size();
-            viewport_size = Vector2(win);
-        }
-    }
-
-    // Scale preserving aspect ratio — letterbox/pillarbox if needed
-    float engine_aspect = (float)vid_w / (float)vid_h;
-    float viewport_aspect = viewport_size.x / viewport_size.y;
-    float scale_x, scale_y;
-    float offset_x = 0.0f, offset_y = 0.0f;
-
-    if (viewport_aspect > engine_aspect) {
-        // Viewport is wider than engine — pillarbox (bars on sides)
-        scale_y = viewport_size.y / (float)vid_h;
-        scale_x = scale_y;  // uniform scaling
-        offset_x = (viewport_size.x - (float)vid_w * scale_x) * 0.5f;
-    } else {
-        // Viewport is taller than engine — letterbox (bars top/bottom)
-        scale_x = viewport_size.x / (float)vid_w;
-        scale_y = scale_x;  // uniform scaling
-        offset_y = (viewport_size.y - (float)vid_h * scale_y) * 0.5f;
-    }
-
-    float vid_area = (float)(vid_w * vid_h);
+    // Use cached transformation values calculated by update_ui_transform()
+    float vid_area = (float)(ui_vid_w * ui_vid_h);
 
     for (int i = 0; i < cmd_count; i++) {
         int type, shader;
@@ -3051,8 +3064,8 @@ void MoHAARunner::update_2d_overlay() {
         }
 
         // Scale from engine coords to actual viewport (with aspect correction)
-        Rect2 rect(offset_x + x * scale_x, offset_y + y * scale_y,
-                   w * scale_x, h * scale_y);
+        Rect2 rect(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
+                   w * ui_scale_x, h * ui_scale_y);
         Color col(color[0], color[1], color[2], color[3]);
 
         if (type == 1) {
@@ -3062,8 +3075,8 @@ void MoHAARunner::update_2d_overlay() {
             // GR_2D_SCISSOR — Phase 45: apply scissor/clip rectangle
             // w==0 && h==0 means "reset scissor" (full viewport)
             if (w > 0 && h > 0) {
-                Rect2 clip(offset_x + x * scale_x, offset_y + y * scale_y,
-                           w * scale_x, h * scale_y);
+                Rect2 clip(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
+                           w * ui_scale_x, h * ui_scale_y);
                 rs->canvas_item_set_custom_rect(ci, true, clip);
             } else {
                 rs->canvas_item_set_custom_rect(ci, false, Rect2());
@@ -4928,19 +4941,21 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
         } else {
             // UI/menu mode: absolute position for cursor interaction.
-            // Scale from Godot viewport coordinates to engine render size.
+            // Transform from Godot viewport coordinates to engine virtual 640×480 space,
+            // accounting for letterbox/pillarbox offsets (inverse of rendering transform).
             Vector2 pos = motion_event->get_position();
-            int render_w, render_h;
-            Godot_Renderer_GetVidSize(&render_w, &render_h);
-            auto *vp = get_viewport();
-            if (vp) {
-                Vector2 vp_size = vp->get_visible_rect().size;
-                if (vp_size.x > 0 && vp_size.y > 0) {
-                    int ex = (int)(pos.x * (float)render_w / vp_size.x);
-                    int ey = (int)(pos.y * (float)render_h / vp_size.y);
-                    Godot_InjectMousePosition(ex, ey);
-                }
-            }
+            
+            // Inverse transform: subtract offset, then divide by scale
+            int ex = (int)((pos.x - ui_offset_x) / ui_scale_x);
+            int ey = (int)((pos.y - ui_offset_y) / ui_scale_y);
+            
+            // Clamp to virtual screen bounds
+            if (ex < 0) ex = 0;
+            if (ey < 0) ey = 0;
+            if (ex >= ui_vid_w) ex = ui_vid_w - 1;
+            if (ey >= ui_vid_h) ey = ui_vid_h - 1;
+            
+            Godot_InjectMousePosition(ex, ey);
         }
         return;
     }
