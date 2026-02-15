@@ -160,7 +160,7 @@ static int         gr_numShaders = 1;  /* slot 0 = sentinel */
  *  MoHAARunner reads via Godot_Renderer_Get2DCmd* accessors.
  * ---------------------------------------------------------------- */
 
-#define GR_MAX_2D_CMDS 4096
+#define GR_MAX_2D_CMDS 8192
 
 typedef enum {
     GR_2D_STRETCHPIC,  /* textured quad */

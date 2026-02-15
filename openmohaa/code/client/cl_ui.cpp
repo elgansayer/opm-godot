@@ -5259,7 +5259,12 @@ void CL_InitializeUI(void)
     ui_minicon         = Cvar_Get("ui_minicon", "0", 1);
     ui_gmbox           = Cvar_Get("ui_gmbox", "1", 1);
     ui_consoleposition = Cvar_Get("ui_consoleposition", "", 1);
+#ifdef GODOT_GDEXTENSION
+    /* Under Godot, enable console by default for debugging access. */
+    ui_console         = Cvar_Get("ui_console", "1", 1);
+#else
     ui_console         = Cvar_Get("ui_console", "0", 1);
+#endif
     ui_crosshair       = Cvar_Get("ui_crosshair", "1", 1);
     ui_weaponsbar      = Cvar_Get("ui_weaponsbar", "1", 1);
     ui_weaponsbartime  = Cvar_Get("ui_weaponsbartime", "2500", 1);

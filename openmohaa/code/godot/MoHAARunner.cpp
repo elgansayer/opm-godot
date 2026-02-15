@@ -4824,12 +4824,19 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         }
 
         if (godot_key != 0) {
+            /* Suppress SE_CHAR for console toggle keys (backtick/tilde)
+               to prevent typing ` or ~ into the console input field. */
+            static const int GODOT_KEY_BACKTICK = 96;  /* KEY_QUOTELEFT  */
+            static const int GODOT_KEY_TILDE    = 126; /* KEY_ASCIITILDE */
+            bool is_console_key = (godot_key == GODOT_KEY_BACKTICK
+                                   || godot_key == GODOT_KEY_TILDE);
+
             if (ui_active) {
                 // Phase 59: Route through UI input handlers when UI is active
                 if (!echo) {
                     Godot_UI_HandleKeyEvent(godot_key, pressed ? 1 : 0);
                 }
-                if (pressed || echo) {
+                if ((pressed || echo) && !is_console_key) {
                     int64_t unicode = key_event->get_unicode();
                     if (unicode > 0) {
                         Godot_UI_HandleCharEvent((int)unicode);
@@ -4840,7 +4847,7 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
                 if (!echo) {
                     Godot_InjectKeyEvent(godot_key, pressed ? 1 : 0);
                 }
-                if (pressed || echo) {
+                if ((pressed || echo) && !is_console_key) {
                     int64_t unicode = key_event->get_unicode();
                     if (unicode > 0) {
                         Godot_InjectCharEvent((int)unicode);
