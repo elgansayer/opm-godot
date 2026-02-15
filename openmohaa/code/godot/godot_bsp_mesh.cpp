@@ -17,10 +17,12 @@
 
 #include "godot_bsp_mesh.h"
 #include "godot_shader_props.h"
+#include "godot_shader_material.h"
 
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
@@ -870,83 +872,139 @@ static Ref<ArrayMesh> batches_to_array_mesh(
 
         mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-        // Material with texture and shader properties
-        Ref<StandardMaterial3D> mat;
-        mat.instantiate();
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+        // Material with texture and shader properties.
+        // Multi-stage shaders use ShaderMaterial; single-stage / unknown
+        // shaders fall back to StandardMaterial3D.
+        Ref<Material> surface_mat;
 
-        bool has_texture = false;
-        if (batch.shader_name) {
-            Ref<ImageTexture> tex = load_texture(batch.shader_name);
-            if (tex.is_valid()) {
-                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                has_texture = true;
-                tex_ok++;
-            } else {
-                tex_bad++;
+        const GodotShaderProps *sp = batch.shader_name
+            ? Godot_ShaderProps_Find(batch.shader_name) : nullptr;
+
+        if (sp && sp->stage_count > 0) {
+            /* ── ShaderMaterial path (multi-stage .shader) ── */
+            Ref<ShaderMaterial> smat = Godot_Shader_BuildMaterial(sp);
+            if (smat.is_valid()) {
+                // Bind per-stage texture uniforms.
+                // Stage types are mutually exclusive: a stage is either an
+                // animMap sequence, a $lightmap, or a regular texture.
+                for (int si = 0; si < sp->stage_count; si++) {
+                    const MohaaShaderStage *stage = &sp->stages[si];
+                    String idx = String::num_int64(si);
+
+                    if (stage->animMapFrameCount > 0) {
+                        // animMap: bind each frame texture
+                        for (int f = 0; f < stage->animMapFrameCount; f++) {
+                            Ref<ImageTexture> ftex = load_texture(stage->animMapFrames[f]);
+                            if (ftex.is_valid()) {
+                                smat->set_shader_parameter(
+                                    String("stage") + idx + "_frame" + String::num_int64(f), ftex);
+                            }
+                        }
+                    } else if (stage->isLightmap) {
+                        // $lightmap stage — bind the batch's lightmap texture
+                        if (!batch.nolightmap &&
+                            batch.lightmap_num >= 0 &&
+                            batch.lightmap_num < (int)s_lightmaps.size() &&
+                            s_lightmaps[batch.lightmap_num].is_valid()) {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_tex",
+                                s_lightmaps[batch.lightmap_num]);
+                        }
+                    } else if (stage->map[0] != '\0') {
+                        // Regular texture stage
+                        Ref<ImageTexture> stex = load_texture(stage->map);
+                        if (stex.is_valid()) {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_tex", stex);
+                            tex_ok++;
+                        } else {
+                            tex_bad++;
+                        }
+                    }
+                }
+
+                smat->set_meta("shader_name", String(batch.shader_name));
+                surface_mat = smat;
+            }
+        }
+
+        if (surface_mat.is_null()) {
+            /* ── StandardMaterial3D fallback ── */
+            Ref<StandardMaterial3D> mat;
+            mat.instantiate();
+            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+
+            bool has_texture = false;
+            if (batch.shader_name) {
+                Ref<ImageTexture> tex = load_texture(batch.shader_name);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    has_texture = true;
+                    tex_ok++;
+                } else {
+                    tex_bad++;
+                }
+
+                if (sp) {
+                    switch (sp->transparency) {
+                        case SHADER_ALPHA_TEST:
+                            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+                            mat->set_alpha_scissor_threshold(sp->alpha_threshold);
+                            break;
+                        case SHADER_ALPHA_BLEND:
+                            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                            break;
+                        case SHADER_ADDITIVE:
+                            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                            break;
+                        case SHADER_MULTIPLICATIVE:
+                            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                            break;
+                        default:
+                            break;
+                    }
+                    switch (sp->cull) {
+                        case SHADER_CULL_BACK:
+                            mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
+                            break;
+                        case SHADER_CULL_FRONT:
+                            mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
+                            break;
+                        case SHADER_CULL_NONE:
+                            break;
+                    }
+                }
+
+                mat->set_meta("shader_name", String(batch.shader_name));
             }
 
-            // Apply shader transparency / cull from .shader definitions
-            const GodotShaderProps *sp = Godot_ShaderProps_Find(batch.shader_name);
-            if (sp) {
-                switch (sp->transparency) {
-                    case SHADER_ALPHA_TEST:
-                        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
-                        mat->set_alpha_scissor_threshold(sp->alpha_threshold);
-                        break;
-                    case SHADER_ALPHA_BLEND:
-                        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                        break;
-                    case SHADER_ADDITIVE:
-                        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
-                        break;
-                    case SHADER_MULTIPLICATIVE:
-                        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-                        break;
-                    default:
-                        break;
-                }
-                switch (sp->cull) {
-                    case SHADER_CULL_BACK:
-                        mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-                        break;
-                    case SHADER_CULL_FRONT:
-                        mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
-                        break;
-                    case SHADER_CULL_NONE:
-                        /* Already CULL_DISABLED from default */
-                        break;
-                }
+            if (!has_texture) {
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
             }
+
+            if (batch.nolightmap) {
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+            }
+
+            if (!batch.nolightmap &&
+                batch.lightmap_num >= 0 &&
+                batch.lightmap_num < (int)s_lightmaps.size() &&
+                s_lightmaps[batch.lightmap_num].is_valid()) {
+
+                mat->set_flag(BaseMaterial3D::FLAG_UV2_USE_TRIPLANAR, false);
+                mat->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                mat->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
+                mat->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO,
+                                 s_lightmaps[batch.lightmap_num]);
+                mat->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
+            }
+
+            surface_mat = mat;
         }
 
-        if (!has_texture) {
-            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-        }
-
-        /* Phase 65: Fullbright / nolightmap surfaces — skip lightmap,
-         * use vertex colours directly or render at full brightness. */
-        if (batch.nolightmap) {
-            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-        }
-
-        // Lightmap as detail texture — skip for nolightmap surfaces (Phase 65)
-        if (!batch.nolightmap &&
-            batch.lightmap_num >= 0 &&
-            batch.lightmap_num < (int)s_lightmaps.size() &&
-            s_lightmaps[batch.lightmap_num].is_valid()) {
-
-            mat->set_flag(BaseMaterial3D::FLAG_UV2_USE_TRIPLANAR, false);
-            mat->set_detail_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-            mat->set_detail_uv(BaseMaterial3D::DETAIL_UV_2);
-            mat->set_texture(BaseMaterial3D::TEXTURE_DETAIL_ALBEDO,
-                             s_lightmaps[batch.lightmap_num]);
-            mat->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
-        }
-
-        mesh->surface_set_material(surface_idx, mat);
+        mesh->surface_set_material(surface_idx, surface_mat);
         surface_idx++;
     }
 
