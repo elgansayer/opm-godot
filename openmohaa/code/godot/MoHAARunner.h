@@ -129,6 +129,16 @@
 #define HAS_SHADOW_MODULE 1
 #endif
 
+#if __has_include("godot_frustum_cull.h")
+#include "godot_frustum_cull.h"
+#define HAS_FRUSTUM_CULL_MODULE 1
+#endif
+
+#if __has_include("godot_draw_distance.h")
+#include "godot_draw_distance.h"
+#define HAS_DRAW_DISTANCE_MODULE 1
+#endif
+
 using namespace godot;
 
 // ── Game flow state machine (Phase 261) ──
@@ -274,6 +284,16 @@ private:
     CanvasLayer *hud_layer = nullptr;                     // Overlay layer for 2D elements
     Control *hud_control = nullptr;                       // Control node for custom draw
     std::unordered_map<int, Ref<ImageTexture>> shader_textures; // shader handle → loaded texture
+    
+    // Viewport coordinate transformation (for HUD rendering and mouse input)
+    // These are calculated once per frame and used for both rendering UI and transforming mouse coords
+    float ui_scale_x = 1.0f;       // Scale from engine 640×480 to viewport
+    float ui_scale_y = 1.0f;
+    float ui_offset_x = 0.0f;      // Letterbox/pillarbox offset
+    float ui_offset_y = 0.0f;
+    int ui_vid_w = 640;            // Engine virtual resolution width
+    int ui_vid_h = 480;            // Engine virtual resolution height
+    void update_ui_transform();    // Calculate ui_scale/offset based on viewport size
 
     // Audio bridge (Phase 8)
     Node3D *audio_root = nullptr;                                    // Container for audio player nodes

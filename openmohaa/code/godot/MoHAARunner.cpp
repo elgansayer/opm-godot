@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <unordered_set>
 #include <setjmp.h>
 
@@ -76,6 +77,9 @@ extern "C" {
 
     // VFS accessors (Task 4.1) — from godot_vfs_accessors.c
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
+    long Godot_VFS_FileOpenRead(const char *qpath, int *out_handle);
+    long Godot_VFS_FileRead(int handle, void *buffer, long len);
+    void Godot_VFS_FileClose(int handle);
     void Godot_VFS_FreeFile(void *buffer);
     int  Godot_VFS_FileExists(const char *qpath);
     char **Godot_VFS_ListFiles(const char *directory, const char *extension, int *out_count);
@@ -434,6 +438,9 @@ MoHAARunner::~MoHAARunner() {
 #endif
 #ifdef HAS_SHADER_MATERIAL_MODULE
     Godot_Shader_ClearCache();
+#endif
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_Shutdown();
 #endif
 
     g_godot_ready = false;
@@ -1420,6 +1427,34 @@ void MoHAARunner::update_entities() {
             }
         }
 
+        // Phase 133: Frustum and draw distance culling — skip entities that
+        // are outside the camera frustum or beyond the far-plane cull distance.
+        // First-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) are always
+        // visible because they are the view weapon.
+#if defined(HAS_FRUSTUM_CULL_MODULE) || defined(HAS_DRAW_DISTANCE_MODULE)
+        if (!(renderfx & 0x06)) {
+            Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+#ifdef HAS_FRUSTUM_CULL_MODULE
+            // Conservative bounding sphere (2 m radius ≈ 78 inches,
+            // covers most player-sized entities and props).
+            if (!Godot_FrustumCull_TestSphere(ent_pos, 2.0f)) {
+                mi->set_visible(false);
+                continue;
+            }
+#endif
+#ifdef HAS_DRAW_DISTANCE_MODULE
+            float cull_dist = Godot_DrawDistance_GetCullDistance();
+            if (cull_dist > 0.0f) {
+                Vector3 cam_pos = camera ? camera->get_global_position() : Vector3();
+                if (ent_pos.distance_to(cam_pos) > cull_dist) {
+                    mi->set_visible(false);
+                    continue;
+                }
+            }
+#endif
+        }
+#endif
+
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
         if (reType == RT_SPRITE) {
             float radius = 0.0f, rotation = 0.0f;
@@ -2287,12 +2322,15 @@ void MoHAARunner::update_polys() {
 
     int poly_count = Godot_Renderer_GetPolyCount();
 
-    // Log poly count once
-    static bool logged_poly_count = false;
-    if (!logged_poly_count && poly_count > 0) {
-        UtilityFunctions::print(String("[MoHAA] Polys in frame: ") +
-                                String::num_int64(poly_count));
-        logged_poly_count = true;
+    // Debug logging for poly activity (once per session + count changes)
+    static int last_logged_count = -1;
+    if (poly_count != last_logged_count) {
+        if (poly_count > 0) {
+            UtilityFunctions::print(String("[MoHAA] Poly count changed: ") +
+                                    String::num_int64(poly_count) +
+                                    " (particles/beams/decals active)");
+        }
+        last_logged_count = poly_count;
     }
 
     if (poly_count == 0 && active_poly_count == 0) return;
@@ -2369,14 +2407,23 @@ void MoHAARunner::update_polys() {
         arrays[Mesh::ARRAY_COLOR]  = gCol;
         arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-        Ref<ArrayMesh> mesh;
-        mesh.instantiate();
+        Ref<ArrayMesh> mesh = mi->get_mesh();
+        if (mesh.is_valid()) {
+            mesh->clear_surfaces();
+        } else {
+            mesh.instantiate();
+            mi->set_mesh(mesh);
+        }
         mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-        mi->set_mesh(mesh);
 
         // Material: textured + vertex colour + alpha blend, double-sided
-        Ref<StandardMaterial3D> mat;
-        mat.instantiate();
+        Ref<StandardMaterial3D> mat = mi->get_surface_override_material(0);
+        if (mat.is_null()) {
+            mat.instantiate();
+            mi->set_surface_override_material(0, mat);
+        }
+
+        // Reset material state (reusing existing material)
         mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
         mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
         mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
@@ -2384,14 +2431,51 @@ void MoHAARunner::update_polys() {
         mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
         mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
 
+        // Reset properties that might be dirty from reuse
+        mat->set_albedo(Color(1, 1, 1, 1));
+        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MIX);
+        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
+        mat->set_uv1_scale(Vector3(1, 1, 1));
+        mat->set_uv1_offset(Vector3(0, 0, 0));
+        mat->set_alpha_scissor_threshold(0.5);
+
         // Try to apply the poly's shader texture and shader properties
         if (hShader > 0) {
+            const char *sn = Godot_Renderer_GetShaderName(hShader);
             Ref<ImageTexture> tex = get_shader_texture(hShader);
+            
+            // Particle effect fallback: if shader name suggests particle/tracer/beam
+            // but texture load failed, use white albedo + additive blending
+            bool is_particle_effect = false;
+            if (sn && sn[0]) {
+                // Check for common particle shader names
+                const char* particle_keywords[] = {
+                    "tracer", "beam", "flare", "glow", "particle",
+                    "flash", "spark", "trail", nullptr
+                };
+                for (int kw = 0; particle_keywords[kw]; kw++) {
+                    if (strstr(sn, particle_keywords[kw])) {
+                        is_particle_effect = true;
+                        break;
+                    }
+                }
+            }
+            
             if (tex.is_valid()) {
                 mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            } else if (is_particle_effect) {
+                // Fallback for particle effects: use vertex colour only, additive blend
+                mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
+                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                // Log fallback once per shader
+                static std::unordered_set<std::string> logged_fallbacks;
+                if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
+                    UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
+                    logged_fallbacks.insert(sn);
+                }
             }
-            // Apply shader properties (additive blending for tracers, etc.)
-            const char *sn = Godot_Renderer_GetShaderName(hShader);
+            
+            // Apply shader properties (additive blending, alpha, etc.)
             if (sn && sn[0]) {
                 apply_shader_props_to_material(mat, sn);
             }
@@ -2475,24 +2559,37 @@ void MoHAARunner::update_swipe_effects() {
     arrays[Mesh::ARRAY_TEX_UV] = gUV;
     arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-    Ref<ArrayMesh> smesh;
-    smesh.instantiate();
+    Ref<ArrayMesh> smesh = swipe_mesh->get_mesh();
+    if (smesh.is_null()) {
+        smesh.instantiate();
+        swipe_mesh->set_mesh(smesh);
+    }
+    smesh->clear_surfaces();
     smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-    swipe_mesh->set_mesh(smesh);
 
     // Material: alpha-blended, unshaded, double-sided
     Ref<StandardMaterial3D> mat;
-    mat.instantiate();
-    mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-    mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+    Ref<Material> override_mat = swipe_mesh->get_surface_override_material(0);
+    if (override_mat.is_valid()) {
+        mat = override_mat;
+    } else {
+        mat.instantiate();
+        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+        swipe_mesh->set_surface_override_material(0, mat);
+    }
+
     if (hShader > 0) {
         Ref<ImageTexture> tex = get_shader_texture(hShader);
         if (tex.is_valid()) {
             mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+        } else {
+            mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
         }
+    } else {
+        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
     }
-    swipe_mesh->set_surface_override_material(0, mat);
     swipe_mesh->set_global_transform(Transform3D());
     swipe_mesh->set_visible(true);
 }
@@ -2767,10 +2864,14 @@ void MoHAARunner::update_shadow_blobs() {
         arrays[Mesh::ARRAY_COLOR]  = gCol;
         arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-        Ref<ArrayMesh> smesh;
-        smesh.instantiate();
+        Ref<ArrayMesh> smesh = Object::cast_to<ArrayMesh>(mi->get_mesh().ptr());
+        if (smesh.is_valid()) {
+            smesh->clear_surfaces();
+        } else {
+            smesh.instantiate();
+            mi->set_mesh(smesh);
+        }
         smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-        mi->set_mesh(smesh);
         mi->set_surface_override_material(0, shadow_blob_material);
 
         mi->set_global_transform(Transform3D());
@@ -3022,6 +3123,54 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     return tex;
 }
 
+// ──────────────────────────────────────────────
+//  UI Viewport Coordinate Transformation
+// ──────────────────────────────────────────────
+// Calculate the transformation from engine's 640×480 virtual space to actual viewport,
+// including letterbox/pillarbox offsets. Used by both update_2d_overlay() for rendering
+// and _unhandled_input() for mouse coordinate transformation.
+void MoHAARunner::update_ui_transform() {
+    // Get engine's virtual resolution (always 640×480 in MOHAA)
+    Godot_Renderer_GetVidSize(&ui_vid_w, &ui_vid_h);
+    if (ui_vid_w < 1) ui_vid_w = 640;
+    if (ui_vid_h < 1) ui_vid_h = 480;
+    
+    // Get actual viewport size
+    Vector2 viewport_size(0, 0);
+    if (hud_control) {
+        viewport_size = hud_control->get_size();
+    }
+    
+    // Fallback chain if Control hasn't been laid out yet
+    if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
+        Rect2 visible_rect = get_viewport()->get_visible_rect();
+        viewport_size = visible_rect.size;
+        
+        if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
+            Vector2i win = DisplayServer::get_singleton()->window_get_size();
+            viewport_size = Vector2(win);
+        }
+    }
+    
+    // Calculate aspect-ratio-preserving scale with letterbox/pillarbox
+    float engine_aspect = (float)ui_vid_w / (float)ui_vid_h;
+    float viewport_aspect = viewport_size.x / viewport_size.y;
+    
+    if (viewport_aspect > engine_aspect) {
+        // Viewport wider than engine → pillarbox (bars on sides)
+        ui_scale_y = viewport_size.y / (float)ui_vid_h;
+        ui_scale_x = ui_scale_y;  // uniform scaling
+        ui_offset_x = (viewport_size.x - (float)ui_vid_w * ui_scale_x) * 0.5f;
+        ui_offset_y = 0.0f;
+    } else {
+        // Viewport taller than engine → letterbox (bars top/bottom)
+        ui_scale_x = viewport_size.x / (float)ui_vid_w;
+        ui_scale_y = ui_scale_x;  // uniform scaling
+        ui_offset_x = 0.0f;
+        ui_offset_y = (viewport_size.y - (float)ui_vid_h * ui_scale_y) * 0.5f;
+    }
+}
+
 void MoHAARunner::update_2d_overlay() {
     int cmd_count = Godot_Renderer_Get2DCmdCount();
     if (cmd_count == 0 && !hud_layer) return;
@@ -3045,6 +3194,10 @@ void MoHAARunner::update_2d_overlay() {
             logged_hud = true;
         }
     }
+
+    // Update viewport transformation (calculates ui_scale_x/y, ui_offset_x/y)
+    // Used both for rendering below and for mouse input transformation
+    update_ui_transform();
 
     if (cmd_count == 0) return;
 
@@ -3091,44 +3244,20 @@ void MoHAARunner::update_2d_overlay() {
             }
 
             if (bg_tex.is_valid()) {
+                // Use actual viewport size for fullscreen background
                 Vector2 vp = hud_control->get_size();
+                if (vp.x < 1.0f || vp.y < 1.0f) {
+                    Rect2 visible_rect = get_viewport()->get_visible_rect();
+                    vp = visible_rect.size;
+                }
                 Rect2 full(0.0f, 0.0f, vp.x, vp.y);
                 rs->canvas_item_add_texture_rect(ci, full, bg_tex->get_rid());
             }
         }
     }
 
-    // Engine uses glconfig.vidWidth × vidHeight coords — scale to actual viewport
-    // Since we set vidWidth=640, vidHeight=480, all engine 2D coordinates
-    // are in 640×480 virtual space (matching the original MOHAA design).
-    int vid_w = 640, vid_h = 480;
-    Godot_Renderer_GetVidSize(&vid_w, &vid_h);
-    if (vid_w < 1) vid_w = 640;
-    if (vid_h < 1) vid_h = 480;
-    Vector2 viewport_size = hud_control->get_size();
-    if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
-        viewport_size = Vector2(1280.0f, 720.0f);  // fallback
-    }
-
-    // Scale preserving aspect ratio — letterbox/pillarbox if needed
-    float engine_aspect = (float)vid_w / (float)vid_h;
-    float viewport_aspect = viewport_size.x / viewport_size.y;
-    float scale_x, scale_y;
-    float offset_x = 0.0f, offset_y = 0.0f;
-
-    if (viewport_aspect > engine_aspect) {
-        // Viewport is wider than engine — pillarbox (bars on sides)
-        scale_y = viewport_size.y / (float)vid_h;
-        scale_x = scale_y;  // uniform scaling
-        offset_x = (viewport_size.x - (float)vid_w * scale_x) * 0.5f;
-    } else {
-        // Viewport is taller than engine — letterbox (bars top/bottom)
-        scale_x = viewport_size.x / (float)vid_w;
-        scale_y = scale_x;  // uniform scaling
-        offset_y = (viewport_size.y - (float)vid_h * scale_y) * 0.5f;
-    }
-
-    float vid_area = (float)(vid_w * vid_h);
+    // Use cached transformation values calculated by update_ui_transform()
+    float vid_area = (float)(ui_vid_w * ui_vid_h);
 
     for (int i = 0; i < cmd_count; i++) {
         int type, shader;
@@ -3146,8 +3275,8 @@ void MoHAARunner::update_2d_overlay() {
         }
 
         // Scale from engine coords to actual viewport (with aspect correction)
-        Rect2 rect(offset_x + x * scale_x, offset_y + y * scale_y,
-                   w * scale_x, h * scale_y);
+        Rect2 rect(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
+                   w * ui_scale_x, h * ui_scale_y);
         Color col(color[0], color[1], color[2], color[3]);
 
         if (type == 1) {
@@ -3157,8 +3286,8 @@ void MoHAARunner::update_2d_overlay() {
             // GR_2D_SCISSOR — Phase 45: apply scissor/clip rectangle
             // w==0 && h==0 means "reset scissor" (full viewport)
             if (w > 0 && h > 0) {
-                Rect2 clip(offset_x + x * scale_x, offset_y + y * scale_y,
-                           w * scale_x, h * scale_y);
+                Rect2 clip(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
+                           w * ui_scale_x, h * ui_scale_y);
                 rs->canvas_item_set_custom_rect(ci, true, clip);
             } else {
                 rs->canvas_item_set_custom_rect(ci, false, Rect2());
@@ -3852,6 +3981,12 @@ void MoHAARunner::_ready() {
 #ifdef HAS_VFX_MODULE
     Godot_VFX_Init(game_world);
 #endif
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_Init();
+#endif
+#ifdef HAS_DRAW_DISTANCE_MODULE
+    Godot_DrawDistance_Init();
+#endif
 
     UtilityFunctions::print("[MoHAA] Engine initialised.");
 }
@@ -3916,6 +4051,21 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update 3D camera from engine viewpoint (Phase 7a) ──
     update_camera();
+
+    // ── Phase 133: Frustum culling — extract planes after camera update ──
+#ifdef HAS_FRUSTUM_CULL_MODULE
+    Godot_FrustumCull_UpdateCamera(camera);
+#endif
+
+    // ── Phase 133: Draw distance — apply near/far planes and fog from cvars ──
+#ifdef HAS_DRAW_DISTANCE_MODULE
+    if (camera && world_env) {
+        Ref<Environment> dd_env = world_env->get_environment();
+        if (dd_env.is_valid()) {
+            Godot_DrawDistance_Update(camera, dd_env.ptr(), static_cast<float>(delta));
+        }
+    }
+#endif
 
     // ── Sync weapon viewport camera (Phase 62) ──
 #ifdef HAS_WEAPON_VIEWPORT_MODULE
@@ -4100,16 +4250,32 @@ godot::PackedByteArray MoHAARunner::vfs_read_file(const godot::String &p_qpath) 
     }
 
     godot::CharString path = p_qpath.utf8();
-    void *buffer = nullptr;
-    long len = Godot_VFS_ReadFile(path.get_data(), &buffer);
 
-    if (len < 0 || !buffer) {
+    // Optimisation: read directly into PackedByteArray to avoid double allocation + memcpy.
+    // 1. Open the file and get its size (without allocating a buffer in the engine)
+    int handle = 0;
+    long len = Godot_VFS_FileOpenRead(path.get_data(), &handle);
+
+    if (len < 0 || handle == 0) {
         return result;  // File not found — return empty array
     }
 
+    // 2. Allocate the result buffer once
     result.resize(len);
-    memcpy(result.ptrw(), buffer, len);
-    Godot_VFS_FreeFile(buffer);
+
+    // 3. Read directly into the buffer
+    if (len > 0) {
+        long read_len = Godot_VFS_FileRead(handle, result.ptrw(), len);
+        if (read_len != len) {
+            UtilityFunctions::printerr("[MoHAA] vfs_read_file: Short read or error reading ", p_qpath);
+            // We could resize result to 0 here, but partial data might be useful or at least expected size.
+            // For now, keep it as is (filled with zeroes past read_len if any).
+        }
+    }
+
+    // 4. Close the file handle
+    Godot_VFS_FileClose(handle);
+
     return result;
 }
 
@@ -4226,6 +4392,9 @@ void MoHAARunner::update_input_routing() {
     // Apply cursor mode change if needed
     if (should_capture != mouse_captured) {
         set_mouse_captured(should_capture);
+        if (should_capture) {
+            Godot_Client_SetGameInputMode();
+        }
     }
 }
 
@@ -5023,19 +5192,21 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
         } else {
             // UI/menu mode: absolute position for cursor interaction.
-            // Scale from Godot viewport coordinates to engine render size.
+            // Transform from Godot viewport coordinates to engine virtual 640×480 space,
+            // accounting for letterbox/pillarbox offsets (inverse of rendering transform).
             Vector2 pos = motion_event->get_position();
-            int render_w, render_h;
-            Godot_Renderer_GetVidSize(&render_w, &render_h);
-            auto *vp = get_viewport();
-            if (vp) {
-                Vector2 vp_size = vp->get_visible_rect().size;
-                if (vp_size.x > 0 && vp_size.y > 0) {
-                    int ex = (int)(pos.x * (float)render_w / vp_size.x);
-                    int ey = (int)(pos.y * (float)render_h / vp_size.y);
-                    Godot_InjectMousePosition(ex, ey);
-                }
-            }
+            
+            // Inverse transform: subtract offset, then divide by scale
+            int ex = (int)((pos.x - ui_offset_x) / ui_scale_x);
+            int ey = (int)((pos.y - ui_offset_y) / ui_scale_y);
+            
+            // Clamp to virtual screen bounds
+            if (ex < 0) ex = 0;
+            if (ey < 0) ey = 0;
+            if (ex >= ui_vid_w) ex = ui_vid_w - 1;
+            if (ey >= ui_vid_h) ey = ui_vid_h - 1;
+            
+            Godot_InjectMousePosition(ex, ey);
         }
         return;
     }
