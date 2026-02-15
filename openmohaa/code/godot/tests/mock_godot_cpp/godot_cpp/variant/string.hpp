@@ -32,6 +32,10 @@ public:
         return String(_data + (other ? other : ""));
     }
 
+    bool operator==(const String& other) const { return _data == other._data; }
+    bool operator<(const String& other) const { return _data < other._data; }
+    bool is_empty() const { return _data.empty(); }
+
     static String num_int64(int64_t num) {
         return String(std::to_string(num));
     }

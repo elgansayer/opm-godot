@@ -3016,11 +3016,37 @@ void MoHAARunner::update_shader_animations(double delta) {
             if (!smat.is_valid()) continue;
 
             // Check resource metadata for shader name (stored during BSP build)
-            String shader_name = smat->get_meta("shader_name", "");
-            if (shader_name.is_empty()) continue;
+            const GodotShaderProps *sp = nullptr;
+            String shader_name; // Default empty, retrieved lazily if needed for animMap
 
-            CharString cs = shader_name.ascii();
-            const GodotShaderProps *sp = Godot_ShaderProps_Find(cs.get_data());
+            // Phase 36 performance optimization: Cache shader property pointer in metadata
+            // to avoid string lookup and conversion every frame.
+            // Stored as uint64_t + 1 (0 = not computed, 1 = null, >1 = valid pointer)
+            uint64_t sp_ptr_val = (uint64_t)smat->get_meta("shader_props_ptr", 0);
+
+            if (sp_ptr_val != 0) {
+                if (sp_ptr_val > 1) {
+                    sp = (const GodotShaderProps *)(sp_ptr_val - 1);
+                } else {
+                    sp = nullptr;
+                }
+            } else {
+                shader_name = smat->get_meta("shader_name", "");
+                if (shader_name.is_empty()) {
+                    smat->set_meta("shader_props_ptr", 1); // Cache null
+                    continue;
+                }
+
+                CharString cs = shader_name.ascii();
+                sp = Godot_ShaderProps_Find(cs.get_data());
+
+                if (sp) {
+                    smat->set_meta("shader_props_ptr", (uint64_t)sp + 1);
+                } else {
+                    smat->set_meta("shader_props_ptr", 1);
+                }
+            }
+
             if (!sp) continue;
 
             // Apply UV tcMod animation: scroll + turb
@@ -3048,6 +3074,12 @@ void MoHAARunner::update_shader_animations(double delta) {
 
             // Phase 55: animMap frame swap
             if (sp->has_animmap && sp->animmap_num_frames > 0 && sp->animmap_freq > 0.0f) {
+                // We need the shader name for animMap handling.
+                // If it wasn't fetched above (cache hit), fetch it now.
+                if (shader_name.is_empty()) {
+                    shader_name = smat->get_meta("shader_name", "");
+                }
+
                 int shader_handle = -1;
                 int shader_count = Godot_Renderer_GetShaderCount();
                 for (int sh = 1; sh < shader_count; sh++) {

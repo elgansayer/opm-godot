@@ -1,0 +1,7 @@
+            if (!smat.is_valid()) continue;
+
+            // Check resource metadata for shader name (stored during BSP build)
+            const GodotShaderProps *sp = nullptr;
+
+            // Phase 36 performance optimization: Cache shader property pointer in metadata
+            // to avoid string lookup and conversion every frame.
