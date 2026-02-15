@@ -121,4 +121,30 @@ int Godot_Client_IsAnyOverlayActive(void) {
     return (cls.keyCatchers & (KEYCATCH_UI | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) ? 1 : 0;
 }
 
+/*
+ * Godot_Client_SetMousePos — Set the engine's UI cursor position directly.
+ *   Used when transitioning to UI mode to place the cursor at a sensible
+ *   position (e.g. centre of screen) instead of (0,0).
+ */
+void Godot_Client_SetMousePos(int x, int y) {
+    cl.mousex = x;
+    cl.mousey = y;
+}
+
+/*
+ * Godot_Client_IsUIStarted — Return 1 if the UI system has been
+ *   initialised (CL_InitializeUI completed).
+ */
+int Godot_Client_IsUIStarted(void) {
+    return cls.uiStarted ? 1 : 0;
+}
+
+/*
+ * Godot_Client_IsMenuUp — Return 1 if a menu is currently on the stack.
+ *   Wraps UI_MenuUp() for the Godot side.
+ */
+int Godot_Client_IsMenuUp(void) {
+    return UI_MenuUp() ? 1 : 0;
+}
+
 } /* extern "C" */

@@ -432,6 +432,10 @@ public:
     void close_menu();
     void push_menu(const String &menu_name);
     void show_menu(const String &menu_name, bool force = false);
+    void toggle_menu(const String &menu_name);
+    void pop_menu(bool restore_cvars = false);
+    void hide_menu(const String &menu_name);
+    bool is_menu_active() const;
 };
 
 #endif
