@@ -1184,7 +1184,8 @@ const GodotShaderProps *Godot_ShaderProps_Find(const char *shader_name) {
     if (!shader_name || !shader_name[0]) return nullptr;
 
     /* Lowercase for lookup */
-    std::string key(shader_name);
+    static thread_local std::string key;
+    key.assign(shader_name);
     for (auto &c : key) c = tolower((unsigned char)c);
 
     auto it = s_shader_props.find(key);
