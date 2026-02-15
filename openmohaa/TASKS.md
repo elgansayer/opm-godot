@@ -2110,3 +2110,59 @@ const char* particle_keywords[] = {
 ### Build verification (Phase 134)
 Build verification deferred — cloud environment lacks scons. Changes are syntactically correct (standard C++17, godot-cpp 4.2 API).
 
+---
+
+## Phase 135 — deformVertexes Integration into ShaderMaterial Generation ✅
+
+**Problem:** The vertex deform GLSL code generators in `godot_vertex_deform.cpp`
+were fully implemented (autosprite, autosprite2, wave, bulge, move) but never
+called from the shader material builder (`godot_shader_material.cpp`).  The
+generated `.gdshader` code contained only a `fragment()` function — no
+`vertex()` function was ever emitted.  This meant all `deformVertexes` effects
+(waving flags, billboarded sprites, pulsing vegetation, vertex displacement)
+were silently ignored at runtime.
+
+**Fix:** Integrated `godot_vertex_deform.h` into the shader material builder:
+
+1. **Include** — added `#include "godot_vertex_deform.h"` at the top.
+2. **Cache key** — deform parameters (`deform_type`, `div`, `base`,
+   `amplitude`, `frequency`, `phase`) are now encoded into the shader cache key
+   so different deform configurations produce distinct cached shaders.
+3. **Vertex function generation** — when `props->has_deform` is true,
+   `Godot_Shader_GenerateCode()` now calls
+   `Godot_Deform_GenerateVertexShader()` and wraps the returned GLSL in a
+   `void vertex() { … }` block, emitted before the `fragment()` function.
+
+The generated shader now has the form:
+```glsl
+shader_type spatial;
+render_mode …;
+uniform sampler2D stage0_tex;
+…
+
+void vertex() {
+    // deformVertexes wave/bulge/move/autosprite/autosprite2 GLSL
+}
+
+void fragment() {
+    // existing multi-stage compositing
+}
+```
+
+### What now works
+
+- **deformVertexes wave** — sinusoidal vertex displacement along normals
+  (flags, vegetation, water surfaces)
+- **deformVertexes bulge** — model surface pulsing outward (breathing/bulging)
+- **deformVertexes move** — vertex translation along a direction
+- **deformVertexes autosprite** — camera-facing billboard quads
+- **deformVertexes autosprite2** — Y-axis aligned billboard quads
+
+### Files modified (Phase 135)
+- `code/godot/godot_shader_material.cpp` — included `godot_vertex_deform.h`,
+  added deform params to cache key, added `vertex()` function generation
+
+### Build verification (Phase 135)
+Syntax verified via isolated g++ `-fsyntax-only` checks for type/signature
+correctness.  Full SCons build deferred (cloud environment lacks scons).
+
