@@ -20,8 +20,50 @@
  * the caller MUST free with Godot_VFS_FreeFile().
  */
 long Godot_VFS_ReadFile(const char *qpath, void **out_buffer) {
-    if (!qpath || !out_buffer) return -1;
+    if (!qpath) return -1;
     return FS_ReadFile(qpath, out_buffer);
+}
+
+/*
+ * Godot_VFS_FileOpenRead — open a file for reading and return a handle.
+ * Returns the file length, or -1 if failed. Handle is 0 on failure.
+ */
+long Godot_VFS_FileOpenRead(const char *qpath, int *out_handle) {
+    fileHandle_t h = 0;
+    long len;
+
+    if (!qpath || !out_handle) return -1;
+
+    // Use FS_FOpenFileRead. quiet=qtrue to avoid console spam on missing files.
+    // uniqueFILE=qfalse mirrors standard FS_ReadFile behavior (allows reading from zip).
+    // Note: FS_FOpenFileRead returns -1 on failure and sets handle to 0.
+    len = FS_FOpenFileRead(qpath, &h, qfalse, qtrue);
+
+    if (h == 0) {
+        *out_handle = 0;
+        return -1;
+    }
+
+    *out_handle = (int)h;
+    return len;
+}
+
+/*
+ * Godot_VFS_FileRead — read data from an open file handle.
+ * Returns the number of bytes read.
+ */
+long Godot_VFS_FileRead(int handle, void *buffer, long len) {
+    if (handle <= 0 || !buffer || len <= 0) return 0;
+    return (long)FS_Read(buffer, (size_t)len, (fileHandle_t)handle);
+}
+
+/*
+ * Godot_VFS_FileClose — close a file handle.
+ */
+void Godot_VFS_FileClose(int handle) {
+    if (handle > 0) {
+        FS_FCloseFile((fileHandle_t)handle);
+    }
 }
 
 /*
