@@ -53,9 +53,7 @@ void Godot_Client_SetGameInputMode(void) {
     UI_ForceMenuOff(true);
     /* IN_MouseOff sets in_guimouse = qfalse — must come AFTER
        UI_ForceMenuOff which may call IN_MouseOn internally. */
-    // IN_MouseOff();
-    // IN_MouseOn();
-    //TODO: FIx me; the mouse is not working, i cannot look around
+    IN_MouseOff();
     
     /* Force unpause — in single-player listen-server mode the engine
        may auto-pause when the UI/console was active. */
