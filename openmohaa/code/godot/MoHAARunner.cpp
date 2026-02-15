@@ -4177,6 +4177,9 @@ void MoHAARunner::update_input_routing() {
     // Apply cursor mode change if needed
     if (should_capture != mouse_captured) {
         set_mouse_captured(should_capture);
+        if (should_capture) {
+            Godot_Client_SetGameInputMode();
+        }
     }
 }
 
