@@ -11,7 +11,8 @@
 #include <math.h>
 #include <stdarg.h> // For va_list
 
-#include "../qcommon/q_shared.h"
+#include "../../qcommon/q_shared.h"
+#include "../godot_anim_blend.h"
 
 // Stub functions required by godot_anim_blend.cpp
 // These must be declared extern "C" to match the declarations in godot_anim_blend.cpp
@@ -55,10 +56,6 @@ void Com_Printf( const char *msg, ... ) {
 }
 
 } // extern "C"
-
-// Include the source file directly to test static/internal functions if needed,
-// and to compile it as part of this unit test.
-#include "godot_anim_blend.cpp"
 
 // Helper to run a test
 #define RUN_TEST(name) \
@@ -180,6 +177,82 @@ int test_invalid_weight_sum() {
     return 1;
 }
 
+int test_invalid_weight_tolerance() {
+    AnimBlendInput input;
+    memset(&input, 0, sizeof(input));
+    AnimBlendValidation result;
+
+    // Set action_weight to 0 (all group A) to isolate group A check, then switch to B
+    input.action_weight = 0.0f;
+    input.active_channels = 1; // Needs at least one active channel
+    input.frame_weights[0] = 1.0f; // Placeholder
+
+    // 1. Group A sum = 0.8 (Invalid, too low)
+    input.weight_sum_a = 0.8f;
+    input.weight_sum_b = 0.0f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 0) {
+        printf("Expected invalid (sum_a=0.8), got valid\n");
+        return 0;
+    }
+
+    // 2. Group A sum = 1.2 (Invalid, too high)
+    input.weight_sum_a = 1.2f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 0) {
+        printf("Expected invalid (sum_a=1.2), got valid\n");
+        return 0;
+    }
+
+    // 3. Group A sum = 0.95 (Valid)
+    input.weight_sum_a = 0.95f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 1) {
+        printf("Expected valid (sum_a=0.95), got invalid\n");
+        return 0;
+    }
+
+    // 4. Group A sum = 1.05 (Valid)
+    input.weight_sum_a = 1.05f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 1) {
+        printf("Expected valid (sum_a=1.05), got invalid\n");
+        return 0;
+    }
+
+    // Now test Group B
+    input.action_weight = 1.0f; // All group B
+    input.frame_weights[0] = 0.0f;
+    input.frame_weights[ANIM_BLEND_SPLIT] = 1.0f; // Placeholder for B
+    input.weight_sum_a = 0.0f;
+
+    // 5. Group B sum = 0.8 (Invalid, too low)
+    input.weight_sum_b = 0.8f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 0) {
+        printf("Expected invalid (sum_b=0.8), got valid\n");
+        return 0;
+    }
+
+    // 6. Group B sum = 1.2 (Invalid, too high)
+    input.weight_sum_b = 1.2f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 0) {
+        printf("Expected invalid (sum_b=1.2), got valid\n");
+        return 0;
+    }
+
+    // 7. Group B sum = 0.95 (Valid)
+    input.weight_sum_b = 0.95f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 1) {
+        printf("Expected valid (sum_b=0.95), got invalid\n");
+        return 0;
+    }
+
+    // 8. Group B sum = 1.05 (Valid)
+    input.weight_sum_b = 1.05f;
+    if (Godot_AnimBlend_Validate(&input, &result) != 1) {
+        printf("Expected valid (sum_b=1.05), got invalid\n");
+        return 0;
+    }
+
+    return 1;
+}
+
 int test_invalid_action_weight() {
     AnimBlendInput input;
     memset(&input, 0, sizeof(input));
@@ -257,6 +330,7 @@ int main() {
     RUN_TEST(test_single_active_channel_group_b);
     RUN_TEST(test_mixed_channels);
     RUN_TEST(test_invalid_weight_sum);
+    RUN_TEST(test_invalid_weight_tolerance);
     RUN_TEST(test_invalid_action_weight);
     RUN_TEST(test_no_active_channels);
     RUN_TEST(test_zero_weight_channels_count);

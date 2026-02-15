@@ -400,3 +400,14 @@ test_render_sort_prog = test_env.Program(
     target="bin/test_render_sort",
     source=test_render_sort_sources,
 )
+
+# Test for godot_anim_blend
+test_anim_blend_sources = [
+    "code/godot/tests/test_anim_blend.cpp",
+    "code/godot/godot_anim_blend.cpp",
+]
+
+test_anim_blend_prog = test_env.Program(
+    target="bin/test_anim_blend",
+    source=test_anim_blend_sources,
+)
