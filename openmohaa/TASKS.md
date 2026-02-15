@@ -2166,3 +2166,24 @@ void fragment() {
 Syntax verified via isolated g++ `-fsyntax-only` checks for type/signature
 correctness.  Full SCons build deferred (cloud environment lacks scons).
 
+
+## Phase 136: Weapon Effects Integration ✅
+
+- **Objective**: Wire up the high-fidelity `Godot_WeaponEffects` system (muzzle flashes with dynamic lights, physics-simulated shell casings) to the engine's `cgame` module.
+- **Actions**:
+  - Enabled `GODOT_GDEXTENSION` in `cgame` build (SConstruct) to share ABI with the engine.
+  - Added C accessors to `godot_weapon_effects.cpp` for renderer interoperability.
+  - Extended `refexport_t` (renderer) and `clientGameImport_t` (client) with `AddMuzzleFlash` and `AddShellCasing` hooks.
+  - Implemented hooks in `godot_renderer.c` calling the Godot-side visual effects.
+  - Modified `cg_tempmodels.cpp` in `cgame` to intercept TIKI model spawning:
+    - Diverts models with "muzzle", "flash", "corona" to `cgi.AddMuzzleFlash`.
+    - Diverts models with "shell", "casing" to `cgi.AddShellCasing`.
+    - Skips legacy entity spawning for these effects.
+- **Files modified**:
+  - `SConstruct`
+  - `code/godot/godot_weapon_effects.cpp`
+  - `code/renderercommon/tr_public.h`
+  - `code/godot/godot_renderer.c`
+  - `code/cgame/cg_public.h`
+  - `code/client/cl_cgame.cpp`
+  - `code/cgame/cg_tempmodels.cpp`
