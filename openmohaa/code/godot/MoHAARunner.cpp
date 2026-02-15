@@ -958,6 +958,15 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
     if (sp->no_lightmap) {
         mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
     }
+    
+    // Phase 136: deformVertexes autosprite/autosprite2 billboard mode
+    if (sp->has_deform) {
+        if (sp->deform_type == 3) { // autosprite
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+        } else if (sp->deform_type == 4) { // autosprite2
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+        }
+    }
 }
 
 /// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
@@ -2150,6 +2159,16 @@ void MoHAARunner::update_entities() {
                         if (entity_tint.a < 0.999f || (apply_alpha_entity && rgba[3] < 255)) {
                             dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
                         }
+                        
+                        // Phase 136: deformVertexes autosprite/autosprite2 billboard mode
+                        if (sp && sp->has_deform) {
+                            if (sp->deform_type == 3) { // autosprite
+                                dup->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+                            } else if (sp->deform_type == 4) { // autosprite2
+                                dup->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+                            }
+                        }
+                        
                         tinted_mat_cache[tint_key] = dup;
                         mi->set_surface_override_material(s, dup);
                     }

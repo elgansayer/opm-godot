@@ -2153,3 +2153,65 @@ Wave parameters (base, amplitude, frequency, phase) are extracted by the shader 
 
 ### Files modified (Phase 135)
 - `code/godot/MoHAARunner.cpp` — added rgbGen/alphaGen wave evaluation in `update_entities()` material tint block
+
+## Phase 136: deformVertexes autosprite/autosprite2 Billboard Support ✅
+
+### Objective
+Implement billboard rendering for shaders with `deformVertexes autosprite` and `deformVertexes autosprite2` directives. These are commonly used for particle effects, muzzle flashes, grass, and other effects that should always face the camera.
+
+### Source tracing
+
+**Files traced:** `tr_shade_calc.c::AutospriteDeform()` (line 927), `Autosprite2Deform()` (line 931).
+
+The real renderer rebuilds quad vertices each frame to face the camera:
+- **autosprite**: Full spherical billboard — quad vertices are rotated to face the camera from any angle (particles, explosions, muzzle flashes)
+- **autosprite2**: Cylindrical billboard — quad pivots around its long axis (vertical) to face the camera horizontally (grass, beams, vertical banners)
+
+### Implementation
+
+Added billboard mode application in two places:
+
+**1. Base material creation (`apply_shader_props_to_material()`):**
+```cpp
+if (sp->has_deform) {
+    if (sp->deform_type == 3) { // autosprite
+        mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+    } else if (sp->deform_type == 4) { // autosprite2
+        mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+    }
+}
+```
+This applies to skeletal model surfaces, BSP brush surfaces, and poly effects during initial mesh/material creation.
+
+**2. Per-entity tinted material duplication (`update_entities()`):**
+Same logic applied when creating duplicated materials for entity color tinting, so billboarding works even when entity has non-default shaderRGBA.
+
+### Godot billboard mode mapping
+
+| Q3/MOHAA directive | Godot billboard mode | Behaviour |
+|--------------------|---------------------|-----------|
+| `deformVertexes autosprite` | `BILLBOARD_ENABLED` | Full spherical billboard — always faces camera |
+| `deformVertexes autosprite2` | `BILLBOARD_FIXED_Y` | Cylindrical billboard — rotates around Y (up) axis only |
+
+**Note:** Godot's `BILLBOARD_FIXED_Y` rotates around the local Y axis, which matches id Tech 3's up vector after coordinate conversion.
+
+### What this fixes
+1. **Muzzle flash sprites** — weapon fire effects now face the camera
+2. **Explosion particles** — debris and smoke quads billboard correctly
+3. **Grass/foliage** — vegetation quads pivot to face camera horizontally (autosprite2)
+4. **Beam effects** — energy beams, laser sights rotate around their axis
+5. **HUD sprites** — if rendered as world entities with autosprite
+
+### Limitations
+- **BSP world surfaces with deformVertexes**: Currently applied via material billboard mode. If a BSP surface (non-entity) has autosprite, it will billboard but may have incorrect pivot point since BSP surfaces are pre-transformed. This is rare in MOHAA (most autosprite usage is on entities/effects).
+- **Vertex deformation vs billboard mode**: The real renderer deforms vertices CPU-side. Godot's billboard mode is GPU-side rotation around the mesh origin. Works correctly for quads centered at origin (standard for particles/sprites) but may differ for off-center geometry.
+
+### Other deformVertexes types NOT yet implemented
+- `deformVertexes wave` (vertex displacement) — parsed (deform_type=0) but not applied
+- `deformVertexes bulge` (UV-based bulging) — parsed (deform_type=1) but not applied
+- `deformVertexes move` (animated translation) — parsed (deform_type=2) but not applied
+
+These are lower priority (less common in MOHAA than autosprite).
+
+### Files modified (Phase 136)
+- `code/godot/MoHAARunner.cpp` — added billboard mode application in `apply_shader_props_to_material()` and per-entity tinted material creation
