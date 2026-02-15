@@ -150,6 +150,7 @@ int Godot_BSP_MarkFragmentsForInlineModel(
 
 /* PVS cluster mesh accessors (C++ only — return Godot types) */
 #ifdef __cplusplus
+namespace godot { class MeshInstance3D; }
 int Godot_BSP_GetPVSNumClusters();
 godot::MeshInstance3D *Godot_BSP_GetClusterMesh(int cluster);
 #endif

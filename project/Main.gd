@@ -57,7 +57,7 @@ func _on_load_timer():
 	if runner and runner.is_engine_initialized():
 		print("Main: Engine is running, loading test map...")
 		# runner.load_map(launch_map)
-		runner.execute_command("exec server.cfg")  # Initial status check
+		# runner.execute_command("exec server.cfg")  # Initial status check
 
 		# Poll server status after giving the map time to load
 		get_tree().create_timer(2.0).timeout.connect(_on_status_check)
