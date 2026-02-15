@@ -2,11 +2,13 @@
  * godot_weather.cpp — Rain and snow particle system manager.
  *
  * Creates and manages Godot GPUParticles3D nodes for rain and snow
- * effects.  The weather state is read from the engine via a C accessor
- * (godot_weather_accessors.c).
+ * effects.  Weather state is read each frame from the engine via
+ * C accessors (godot_weather_accessors.c) that query the server
+ * configstrings (CS_RAIN_*).
  *
- * Rain: vertical lines with fast downward velocity, short lifetime.
- * Snow: drifting quad particles with slow downward velocity, longer lifetime.
+ * Rain parameters (density, speed, slant, length, width) are mapped
+ * to Godot particle properties so that the visual matches the
+ * original engine behaviour.
  *
  * The particle volume follows the camera position each frame so that
  * weather is always visible around the player.
@@ -16,9 +18,11 @@
 
 #include <godot_cpp/classes/gpu_particles3d.hpp>
 #include <godot_cpp/classes/particle_process_material.hpp>
+#include <godot_cpp/classes/material.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/base_material3d.hpp>
 #include <godot_cpp/classes/quad_mesh.hpp>
+#include <godot_cpp/classes/mesh.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/color.hpp>
 
@@ -33,6 +37,9 @@ static int             s_current_state = 0;  /* WEATHER_NONE */
 /* ── Volume dimensions (Godot units = metres) ── */
 static constexpr float WEATHER_VOLUME_WIDTH  = 30.0f;  /* ±15m around camera */
 static constexpr float WEATHER_VOLUME_HEIGHT = 20.0f;  /* 20m tall column */
+
+/* ── Coordinate conversion ── */
+static constexpr float MOHAA_UNIT_SCALE = 1.0f / 39.37f; /* inches → metres */
 
 /* ===================================================================
  *  Create a rain particle emitter
@@ -137,6 +144,75 @@ static GPUParticles3D *create_snow_emitter(Node3D *parent) {
 }
 
 /* ===================================================================
+ *  Apply engine rain parameters to the rain particle emitter.
+ *
+ *  Maps the engine's speed, slant, length, and width values to
+ *  Godot particle material properties.
+ * ================================================================ */
+static void apply_rain_params(GPUParticles3D *rain, float density) {
+    if (!rain) return;
+
+    /* Read engine parameters */
+    float engine_speed  = Godot_Weather_GetSpeed();    /* default 2048 */
+    int   speed_vary    = Godot_Weather_GetSpeedVary(); /* default 512 */
+    int   slant         = Godot_Weather_GetSlant();     /* default 50 */
+    float engine_length = Godot_Weather_GetLength();    /* default 90 */
+    float engine_width  = Godot_Weather_GetWidth();     /* default 1 */
+
+    /* Convert speed from engine units to Godot particle velocity (m/s).
+     * Engine speed is in game-units/frame (~200fps); the 0.005 factor
+     * accounts for the frame-rate difference and prevents excessively
+     * fast particles in Godot's continuous simulation. */
+    float speed_ms  = engine_speed * MOHAA_UNIT_SCALE * 0.005f;
+    float vary_ms   = (float)speed_vary * MOHAA_UNIT_SCALE * 0.005f;
+    float speed_min = speed_ms - vary_ms * 0.5f;
+    float speed_max = speed_ms + vary_ms * 0.5f;
+    if (speed_min < 1.0f) speed_min = 1.0f;
+    if (speed_max < speed_min + 0.5f) speed_max = speed_min + 0.5f;
+
+    /* Convert slant to a horizontal wind component.  The engine slant
+     * is a unitless factor (default 50); we scale by 0.01 to produce
+     * a gentle horizontal drift in metres/s². */
+    float slant_x = (float)slant * MOHAA_UNIT_SCALE * 0.01f;
+
+    /* Particle count: base 2000 at full density, clamped to
+     * [100, 4000] for visual quality vs GPU performance. */
+    int amount = (int)(2000.0f * density);
+    if (amount < 100)  amount = 100;
+    if (amount > 4000) amount = 4000;
+    rain->set_amount(amount);
+
+    /* Update process material */
+    Ref<Material> base_mat = rain->get_process_material();
+    Ref<ParticleProcessMaterial> mat = base_mat;
+    if (mat.is_valid()) {
+        mat->set_param_min(ParticleProcessMaterial::PARAM_INITIAL_LINEAR_VELOCITY, speed_min);
+        mat->set_param_max(ParticleProcessMaterial::PARAM_INITIAL_LINEAR_VELOCITY, speed_max);
+        /* Wind: apply slant as a horizontal gravity component
+         * In Godot coords, X=right; engine slant is unitless so we
+         * scale it gently. */
+        mat->set_gravity(Vector3(slant_x, -9.8f, 0.0f));
+    }
+
+    /* Update draw mesh size from engine length/width (in inches → metres).
+     * Clamp to sane bounds: min 0.5cm wide / 5cm tall (invisible below),
+     * max 20cm wide / 2m tall (absurdly large above). */
+    Ref<Mesh> draw = rain->get_draw_pass_mesh(0);
+    if (draw.is_valid()) {
+        QuadMesh *qm = Object::cast_to<QuadMesh>(draw.ptr());
+        if (qm) {
+            float w = engine_width * MOHAA_UNIT_SCALE;
+            float h = engine_length * MOHAA_UNIT_SCALE;
+            if (w < 0.005f) w = 0.005f;
+            if (h < 0.05f)  h = 0.05f;
+            if (w > 0.2f)   w = 0.2f;
+            if (h > 2.0f)   h = 2.0f;
+            qm->set_size(Vector2(w, h));
+        }
+    }
+}
+
+/* ===================================================================
  *  Public API
  * ================================================================ */
 
@@ -168,11 +244,9 @@ void Godot_Weather_Update(const Vector3 &camera_pos, float delta) {
         bool want_rain = (state == WEATHER_RAIN && density > 0.001f);
         if (want_rain != s_rain_emitter->is_emitting()) {
             s_rain_emitter->set_emitting(want_rain);
-            if (want_rain) {
-                int amount = (int)(2000.0f * density);
-                if (amount < 100) amount = 100;
-                s_rain_emitter->set_amount(amount);
-            }
+        }
+        if (want_rain) {
+            apply_rain_params(s_rain_emitter, density);
         }
     }
 

@@ -388,6 +388,9 @@ MoHAARunner::~MoHAARunner() {
 #endif
 
     if (initialized) {
+#ifdef HAS_WEATHER_MODULE
+        Godot_Weather_Shutdown();
+#endif
         Com_Shutdown();
         /* Mark zone allocator as shut down.  Global C++ destructors
            (e.g. ~con_arrayset for Event::commandList) run after this
@@ -741,6 +744,9 @@ void MoHAARunner::check_world_load() {
 #endif
 #ifdef HAS_SPEAKER_ENTITIES_MODULE
             Godot_Speakers_Shutdown();
+#endif
+#ifdef HAS_WEATHER_MODULE
+            Godot_Weather_Shutdown();
 #endif
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
