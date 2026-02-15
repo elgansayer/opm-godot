@@ -2266,20 +2266,37 @@ void MoHAARunner::update_polys() {
         arrays[Mesh::ARRAY_COLOR]  = gCol;
         arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-        Ref<ArrayMesh> mesh;
-        mesh.instantiate();
+        Ref<ArrayMesh> mesh = mi->get_mesh();
+        if (mesh.is_valid()) {
+            mesh->clear_surfaces();
+        } else {
+            mesh.instantiate();
+            mi->set_mesh(mesh);
+        }
         mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-        mi->set_mesh(mesh);
 
         // Material: textured + vertex colour + alpha blend, double-sided
-        Ref<StandardMaterial3D> mat;
-        mat.instantiate();
+        Ref<StandardMaterial3D> mat = mi->get_surface_override_material(0);
+        if (mat.is_null()) {
+            mat.instantiate();
+            mi->set_surface_override_material(0, mat);
+        }
+
+        // Reset material state (reusing existing material)
         mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
         mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
         mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
         mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
         mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
         mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+
+        // Reset properties that might be dirty from reuse
+        mat->set_albedo(Color(1, 1, 1, 1));
+        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MIX);
+        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
+        mat->set_uv1_scale(Vector3(1, 1, 1));
+        mat->set_uv1_offset(Vector3(0, 0, 0));
+        mat->set_alpha_scissor_threshold(0.5);
 
         // Try to apply the poly's shader texture and shader properties
         if (hShader > 0) {
