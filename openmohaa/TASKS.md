@@ -2211,3 +2211,24 @@ correctness.  Full SCons build deferred (cloud environment lacks scons).
 - `code/godot/MoHAARunner.h` — added `HAS_FRUSTUM_CULL_MODULE` and `HAS_DRAW_DISTANCE_MODULE` conditional includes
 - `code/godot/MoHAARunner.cpp` — added init/update/shutdown calls for both modules; added per-entity frustum and distance culling in `update_entities()`
 - `code/godot/godot_draw_distance_accessors.c` — fixed `Godot_Renderer_GetFarplane` extern declaration (3 → 4 params) and all call sites
+
+## Phase 138: rgbGen/alphaGen Entity Runtime Support ✅
+
+Implemented correct per-entity shader colour modulation for `rgbGen entity`, `rgbGen oneMinusEntity`, `alphaGen entity`, and `alphaGen oneMinusEntity` directives. Entity colour modulation is now applied only when the shader explicitly requests it via per-stage rgbGen/alphaGen directives, not unconditionally.
+
+### Files modified (Phase 138):
+- `code/godot/MoHAARunner.cpp` — rewrote entity material modulation logic in `update_entities()` to check per-stage rgbGen/alphaGen directives
+
+## Phase 139: rgbGen/alphaGen Wave Animation for Entities ✅
+
+Extended shader wave animation support from BSP world surfaces to entities. Entities with pulsing/glowing shaders (`rgbGen wave`, `alphaGen wave`) now animate correctly.
+
+### Files modified (Phase 139):
+- `code/godot/MoHAARunner.cpp` — added rgbGen/alphaGen wave evaluation in `update_entities()` material tint block
+
+## Phase 140: deformVertexes autosprite/autosprite2 Billboard Support ✅
+
+Implemented billboard rendering for shaders with `deformVertexes autosprite` and `deformVertexes autosprite2`. Applied in both `apply_shader_props_to_material()` and per-entity tinted material duplication.
+
+### Files modified (Phase 140):
+- `code/godot/MoHAARunner.cpp` — added billboard mode application in `apply_shader_props_to_material()` and per-entity tinted material creation

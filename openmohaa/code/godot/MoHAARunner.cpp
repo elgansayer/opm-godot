@@ -965,6 +965,15 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
     if (sp->no_lightmap) {
         mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
     }
+    
+    // Phase 136: deformVertexes autosprite/autosprite2 billboard mode
+    if (sp->has_deform) {
+        if (sp->deform_type == 3) { // autosprite
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+        } else if (sp->deform_type == 4) { // autosprite2
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+        }
+    }
 }
 
 /// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
@@ -2014,8 +2023,8 @@ void MoHAARunner::update_entities() {
         }
 
         // ── Phase 21+22+268: Entity colour tinting + alpha + entity lighting ──
-        // Apply shaderRGBA modulation when it's not opaque white.
-        // RF_ALPHAFADE = 0x0400 — entity uses alpha from shaderRGBA[3]
+        // Phase 134: Correct rgbGen/alphaGen entity application per shader directive
+        // Only apply shaderRGBA when the shader explicitly requests it via rgbGen/alphaGen entity.
         Color light_mul(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef HAS_ENTITY_LIGHTING_MODULE
         {
@@ -2047,21 +2056,119 @@ void MoHAARunner::update_entities() {
         bool has_light_tint = fabsf(light_mul.r - 1.0f) > 0.02f ||
                               fabsf(light_mul.g - 1.0f) > 0.02f ||
                               fabsf(light_mul.b - 1.0f) > 0.02f;
-        bool has_tint  = (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255);
-        bool has_alpha = (rgba[3] < 255) || (renderfx & 0x0400);
-        if (has_tint || has_alpha || has_light_tint) {
+        
+        // Phase 134: Check if we need per-surface shader analysis for rgbGen/alphaGen entity
+        bool needs_material_update = has_light_tint;
+        if (!needs_material_update) {
+            // Quick pre-check: do we have any non-default shaderRGBA or RF_ALPHAFADE?
+            bool has_shader_rgba = (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255 || rgba[3] < 255 || (renderfx & 0x0400));
+            needs_material_update = has_shader_rgba;
+        }
+        
+        if (needs_material_update) {
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
-                // Phase 61: Quantise light to 4-bit and combine with RGBA for cache key
+                // Phase 61: Quantise light to 4-bit for cache key
                 uint8_t lr = (uint8_t)(light_mul.r * 15.0f + 0.5f);
                 uint8_t lg = (uint8_t)(light_mul.g * 15.0f + 0.5f);
                 uint8_t lb = (uint8_t)(light_mul.b * 15.0f + 0.5f);
                 uint32_t light_q = ((uint32_t)lr << 8) | ((uint32_t)lg << 4) | lb;
 
-                Color tint(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                           rgba[2] / 255.0f, rgba[3] / 255.0f);
                 int sc = mesh->get_surface_count();
                 for (int s = 0; s < sc; s++) {
+                    Ref<Material> base_mat = mi->get_surface_override_material(s);
+                    if (base_mat.is_null())
+                        base_mat = mesh->surface_get_material(s);
+
+                    Ref<StandardMaterial3D> smat = base_mat;
+                    if (!smat.is_valid()) continue;
+
+                    // Phase 134: Determine per-surface shader rgbGen/alphaGen directives
+                    String shader_name = smat->get_meta("shader_name", "");
+                    const GodotShaderProps *sp = nullptr;
+                    if (!shader_name.is_empty()) {
+                        CharString cs = shader_name.ascii();
+                        sp = Godot_ShaderProps_Find(cs.get_data());
+                    }
+
+                    // Determine what modulation to apply based on shader directives.
+                    // We need to check per-stage rgbGen/alphaGen from the first non-lightmap stage
+                    // because the global props->rgbgen_type doesn't distinguish entity vs oneMinusEntity.
+                    // Per-stage enums: STAGE_RGBGEN_ENTITY=4, STAGE_RGBGEN_ONE_MINUS_ENTITY=5
+                    //                  STAGE_ALPHAGEN_ENTITY=3, STAGE_ALPHAGEN_ONE_MINUS_ENTITY=4
+                    bool apply_rgb_entity = false;
+                    bool apply_rgb_one_minus_entity = false;
+                    bool apply_alpha_entity = false;
+                    bool apply_alpha_one_minus_entity = false;
+                    
+                    if (sp && sp->stage_count > 0) {
+                        // Find first non-lightmap stage (same logic as get_shader_texture)
+                        for (int st = 0; st < sp->stage_count; st++) {
+                            if (sp->stages[st].isLightmap) continue;
+                            // MohaaStageRgbGen: IDENTITY=0, IDENTITY_LIGHTING=1, VERTEX=2, WAVE=3, ENTITY=4, ONE_MINUS_ENTITY=5, LIGHTING_DIFFUSE=6, CONST=7
+                            if (sp->stages[st].rgbGen == 4) { // STAGE_RGBGEN_ENTITY
+                                apply_rgb_entity = true;
+                            } else if (sp->stages[st].rgbGen == 5) { // STAGE_RGBGEN_ONE_MINUS_ENTITY
+                                apply_rgb_one_minus_entity = true;
+                            }
+                            // MohaaStageAlphaGen: IDENTITY=0, VERTEX=1, WAVE=2, ENTITY=3, ONE_MINUS_ENTITY=4, PORTAL=5, CONST=6
+                            if (sp->stages[st].alphaGen == 3) { // STAGE_ALPHAGEN_ENTITY
+                                apply_alpha_entity = true;
+                            } else if (sp->stages[st].alphaGen == 4) { // STAGE_ALPHAGEN_ONE_MINUS_ENTITY
+                                apply_alpha_one_minus_entity = true;
+                            }
+                            break; // Only check first non-lightmap stage
+                        }
+                    }
+
+                    // Build modulation color (entity color + wave animation)
+                    Color entity_tint(1.0f, 1.0f, 1.0f, 1.0f);
+                    bool has_entity_tint = false;
+
+                    if (apply_rgb_entity) {
+                        entity_tint.r = rgba[0] / 255.0f;
+                        entity_tint.g = rgba[1] / 255.0f;
+                        entity_tint.b = rgba[2] / 255.0f;
+                        has_entity_tint = true;
+                    } else if (apply_rgb_one_minus_entity) {
+                        entity_tint.r = (255 - rgba[0]) / 255.0f;
+                        entity_tint.g = (255 - rgba[1]) / 255.0f;
+                        entity_tint.b = (255 - rgba[2]) / 255.0f;
+                        has_entity_tint = true;
+                    }
+
+                    if (apply_alpha_entity) {
+                        entity_tint.a = rgba[3] / 255.0f;
+                        has_entity_tint = true;
+                    } else if (apply_alpha_one_minus_entity) {
+                        entity_tint.a = (255 - rgba[3]) / 255.0f;
+                        has_entity_tint = true;
+                    }
+
+                    // Phase 135: Apply rgbGen/alphaGen wave animation (pulsing color/alpha effects)
+                    // Mirrors update_shader_animations() wave logic but applied per-entity
+                    if (sp) {
+                        if (sp->rgbgen_type == 2) { // wave
+                            float wave_val = sp->rgbgen_wave_base +
+                                           sp->rgbgen_wave_amp * sinf((float)(shader_anim_time * sp->rgbgen_wave_freq + sp->rgbgen_wave_phase));
+                            wave_val = clamp01(wave_val);
+                            entity_tint.r *= wave_val;
+                            entity_tint.g *= wave_val;
+                            entity_tint.b *= wave_val;
+                            has_entity_tint = true;
+                        }
+                        if (sp->alphagen_type == 2) { // wave
+                            float alpha_wave = sp->alphagen_wave_base +
+                                             sp->alphagen_wave_amp * sinf((float)(shader_anim_time * sp->alphagen_wave_freq + sp->alphagen_wave_phase));
+                            entity_tint.a *= clamp01(alpha_wave);
+                            has_entity_tint = true;
+                        }
+                    }
+
+                    // Skip if no modulation needed
+                    if (!has_light_tint && !has_entity_tint)
+                        continue;
+
                     // Build tinted material cache key:
                     //   hModel(16b) | surfIdx(4b) | rgba_q(16b=4×4b) | light_q(12b) = 48 bits
                     uint8_t rq = rgba[0] >> 4, gq = rgba[1] >> 4;
@@ -2078,24 +2185,27 @@ void MoHAARunner::update_entities() {
                     if (tint_it != tinted_mat_cache.end()) {
                         mi->set_surface_override_material(s, tint_it->second);
                     } else {
-                        Ref<Material> base_mat = mi->get_surface_override_material(s);
-                        if (base_mat.is_null())
-                            base_mat = mesh->surface_get_material(s);
-
-                        Ref<StandardMaterial3D> smat = base_mat;
-                        if (smat.is_valid()) {
-                            Ref<StandardMaterial3D> dup = smat->duplicate();
-                            Color existing = dup->get_albedo();
-                            dup->set_albedo(Color(existing.r * tint.r * light_mul.r,
-                                                   existing.g * tint.g * light_mul.g,
-                                                   existing.b * tint.b * light_mul.b,
-                                                   existing.a * tint.a));
-                            if (has_alpha) {
-                                dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                            }
-                            tinted_mat_cache[tint_key] = dup;
-                            mi->set_surface_override_material(s, dup);
+                        Ref<StandardMaterial3D> dup = smat->duplicate();
+                        Color existing = dup->get_albedo();
+                        dup->set_albedo(Color(existing.r * entity_tint.r * light_mul.r,
+                                               existing.g * entity_tint.g * light_mul.g,
+                                               existing.b * entity_tint.b * light_mul.b,
+                                               existing.a * entity_tint.a));
+                        if (entity_tint.a < 0.999f || (apply_alpha_entity && rgba[3] < 255)) {
+                            dup->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
                         }
+                        
+                        // Phase 136: deformVertexes autosprite/autosprite2 billboard mode
+                        if (sp && sp->has_deform) {
+                            if (sp->deform_type == 3) { // autosprite
+                                dup->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+                            } else if (sp->deform_type == 4) { // autosprite2
+                                dup->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+                            }
+                        }
+                        
+                        tinted_mat_cache[tint_key] = dup;
+                        mi->set_surface_override_material(s, dup);
                     }
                 }
             }
