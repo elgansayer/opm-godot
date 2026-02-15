@@ -2982,6 +2982,11 @@ void MoHAARunner::update_2d_overlay() {
 
             if (bg_tex.is_valid()) {
                 Vector2 vp = hud_control->get_size();
+                // Fallback to viewport size if Control hasn't been laid out yet
+                if (vp.x < 1.0f || vp.y < 1.0f) {
+                    Rect2 visible_rect = get_viewport()->get_visible_rect();
+                    vp = visible_rect.size;
+                }
                 Rect2 full(0.0f, 0.0f, vp.x, vp.y);
                 rs->canvas_item_add_texture_rect(ci, full, bg_tex->get_rid());
             }
@@ -2995,9 +3000,19 @@ void MoHAARunner::update_2d_overlay() {
     Godot_Renderer_GetVidSize(&vid_w, &vid_h);
     if (vid_w < 1) vid_w = 640;
     if (vid_h < 1) vid_h = 480;
+    
+    // Get actual viewport size (Control size preferred, fallback to viewport)
     Vector2 viewport_size = hud_control->get_size();
     if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
-        viewport_size = Vector2(1280.0f, 720.0f);  // fallback
+        // Control hasn't been laid out yet — query actual viewport/window size
+        Rect2 visible_rect = get_viewport()->get_visible_rect();
+        viewport_size = visible_rect.size;
+        
+        // Additional safety: if viewport still invalid, query window size directly
+        if (viewport_size.x < 1.0f || viewport_size.y < 1.0f) {
+            Vector2i win = DisplayServer::get_singleton()->window_get_size();
+            viewport_size = Vector2(win);
+        }
     }
 
     // Scale preserving aspect ratio — letterbox/pillarbox if needed
