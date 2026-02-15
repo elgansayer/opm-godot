@@ -1832,12 +1832,11 @@ void UI_Update(void)
     //
 #ifdef GODOT_GDEXTENSION
     /* Under Godot the 2D overlay captures every DrawStretchPic /
-     * DrawBox call.  cls.no_menus is only transiently true during
-     * stufftext processing, so without this guard the full menu
-     * background (main_a, main_b, quit button, …) would be drawn
-     * on top of the 3D world every frame.  Force the HUD-only path
-     * whenever the game is active. */
-    if (clc.state == CA_ACTIVE) {
+     * DrawBox call.  Use the HUD-only fast path when the game is
+     * active AND no menus are pushed.  If a menu is on the stack
+     * (player pressed ESC, options, etc.) we fall through to the
+     * full UI_Update rendering so menus paint correctly. */
+    if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu()) {
 #else
     if (cls.no_menus && clc.state == CA_ACTIVE) {
 #endif
@@ -4920,6 +4919,17 @@ CL_TryStartIntro
 */
 void CL_TryStartIntro(void)
 {
+#ifdef GODOT_GDEXTENSION
+    /* Under Godot we always skip the intro/title/legal screens and push
+       the main menu immediately.  The intro sequence depends on real
+       renderer fade effects and cinematic playback that our stub
+       renderer doesn't fully support.  Go straight to main menu. */
+    {
+        cls.startStage = 0;  /* mark intro as finished */
+        UI_PushMenu("main");
+        IN_MouseOn();
+    }
+#else
     if (developer->integer || !cl_playintro->integer) {
         UI_ToggleConsole();
     } else {
@@ -4927,6 +4937,7 @@ void CL_TryStartIntro(void)
         Cvar_Set(cl_playintro->name, "0");
         UI_StartIntro_f();
     }
+#endif
 }
 
 /*

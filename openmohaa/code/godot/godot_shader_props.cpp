@@ -410,6 +410,7 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 float freq = (float)atof(token);
                 if (first_stage) {
                     props->rgbgen_type = 2;
+                    props->rgbgen_wave_func  = parse_wave_func(func_tok);
                     props->rgbgen_wave_base  = base;
                     props->rgbgen_wave_amp   = amp;
                     props->rgbgen_wave_phase = phase;
@@ -489,6 +490,7 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 float freq = (float)atof(token);
                 if (first_stage) {
                     props->alphagen_type = 2;
+                    props->alphagen_wave_func  = parse_wave_func(func_tok);
                     props->alphagen_wave_base  = base;
                     props->alphagen_wave_amp   = amp;
                     props->alphagen_wave_phase = phase;
@@ -643,6 +645,29 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                     tm->wave.frequency = freq;
                 }
             }
+            else if (!Q_stricmp(token, "offset"))
+            {
+                /* Phase 144: tcMod offset — static UV shift (MOHAA extension)
+                 * Format: tcMod offset <s> <t> [randS] [randT]
+                 * "fromEntity" (1234567) sentinel supported in engine but ignored here. */
+                token = COM_ParseExt(text, 0);
+                float s = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float t = (float)atof(token);
+                /* Skip optional randS/randT parameters */
+                SkipRestOfLine(text);
+                if (first_stage) {
+                    props->tcmod_offset_s = s;
+                    props->tcmod_offset_t = t;
+                    props->has_tcmod = true;
+                }
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_OFFSET;
+                    tm->params[0] = s;
+                    tm->params[1] = t;
+                }
+            }
             else
             {
                 /* Unknown tcMod variant — skip remaining parameters */
@@ -650,6 +675,29 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
             }
         }
         /* ── Unknown stage directive — skip remaining parameters on this line ── */
+        else if (!Q_stricmp(token, "depthwrite") || !Q_stricmp(token, "depthmask"))
+        {
+            /* Phase 143: explicit depth write enable */
+            if (stg) {
+                stg->depthWriteExplicit = true;
+                stg->depthWriteEnabled  = true;
+            }
+        }
+        else if (!Q_stricmp(token, "nodepthwrite") || !Q_stricmp(token, "nodepthmask"))
+        {
+            /* Phase 143: explicit depth write disable */
+            if (stg) {
+                stg->depthWriteExplicit = true;
+                stg->depthWriteEnabled  = false;
+            }
+        }
+        else if (!Q_stricmp(token, "noDepthTest") || !Q_stricmp(token, "nodepthtest"))
+        {
+            /* Phase 143: disable depth testing */
+            if (stg) {
+                stg->noDepthTest = true;
+            }
+        }
         else
         {
             SkipRestOfLine(text);

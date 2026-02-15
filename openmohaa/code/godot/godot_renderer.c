@@ -816,6 +816,48 @@ static void GR_SetColor( const float *rgba )
     }
 }
 
+/* Track the 2D window state so MoHAARunner can map engine coordinates
+ * to the Godot viewport correctly.  The engine calls this before drawing
+ * UI widgets to set up a custom orthographic projection. */
+static float gr_2d_left   = 0.0f;
+static float gr_2d_right  = 640.0f;
+static float gr_2d_top    = 0.0f;
+static float gr_2d_bottom = 480.0f;
+static int   gr_2d_vp_x   = 0;
+static int   gr_2d_vp_y   = 0;
+static int   gr_2d_vp_w   = 640;
+static int   gr_2d_vp_h   = 480;
+
+/* Transform draw coordinates from widget ortho space (Set2DWindow) to
+ * absolute screen space (640x480).  The engine's GL renderer does this
+ * automatically via glViewport + glOrtho; we must replicate it so the
+ * Godot-side 2D overlay gets absolute positions. */
+static void GR_Transform2D( float in_x, float in_y, float in_w, float in_h,
+                            float *out_x, float *out_y, float *out_w, float *out_h )
+{
+    float range_x = gr_2d_right  - gr_2d_left;
+    float range_y = gr_2d_bottom - gr_2d_top;
+
+    if ( range_x <= 0.0f ) range_x = 640.0f;
+    if ( range_y <= 0.0f ) range_y = 480.0f;
+
+    /* Map from ortho space to viewport pixel space */
+    float sx = (float)gr_2d_vp_w / range_x;
+    float sy = (float)gr_2d_vp_h / range_y;
+
+    *out_x = (float)gr_2d_vp_x + ( in_x - gr_2d_left ) * sx;
+    /* GL viewport Y is bottom-up; convert to top-down by flipping.
+     * The GL ortho has top at the top and bottom at the bottom (MOHAA
+     * passes clippedorigin.y+h as bottom, clippedorigin.y as top), so
+     * the Y mapping is: screen_y = vp_y + (draw_y - top) * vp_h / (bottom - top).
+     * But vp_y is GL bottom-up; convert to top-down:
+     *   topdown_y = vidHeight - (vp_y + vp_h) + (draw_y - top) * sy */
+    *out_y = (float)( stored_glconfig.vidHeight - gr_2d_vp_y - gr_2d_vp_h )
+             + ( in_y - gr_2d_top ) * sy;
+    *out_w = in_w * sx;
+    *out_h = in_h * sy;
+}
+
 static void GR_DrawStretchPic( float x, float y, float w, float h,
                                float s1, float t1, float s2, float t2,
                                qhandle_t hShader )
@@ -823,7 +865,7 @@ static void GR_DrawStretchPic( float x, float y, float w, float h,
     if ( gr_num2DCmds >= GR_MAX_2D_CMDS ) return;
     gr_2d_cmd_t *cmd = &gr_2d_cmds[gr_num2DCmds++];
     cmd->type   = GR_2D_STRETCHPIC;
-    cmd->x = x;  cmd->y = y;  cmd->w = w;  cmd->h = h;
+    GR_Transform2D( x, y, w, h, &cmd->x, &cmd->y, &cmd->w, &cmd->h );
     cmd->s1 = s1; cmd->t1 = t1; cmd->s2 = s2; cmd->t2 = t2;
     cmd->shader = (int)hShader;
     cmd->color[0] = current_color[0];
@@ -946,7 +988,7 @@ static void GR_DrawBox( float x, float y, float w, float h )
     if ( gr_num2DCmds >= GR_MAX_2D_CMDS ) return;
     gr_2d_cmd_t *cmd = &gr_2d_cmds[gr_num2DCmds++];
     cmd->type   = GR_2D_BOX;
-    cmd->x = x;  cmd->y = y;  cmd->w = w;  cmd->h = h;
+    GR_Transform2D( x, y, w, h, &cmd->x, &cmd->y, &cmd->w, &cmd->h );
     cmd->s1 = cmd->t1 = 0.0f;
     cmd->s2 = cmd->t2 = 1.0f;
     cmd->shader = 0;
@@ -970,12 +1012,15 @@ static void GR_Scissor( int x, int y, int width, int height )
     gr_scissorHeight = height;
 
     /* Phase 45: Emit a scissor-change command into the 2D stream so
-       MoHAARunner can clip subsequent draws to this region. */
+       MoHAARunner can clip subsequent draws to this region.
+
+       Note: The x,y from the engine are in GL pixel space (Y=0 at bottom).
+       Convert to top-down screen space for the Godot-side overlay. */
     if ( gr_num2DCmds < GR_MAX_2D_CMDS ) {
         gr_2d_cmd_t *cmd = &gr_2d_cmds[gr_num2DCmds++];
         cmd->type = GR_2D_SCISSOR;
         cmd->x = (float)x;
-        cmd->y = (float)y;
+        cmd->y = (float)( stored_glconfig.vidHeight - y - height );
         cmd->w = (float)width;
         cmd->h = (float)height;
         cmd->shader = 0;
@@ -1003,18 +1048,6 @@ static void GR_DrawLineLoop( const vec2_t *points, int count,
         GR_DrawBox( minX, minY, w, h );
     }
 }
-
-/* Track the 2D window state so MoHAARunner can map engine coordinates
- * to the Godot viewport correctly.  The engine calls this before drawing
- * UI widgets to set up a custom orthographic projection. */
-static float gr_2d_left   = 0.0f;
-static float gr_2d_right  = 640.0f;
-static float gr_2d_top    = 0.0f;
-static float gr_2d_bottom = 480.0f;
-static int   gr_2d_vp_x   = 0;
-static int   gr_2d_vp_y   = 0;
-static int   gr_2d_vp_w   = 640;
-static int   gr_2d_vp_h   = 480;
 
 static void GR_Set2DWindow( int x, int y, int w, int h,
                             float left, float right, float bottom, float top,
@@ -1697,11 +1730,25 @@ static const char *GR_GetModelName( qhandle_t hModel )
 
 static qboolean GR_ImageExists( const char *name )
 {
-    /* Phase 39: Check VFS for image existence */
+    int i;
+
     if ( !name || !name[0] ) return qfalse;
+
+    /* Check if it's a registered shader name first.  Menu elements
+     * often use abstract shader names (e.g. "textures/menu/main_a")
+     * that don't correspond to literal file paths but have .shader
+     * definitions or were previously registered. */
+    for ( i = 1; i < gr_numShaders; i++ ) {
+        if ( gr_shaders[i].name[0] && !Q_stricmp( gr_shaders[i].name, name ) ) {
+            return qtrue;
+        }
+    }
+
+    /* Check VFS for actual image file existence */
     if ( ri.FS_FileExists( name ) ) return qtrue;
     if ( ri.FS_FileExists( va( "%s.tga", name ) ) ) return qtrue;
     if ( ri.FS_FileExists( va( "%s.jpg", name ) ) ) return qtrue;
+    if ( ri.FS_FileExists( va( "%s.png", name ) ) ) return qtrue;
     return qfalse;
 }
 

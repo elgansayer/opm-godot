@@ -275,6 +275,11 @@ static std::string gen_uv_code(int stage_idx, const MohaaShaderStage *s) {
                 code += "    }\n";
                 break;
             }
+            case TCMOD_OFFSET:
+                /* Phase 144: static UV offset — simply add S and T offsets */
+                code += "    uv" + si + " += vec2(" + ftos(tm->params[0]) + ", " +
+                        ftos(tm->params[1]) + ");\n";
+                break;
             default:
                 break;
         }
@@ -510,10 +515,14 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
         const MohaaShaderStage *s = &props->stages[i];
         if (s->animMapFrameCount > 0) {
             for (int f = 0; f < s->animMapFrameCount; f++) {
-                code += "uniform sampler2D stage" + std::to_string(i) + "_frame" + std::to_string(f) + ";\n";
+                code += "uniform sampler2D stage" + std::to_string(i) + "_frame" + std::to_string(f);
+                if (s->isClampMap) code += " : repeat_disable";
+                code += ";\n";
             }
         } else {
-            code += "uniform sampler2D stage" + std::to_string(i) + "_tex;\n";
+            code += "uniform sampler2D stage" + std::to_string(i) + "_tex";
+            if (s->isClampMap) code += " : repeat_disable";
+            code += ";\n";
         }
     }
 

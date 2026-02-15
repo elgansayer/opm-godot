@@ -927,6 +927,15 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                         case SHADER_CULL_NONE:
                             break;
                     }
+
+                    // Phase 142: clampMap — disable texture repeat
+                    for (int st = 0; st < sp->stage_count; st++) {
+                        if (sp->stages[st].isLightmap) continue;
+                        if (sp->stages[st].isClampMap) {
+                            mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
+                        }
+                        break;
+                    }
                 }
 
                 mat->set_meta("shader_name", String(batch.shader_name));

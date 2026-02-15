@@ -21,8 +21,9 @@ func _ready():
 	#   --client          Force client mode
 	#   --map=<mapname>   Startup map (default: obj/obj_team4)
 	#   --nodev           Disable developer mode
+	#   --dev             Enable developer mode (console toggle with ~)
 	var user_args = OS.get_cmdline_user_args()
-	var dev_mode = true
+	var dev_mode = false
 	for arg in user_args:
 		if arg == "--dedicated":
 			launch_dedicated = true
@@ -32,6 +33,8 @@ func _ready():
 			launch_map = arg.substr(6)
 		elif arg == "--nodev":
 			dev_mode = false
+		elif arg == "--dev":
+			dev_mode = true
 
 	if runner:
 		var startup_args = "+set dedicated %d +set developer %d" % [1 if launch_dedicated else 0, 1 if dev_mode else 0]
@@ -55,12 +58,10 @@ func _ready():
 
 func _on_load_timer():
 	if runner and runner.is_engine_initialized():
-		print("Main: Engine is running, loading test map...")
-		# runner.load_map(launch_map)
-		# runner.execute_command("exec server.cfg")  # Initial status check
-
-		# Poll server status after giving the map time to load
-		get_tree().create_timer(2.0).timeout.connect(_on_status_check)
+		print("Main: Engine is running. Main menu should be visible.")
+		# The engine auto-pushes the main menu on startup via CL_TryStartIntro().
+		# Use runner.execute_command("pushmenu main") if menu needs to be re-opened.
+		# Use runner.load_map("mapname") to load a specific map.
 
 func _on_status_check():
 	if runner and runner.is_engine_initialized():

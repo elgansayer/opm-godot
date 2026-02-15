@@ -2232,3 +2232,181 @@ Implemented billboard rendering for shaders with `deformVertexes autosprite` and
 
 ### Files modified (Phase 140):
 - `code/godot/MoHAARunner.cpp` — added billboard mode application in `apply_shader_props_to_material()` and per-entity tinted material creation
+
+## Phase 141: rgbGen/alphaGen Wave Function Type Support ✅
+
+### Problem
+`rgbGen wave` and `alphaGen wave` shader directives support 5 wave function types: `sin`, `triangle`, `square`, `sawtooth`, `inverseSawtooth`. However, the top-level `GodotShaderProps` struct only stored the wave parameters (base, amplitude, frequency, phase) — **not** the function type. The per-stage `MohaaShaderStage.rgbWave.func` correctly stored the `MohaaWaveFunc` enum via `parse_wave_func()`, but the top-level fields used by `update_shader_animations()` and entity tinting had no function type field.
+
+As a result, all four call sites used `sinf()` directly — meaning triangle, square, sawtooth, and inverse_sawtooth waves all rendered as sine waves. This affected pulsing lights, flashing surfaces, and animated transparency effects on both BSP world surfaces and entities.
+
+### Fix
+1. **Added `MohaaWaveFunc` fields** to `GodotShaderProps` in `godot_shader_props.h`:
+   - `rgbgen_wave_func` — wave function type for rgbGen wave
+   - `alphagen_wave_func` — wave function type for alphaGen wave
+   - Both default to `WAVE_SIN` (0) via struct zero-initialisation — backward compatible.
+
+2. **Store wave func type in parser** (`godot_shader_props.cpp`):
+   - rgbGen wave block (line ~413): added `props->rgbgen_wave_func = parse_wave_func(func_tok);`
+   - alphaGen wave block (line ~492): added `props->alphagen_wave_func = parse_wave_func(func_tok);`
+
+3. **Added `eval_wave()` static helper** in `MoHAARunner.cpp`:
+   - Mirrors `EvalWaveForm()` from `renderergl1/tr_shade_calc.c`
+   - Supports all 5 wave types: sin (2π sinf), triangle (linear ramp ±1), square (±1 step), sawtooth (0→1 ramp), inverse_sawtooth (1→0 ramp)
+   - Accepts `MohaaWaveFunc`, base, amplitude, phase, frequency, and time
+   - Returns `base + amplitude * wave_value`
+
+4. **Replaced all 4 `sinf()` call sites** with `eval_wave()`:
+   - **BSP surfaces** in `update_shader_animations()` — rgbGen wave + alphaGen wave
+   - **Entity tinting** in `update_entities()` — rgbGen wave + alphaGen wave
+
+### Reference: renderergl1/tr_shade_calc.c EvalWaveForm
+```c
+static float EvalWaveForm( const waveForm_t *wf ) {
+    table = TableForFunc( wf->func );
+    return WAVEVALUE( table, wf->base, wf->amplitude, wf->phase, wf->frequency );
+}
+```
+The real renderer uses lookup tables (1024 entries); our implementation uses direct computation which is equivalent for the 5 supported wave types.
+
+### Files modified (Phase 141)
+- `code/godot/godot_shader_props.h` — added `rgbgen_wave_func` and `alphagen_wave_func` fields
+- `code/godot/godot_shader_props.cpp` — store wave func type in rgbGen/alphaGen wave parsing
+- `code/godot/MoHAARunner.cpp` — added `eval_wave()` helper; replaced 4 × `sinf()` with `eval_wave()`
+
+## Phase 142: clampMap Texture Wrap Mode Application ✅
+
+### Problem
+The `clampMap` stage directive was correctly parsed and stored (`MohaaShaderStage.isClampMap = true`) and included in the ShaderMaterial cache key, but **never actually applied** to any material or texture. This meant surfaces using `clampMap` (decals, HUD elements, specific prop textures that should not tile) rendered with repeating texture wrap mode instead of clamping to edge, causing visible tiling artefacts.
+
+### Fix
+Applied `isClampMap` in three rendering paths:
+
+1. **`apply_shader_props_to_material()`** (MoHAARunner.cpp) — checks the first non-lightmap stage; if `isClampMap` is true, calls `mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false)`. Applies to entity materials and static model materials.
+
+2. **BSP mesh builder** (godot_bsp_mesh.cpp) — added same check in the StandardMaterial3D fallback path after cull mode handling.
+
+3. **ShaderMaterial GLSL generation** (godot_shader_material.cpp) — appended ` : repeat_disable` sampler hint to `uniform sampler2D` declarations for stages with `isClampMap == true`. This applies to both regular `stageN_tex` and `animMap` frame samplers.
+
+### Reference: R_FindShader image loading
+```c
+// tr_shader.c — stage image loading
+if (stage->bundle[0].isClampMap) {
+    image = R_FindImageFile(name, ..., GL_CLAMP, GL_CLAMP);
+} else {
+    image = R_FindImageFile(name, ..., GL_REPEAT, GL_REPEAT);
+}
+```
+
+### Files modified (Phase 142)
+- `code/godot/MoHAARunner.cpp` — added clampMap check in `apply_shader_props_to_material()`
+- `code/godot/godot_bsp_mesh.cpp` — added clampMap check in BSP StandardMaterial3D fallback
+- `code/godot/godot_shader_material.cpp` — added `: repeat_disable` sampler hint for clampMap stages
+
+## Phase 143: depthWrite / nodepthwrite / noDepthTest Parsing & Application ✅
+
+### Problem
+The stage-level depth control keywords `depthwrite`/`depthmask`, `nodepthwrite`/`nodepthmask`, and `noDepthTest`/`nodepthtest` were not parsed by `godot_shader_props.cpp`. They fell through to `SkipRestOfLine()` and were silently discarded. This meant:
+- Transparent surfaces that should write to the depth buffer (e.g. foliage with `depthwrite`) allowed objects behind them to incorrectly show through.
+- Surfaces with `nodepthwrite` (e.g. translucent overlays) wrote to the depth buffer when they shouldn't, occluding geometry behind them.
+- `noDepthTest` surfaces (skybox elements, always-on-top effects) were depth-tested against the scene.
+
+### Fix
+1. **Added fields to `MohaaShaderStage`** in `godot_shader_props.h`:
+   - `bool depthWriteExplicit` — whether depth write was explicitly set
+   - `bool depthWriteEnabled` — true = force ON, false = force OFF
+   - `bool noDepthTest` — disable depth testing entirely
+
+2. **Parsed keywords** in `godot_shader_props.cpp` stage parser:
+   - `depthwrite`/`depthmask` → `depthWriteExplicit=true`, `depthWriteEnabled=true`
+   - `nodepthwrite`/`nodepthmask` → `depthWriteExplicit=true`, `depthWriteEnabled=false`
+   - `noDepthTest`/`nodepthtest` → `noDepthTest=true`
+   - Matches real renderer at `tr_shader.c:1650-1672`
+
+3. **Applied in `apply_shader_props_to_material()`** (MoHAARunner.cpp):
+   - `depthWriteEnabled=true` → `DEPTH_DRAW_ALWAYS` (depth write even when transparent)
+   - `depthWriteEnabled=false` → `DEPTH_DRAW_DISABLED`
+   - `noDepthTest` → `DEPTH_DRAW_DISABLED` + `FLAG_DISABLE_DEPTH_TEST=true`
+   - Only the first non-lightmap stage's settings apply (same loop as clampMap)
+
+### Files modified (Phase 143)
+- `code/godot/godot_shader_props.h` — added depth control fields to `MohaaShaderStage`
+- `code/godot/godot_shader_props.cpp` — parsed depthwrite/nodepthwrite/noDepthTest keywords
+- `code/godot/MoHAARunner.cpp` — applied depth settings in `apply_shader_props_to_material()`
+
+---
+
+## Phase 144: tcMod offset — Static UV Offset (MOHAA Extension)
+
+**Parity loop iteration 4** — `tcMod offset` was MISSING from the parser and all rendering paths. The real renderer handles it via `TMOD_OFFSET` → `RB_CalcOffsetTexCoords()` which adds a constant S/T offset to UV coordinates.
+
+### What was done
+1. **Added `TCMOD_OFFSET` enum value** to `MohaaStageTcModType` in `godot_shader_props.h`
+
+2. **Added top-level fields** `tcmod_offset_s` and `tcmod_offset_t` to `GodotShaderProps` for first-stage shorthand (consistent with scroll/rotate/scale/turb pattern)
+
+3. **Parsed `tcMod offset`** in `godot_shader_props.cpp`:
+   - Format: `tcMod offset <s> <t> [randS] [randT]`
+   - Stores per-stage via `MohaaStageTcMod` with `TCMOD_OFFSET` type and `params[0]=s, params[1]=t`
+   - Stores top-level for first stage
+   - Optional random jitter and "fromEntity" (1234567 sentinel) skipped — engine uses these for entity-driven offsets, not common in map shaders
+
+4. **Applied in StandardMaterial3D path** (`update_shader_animations()` in MoHAARunner.cpp):
+   - Static offset added to `offS`/`offT` before scroll and turb contributions
+   - Combined offset used in `set_uv1_offset()` so it interacts correctly with other tcMod types
+
+5. **Applied in ShaderMaterial GLSL path** (`godot_shader_material.cpp`):
+   - `TCMOD_OFFSET` case generates `uv += vec2(s, t)` — simple static addition
+
+### Reference: Real renderer implementation
+- **Parsing:** `tr_shader.c:725-779` — parses `tcMod offset` with fromEntity sentinel + random params
+- **Application:** `tr_shade.c:1400` → `RB_CalcOffsetTexCoords()` at `tr_shade_calc.c:1432-1467`
+- **Algorithm:** `st[i] += offsetS; st[i+1] += offsetT` — pure additive UV shift
+
+### Files modified (Phase 144)
+- `code/godot/godot_shader_props.h` — added `TCMOD_OFFSET` enum, `tcmod_offset_s/t` fields
+- `code/godot/godot_shader_props.cpp` — parsed `tcMod offset` with first-stage + per-stage storage
+- `code/godot/MoHAARunner.cpp` — applied static offset in `update_shader_animations()` UV calculation
+- `code/godot/godot_shader_material.cpp` — added `TCMOD_OFFSET` GLSL generation case
+
+---
+
+## Phase 145: Full GUI/UI Support — Main Menu, Menus, Scissor Clipping
+
+**The engine's uilib (50+ widget classes, .urc menu definitions) was already fully compiled and linked, but the main menu never appeared on screen.** This phase identified and fixed 7 root causes preventing the UI from rendering and interacting correctly.
+
+### Root causes identified and fixed
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | Main menu never pushed | `developer 1` was forced by Main.gd, so `CL_TryStartIntro()` only opened the console | Changed Main.gd default to `dev_mode = false`; added `--dev` CLI flag |
+| 2 | `pushmenu main` never issued | Even with `developer 0`, the intro sequence depends on cinematic playback our stub doesn't support | Added `#ifdef GODOT_GDEXTENSION` in `CL_TryStartIntro()` to always skip intro and call `UI_PushMenu("main")` + `IN_MouseOn()` |
+| 3 | Main.gd tried to load maps | `_on_load_timer()` called `runner.load_map()`, bypassing menu flow | Cleaned up to just log status; engine auto-starts menu |
+| 4 | In-game menus blocked | `UI_Update()` had `if (clc.state == CA_ACTIVE)` fast-path that skipped full UI rendering even when menus were pushed (ESC) | Changed to `if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu())` under GODOT_GDEXTENSION |
+| 5 | Menu backgrounds filtered out | `update_2d_overlay()` suppressed large opaque fills unconditionally, blocking `UI_ClearBackground()` and menu background textures | Added context-aware filtering: only suppress fills when in-game with no overlay active and world loaded |
+| 6 | `GR_ImageExists` failed for shader names | UI checks image existence before drawing; shader names (e.g. `textures/menu/main_a`) aren't file paths | Enhanced `GR_ImageExists()` to also check `gr_shaders[]` table |
+| 7 | Intro cinematic still triggered | With `developer 0`, the original code path tried to start the intro cinematic sequence | `CL_TryStartIntro()` under Godot unconditionally skips to main menu |
+
+### Scissor clipping implementation
+
+Replaced the non-functional `canvas_item_set_custom_rect()` approach with proper child canvas items:
+- Each `GR_2D_SCISSOR` command creates a new `RID` canvas item parented to the HUD control
+- The child item has `canvas_item_set_custom_rect()` + `canvas_item_set_clip()` for true clipping
+- Subsequent draw commands target the clipped child item
+- Scissor reset (`w==0 && h==0`) reverts to the parent canvas item
+- All temporary scissor items are freed at the start of each frame
+
+### What works now
+- **Main menu** renders on startup (main_a, main_b panel textures, fan_anim1 animated icon)
+- **42 draw commands** generated per frame for the full main menu
+- **Input routing** for UI: mouse motion (relative deltas → `CL_MouseEvent` accumulation), mouse buttons (→ `UI_KeyEvent`), keyboard (→ engine key dispatch with `KEYCATCH_UI` routing)
+- **In-game ESC menu**: `UI_Update()` fix allows menu rendering during `CA_ACTIVE` when `menuManager.CurrentMenu()` is non-null
+- **Cursor management**: `update_input_routing()` shows cursor when UI is active, captures for gameplay
+- **Scissor clipping** for widget text overflow and nested layouts
+
+### Files modified (Phase 145)
+- `code/client/cl_ui.cpp` — `CL_TryStartIntro()`: skip intro, push main menu; `UI_Update()`: allow in-game menus
+- `code/godot/MoHAARunner.cpp` — Smart fill filtering in `update_2d_overlay()`; scissor clipping with child canvas items
+- `code/godot/MoHAARunner.h` — Added `scissor_items` vector for scissor canvas item cleanup
+- `code/godot/godot_renderer.c` — `GR_ImageExists()` checks shader table before VFS
+- `project/Main.gd` — `dev_mode = false` default, `--dev` flag, cleaned up timer callback

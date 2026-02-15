@@ -102,6 +102,7 @@ enum MohaaStageTcModType {
     TCMOD_SCALE,
     TCMOD_TURB,
     TCMOD_STRETCH,
+    TCMOD_OFFSET,
 };
 
 /* Wave function parameters (shared by rgbGen wave, alphaGen wave, tcMod stretch) */
@@ -153,6 +154,11 @@ struct MohaaShaderStage {
 
     bool hasAlphaFunc;               /* alphaFunc present in this stage */
     float alphaFuncThreshold;        /* 0.01 for GT0, 0.5 for GE128/LT128 */
+
+    /* Phase 143: depth write control */
+    bool depthWriteExplicit;         /* true if depthwrite/nodepthwrite was specified */
+    bool depthWriteEnabled;          /* true = force depth write; false = disable depth write */
+    bool noDepthTest;                /* true = disable depth testing (noDepthTest) */
 };
 
 /* ── Per-shader properties ── */
@@ -174,6 +180,8 @@ struct GodotShaderProps {
     float tcmod_scale_t;     /* texcoord T scale factor (1.0 = no change) */
     float tcmod_turb_amp;    /* turbulence amplitude */
     float tcmod_turb_freq;   /* turbulence frequency */
+    float tcmod_offset_s;    /* Phase 144: static UV S offset */
+    float tcmod_offset_t;    /* Phase 144: static UV T offset */
     bool  has_tcmod;         /* true if any tcMod directive was found */
 
     /* Phase 61: animMap — animated texture sequence */
@@ -196,6 +204,7 @@ struct GodotShaderProps {
 
     /* Phase 64: rgbGen */
     int   rgbgen_type;              /* 0=identity, 1=vertex, 2=wave, 3=entity, 4=const */
+    MohaaWaveFunc rgbgen_wave_func; /* Phase 141: wave function type (sin/triangle/square/sawtooth/inversesawtooth) */
     float rgbgen_wave_base;
     float rgbgen_wave_amp;
     float rgbgen_wave_freq;
@@ -204,6 +213,7 @@ struct GodotShaderProps {
 
     /* Phase 65: alphaGen */
     int   alphagen_type;            /* 0=identity, 1=vertex, 2=wave, 3=entity, 4=const */
+    MohaaWaveFunc alphagen_wave_func; /* Phase 141: wave function type */
     float alphagen_wave_base;
     float alphagen_wave_amp;
     float alphagen_wave_freq;

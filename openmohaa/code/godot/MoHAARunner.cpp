@@ -974,6 +974,31 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
             mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
         }
     }
+
+    // Phase 142: clampMap — disable texture repeat if the first diffuse stage
+    // uses clampMap instead of map.  Mirrors R_FindShader() image loading which
+    // passes GL_CLAMP for clampMap stages.
+    if (sp->stage_count > 0) {
+        for (int st = 0; st < sp->stage_count; st++) {
+            if (sp->stages[st].isLightmap) continue;
+            if (sp->stages[st].isClampMap) {
+                mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
+            }
+            // Phase 143: depthWrite / nodepthwrite / noDepthTest
+            if (sp->stages[st].depthWriteExplicit) {
+                if (sp->stages[st].depthWriteEnabled) {
+                    mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_ALWAYS);
+                } else {
+                    mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+                }
+            }
+            if (sp->stages[st].noDepthTest) {
+                mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+                mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
+            }
+            break;  // only check the first non-lightmap stage
+        }
+    }
 }
 
 /// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
@@ -1294,6 +1319,40 @@ void MoHAARunner::load_skybox() {
         UtilityFunctions::print(
             String("[MoHAA] Skybox loaded: ") + sky_env + " (6 faces).");
     }
+}
+
+// ──────────────────────────────────────────────
+//  Wave function evaluation (Phase 141)
+// ──────────────────────────────────────────────
+
+// Evaluate a wave function (mirrors renderergl1 EvalWaveForm).
+// Returns the wave value for the given function type at the specified time.
+static float eval_wave(MohaaWaveFunc func, float base, float amp,
+                       float phase, float freq, double time) {
+    float t = fmodf((float)(phase + time * freq), 1.0f);
+    if (t < 0.0f) t += 1.0f;
+    float wave = 0.0f;
+    switch (func) {
+    case WAVE_SIN:
+        wave = sinf(t * 2.0f * (float)M_PI);
+        break;
+    case WAVE_TRIANGLE:
+        wave = (t < 0.5f) ? (4.0f * t - 1.0f) : (-4.0f * t + 3.0f);
+        break;
+    case WAVE_SQUARE:
+        wave = (t < 0.5f) ? 1.0f : -1.0f;
+        break;
+    case WAVE_SAWTOOTH:
+        wave = t;
+        break;
+    case WAVE_INVERSE_SAWTOOTH:
+        wave = 1.0f - t;
+        break;
+    default:
+        wave = sinf(t * 2.0f * (float)M_PI);
+        break;
+    }
+    return base + amp * wave;
 }
 
 // ──────────────────────────────────────────────
@@ -2149,8 +2208,10 @@ void MoHAARunner::update_entities() {
                     // Mirrors update_shader_animations() wave logic but applied per-entity
                     if (sp) {
                         if (sp->rgbgen_type == 2) { // wave
-                            float wave_val = sp->rgbgen_wave_base +
-                                           sp->rgbgen_wave_amp * sinf((float)(shader_anim_time * sp->rgbgen_wave_freq + sp->rgbgen_wave_phase));
+                            float wave_val = eval_wave(sp->rgbgen_wave_func,
+                                sp->rgbgen_wave_base, sp->rgbgen_wave_amp,
+                                sp->rgbgen_wave_phase, sp->rgbgen_wave_freq,
+                                shader_anim_time);
                             wave_val = clamp01(wave_val);
                             entity_tint.r *= wave_val;
                             entity_tint.g *= wave_val;
@@ -2158,8 +2219,10 @@ void MoHAARunner::update_entities() {
                             has_entity_tint = true;
                         }
                         if (sp->alphagen_type == 2) { // wave
-                            float alpha_wave = sp->alphagen_wave_base +
-                                             sp->alphagen_wave_amp * sinf((float)(shader_anim_time * sp->alphagen_wave_freq + sp->alphagen_wave_phase));
+                            float alpha_wave = eval_wave(sp->alphagen_wave_func,
+                                sp->alphagen_wave_base, sp->alphagen_wave_amp,
+                                sp->alphagen_wave_phase, sp->alphagen_wave_freq,
+                                shader_anim_time);
                             entity_tint.a *= clamp01(alpha_wave);
                             has_entity_tint = true;
                         }
@@ -2924,6 +2987,9 @@ void MoHAARunner::update_shader_animations(double delta) {
             if (sp->has_tcmod) {
                 float offS = 0.0f;
                 float offT = 0.0f;
+                /* Phase 144: tcMod offset — static UV shift */
+                offS += sp->tcmod_offset_s;
+                offT += sp->tcmod_offset_t;
                 if (sp->tcmod_scroll_s != 0.0f || sp->tcmod_scroll_t != 0.0f) {
                     offS += fmodf((float)(sp->tcmod_scroll_s * shader_anim_time), 1.0f);
                     offT += fmodf((float)(sp->tcmod_scroll_t * shader_anim_time), 1.0f);
@@ -2995,18 +3061,24 @@ void MoHAARunner::update_shader_animations(double delta) {
                 }
             }
 
-            // Phase 56/57: runtime rgbGen/alphaGen wave animation
+            // Phase 56/57 + Phase 141: runtime rgbGen/alphaGen wave animation
+            // Uses eval_wave() to support all wave function types (sin, triangle,
+            // square, sawtooth, inverse_sawtooth) — not just sine.
             if (sp->rgbgen_type == 2 || sp->alphagen_type == 2) {
                 Color a = smat->get_albedo();
                 if (sp->rgbgen_type == 2) {
-                    float v = sp->rgbgen_wave_base +
-                              sp->rgbgen_wave_amp * sinf((float)(shader_anim_time * sp->rgbgen_wave_freq + sp->rgbgen_wave_phase));
+                    float v = eval_wave(sp->rgbgen_wave_func,
+                        sp->rgbgen_wave_base, sp->rgbgen_wave_amp,
+                        sp->rgbgen_wave_phase, sp->rgbgen_wave_freq,
+                        shader_anim_time);
                     v = clamp01(v);
                     a.r = v; a.g = v; a.b = v;
                 }
                 if (sp->alphagen_type == 2) {
-                    float alpha = sp->alphagen_wave_base +
-                                  sp->alphagen_wave_amp * sinf((float)(shader_anim_time * sp->alphagen_wave_freq + sp->alphagen_wave_phase));
+                    float alpha = eval_wave(sp->alphagen_wave_func,
+                        sp->alphagen_wave_base, sp->alphagen_wave_amp,
+                        sp->alphagen_wave_phase, sp->alphagen_wave_freq,
+                        shader_anim_time);
                     a.a = clamp01(alpha);
                     if (a.a < 0.999f) {
                         smat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
@@ -3051,16 +3123,28 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     if (sp && sp->stage_count > 0) {
         /* Select the best diffuse texture: skip lightmap, $whiteimage,
          * and environment map stages (tcGen environment = reflections).
-         * Fall back to the first non-lightmap stage if only env stages exist. */
+         * Fall back to the first non-lightmap stage if only env stages exist.
+         * Also handle animMap stages: use the first frame as the texture. */
         const char *fallback = NULL;
         for (int st = 0; st < sp->stage_count && num_texture_paths == 0; st++) {
             if (sp->stages[st].isLightmap) continue;
-            if (!sp->stages[st].map[0]) continue;
-            if (strcmp(sp->stages[st].map, "$lightmap") == 0) continue;
-            if (strcmp(sp->stages[st].map, "$whiteimage") == 0) continue;
-            if (!fallback) fallback = sp->stages[st].map;
+
+            /* Determine the candidate texture path for this stage:
+             * prefer map[], fall back to animMapFrames[0] for animated stages. */
+            const char *stage_map = NULL;
+            if (sp->stages[st].map[0]) {
+                stage_map = sp->stages[st].map;
+            } else if (sp->stages[st].animMapFrameCount > 0
+                       && sp->stages[st].animMapFrames[0][0]) {
+                stage_map = sp->stages[st].animMapFrames[0];
+            }
+
+            if (!stage_map) continue;
+            if (strcmp(stage_map, "$lightmap") == 0) continue;
+            if (strcmp(stage_map, "$whiteimage") == 0) continue;
+            if (!fallback) fallback = stage_map;
             if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
-            texture_paths[num_texture_paths++] = sp->stages[st].map;
+            texture_paths[num_texture_paths++] = stage_map;
         }
         if (num_texture_paths == 0 && fallback) {
             texture_paths[num_texture_paths++] = fallback;
@@ -3071,6 +3155,39 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // where the name IS the texture path without extension)
     if (num_texture_paths == 0 || strcmp(texture_paths[0], name) != 0) {
         texture_paths[num_texture_paths++] = name;
+    }
+
+    // ── Handle $whiteimage shaders (e.g. menu_button_trans) ──
+    // If the shader definition exists but uses only $whiteimage stages
+    // (no real texture paths), create a 1x1 white texture.
+    if (num_texture_paths <= 1 && sp && sp->stage_count > 0) {
+        bool all_white = true;
+        for (int st = 0; st < sp->stage_count; st++) {
+            if (sp->stages[st].isLightmap) continue;
+            const char *sm = sp->stages[st].map;
+            if (sm[0] && strcmp(sm, "$whiteimage") != 0 && strcmp(sm, "$lightmap") != 0) {
+                all_white = false;
+                break;
+            }
+            if (sp->stages[st].animMapFrameCount > 0) {
+                all_white = false;
+                break;
+            }
+        }
+        if (all_white && num_texture_paths == 1) {
+            // All stages are $whiteimage — return a 1x1 white texture
+            static Ref<ImageTexture> white_tex;
+            if (white_tex.is_null()) {
+                PackedByteArray wdata;
+                wdata.resize(4);
+                wdata.ptrw()[0] = 255; wdata.ptrw()[1] = 255;
+                wdata.ptrw()[2] = 255; wdata.ptrw()[3] = 255;
+                Ref<Image> wimg = Image::create_from_data(1, 1, false, Image::FORMAT_RGBA8, wdata);
+                white_tex = ImageTexture::create_from_image(wimg);
+            }
+            shader_textures[shader_handle] = white_tex;
+            return white_tex;
+        }
     }
 
     // ── Try loading each candidate path via VFS ──
@@ -3259,6 +3376,19 @@ void MoHAARunner::update_2d_overlay() {
     // Use cached transformation values calculated by update_ui_transform()
     float vid_area = (float)(ui_vid_w * ui_vid_h);
 
+    // Determine whether we should allow fullscreen background fills.
+    // When a UI menu is active (main menu, options, console, loading screen)
+    // the engine draws UI_ClearBackground() as a fullscreen black box, plus
+    // menu background textures.  We must let those through so the menu is
+    // visible.  Only suppress large fills when we're in-game (CA_ACTIVE=8)
+    // with no overlay active and the world map is loaded — that's when fills
+    // would harmfully cover the 3D view.
+    bool overlay_on = (Godot_Client_IsMenuUp() != 0)
+                    || (Godot_Client_IsAnyOverlayActive() != 0);
+    bool in_active_game = (Godot_Client_GetState() == 8); // CA_ACTIVE
+    bool world_loaded = Godot_Renderer_IsWorldMapLoaded() != 0;
+    bool allow_fullscreen_fills = overlay_on || !in_active_game || !world_loaded;
+
     for (int i = 0; i < cmd_count; i++) {
         int type, shader;
         float x, y, w, h, s1, t1, s2, t2, color[4];
@@ -3268,9 +3398,10 @@ void MoHAARunner::update_2d_overlay() {
             continue;
         }
 
-        // Skip fullscreen opaque fills — these are screen clears/backgrounds
-        // that would cover the 3D view.  They belong behind the scene, not on top.
-        if (type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
+        // Skip fullscreen opaque fills when in-game with no overlay.
+        // These screen clears would cover the 3D view.  But when UI menus
+        // are active, we need them for menu backgrounds.
+        if (!allow_fullscreen_fills && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
             continue;
         }
 
@@ -3283,15 +3414,11 @@ void MoHAARunner::update_2d_overlay() {
             // GR_2D_BOX — solid colour rectangle
             rs->canvas_item_add_rect(ci, rect, col);
         } else if (type == 2) {
-            // GR_2D_SCISSOR — Phase 45: apply scissor/clip rectangle
-            // w==0 && h==0 means "reset scissor" (full viewport)
-            if (w > 0 && h > 0) {
-                Rect2 clip(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
-                           w * ui_scale_x, h * ui_scale_y);
-                rs->canvas_item_set_custom_rect(ci, true, clip);
-            } else {
-                rs->canvas_item_set_custom_rect(ci, false, Rect2());
-            }
+            // GR_2D_SCISSOR — currently a no-op.
+            // True scissor clipping would require nested canvas items with
+            // proper z-ordering, which breaks draw-order guarantees.
+            // The menu renders correctly without scissor clipping; it only
+            // matters for text overflow in list/scroll widgets.
         } else if (type == 0 && shader > 0) {
             // GR_2D_STRETCHPIC — textured quad
             Ref<ImageTexture> tex = get_shader_texture(shader);
@@ -3300,12 +3427,47 @@ void MoHAARunner::update_2d_overlay() {
                 float tw = (float)tex->get_width();
                 float th = (float)tex->get_height();
                 Rect2 src(s1 * tw, t1 * th, (s2 - s1) * tw, (t2 - t1) * th);
-                rs->canvas_item_add_texture_rect_region(ci, rect, tex_rid, src, col);
+
+                // ── Apply shader stage alphaGen/blendFunc to draw colour ──
+                // The real GL renderer processes per-stage alphaGen (e.g.
+                // "alphagen constant 0.0") which overrides the vertex alpha
+                // set by SetColor.  Our 2D overlay must replicate this.
+                Color draw_col = col;
+                const char *sname = Godot_Renderer_GetShaderName(shader);
+                if (sname && sname[0]) {
+                    const GodotShaderProps *sp = Godot_ShaderProps_Find(sname);
+                    if (sp && sp->stage_count > 0) {
+                        // Find first non-lightmap stage (same as get_shader_texture)
+                        for (int st = 0; st < sp->stage_count; st++) {
+                            if (sp->stages[st].isLightmap) continue;
+                            const MohaaShaderStage *stg = &sp->stages[st];
+
+                            // Apply alphaGen constant: overrides vertex alpha
+                            if (stg->alphaGen == STAGE_ALPHAGEN_CONST) {
+                                draw_col.a *= stg->alphaConst;
+                            }
+
+                            // Apply rgbGen constant: overrides vertex colour
+                            if (stg->rgbGen == STAGE_RGBGEN_CONST) {
+                                draw_col.r *= stg->rgbConst[0];
+                                draw_col.g *= stg->rgbConst[1];
+                                draw_col.b *= stg->rgbConst[2];
+                            }
+                            break;  // Only process first non-lightmap stage
+                        }
+                    }
+                }
+
+                // Skip fully transparent draws (alphaConst=0 → invisible)
+                if (draw_col.a < 0.001f) continue;
+
+                rs->canvas_item_add_texture_rect_region(ci, rect, tex_rid, src, draw_col);
             }
             // If texture not loaded, skip — don't draw opaque coloured rect fallback
         } else if (type == 0) {
-            // StretchPic with no shader — only draw if not a large opaque fill
-            if (w * h < vid_area * 0.5f || color[3] < 0.9f) {
+            // StretchPic with no shader — draw unless it's a large opaque fill
+            // that would cover the 3D view when in-game with no overlay.
+            if (allow_fullscreen_fills || w * h < vid_area * 0.5f || color[3] < 0.9f) {
                 rs->canvas_item_add_rect(ci, rect, col);
             }
         }
@@ -3315,23 +3477,6 @@ void MoHAARunner::update_2d_overlay() {
     if (!logged_2d && cmd_count > 0) {
         UtilityFunctions::print(String("[MoHAA] 2D overlay: ") +
                                 String::num_int64(cmd_count) + String(" draw commands"));
-        // Dump first frame's 2D commands for debugging
-        for (int dbg = 0; dbg < cmd_count && dbg < 20; dbg++) {
-            int dtype, dshader;
-            float dx, dy, dw, dh, ds1, dt1, ds2, dt2, dcol[4];
-            if (Godot_Renderer_Get2DCmd(dbg, &dtype, &dx, &dy, &dw, &dh,
-                                         &ds1, &dt1, &ds2, &dt2, dcol, &dshader)) {
-                UtilityFunctions::print(String("[HUD cmd ") + String::num_int64(dbg) +
-                    String("] type=") + String::num_int64(dtype) +
-                    String(" rect=(") + String::num(dx, 0) + String(",") + String::num(dy, 0) +
-                    String(",") + String::num(dw, 0) + String(",") + String::num(dh, 0) +
-                    String(") col=(") + String::num(dcol[0], 2) + String(",") +
-                    String::num(dcol[1], 2) + String(",") + String::num(dcol[2], 2) +
-                    String(",") + String::num(dcol[3], 2) +
-                    String(") shader=") + String::num_int64(dshader) +
-                    String(" name=") + String(dshader > 0 ? Godot_Renderer_GetShaderName(dshader) : ""));
-            }
-        }
         logged_2d = true;
     }
 }
@@ -3953,6 +4098,11 @@ void MoHAARunner::_ready() {
 
     Com_Init(cmdline);
     NET_Init();
+
+    /* Load shader properties early so menu shaders resolve correctly.
+     * This is loaded again during Godot_BSP_LoadWorld() for each map,
+     * but menu textures need shader definitions before any map loads. */
+    Godot_ShaderProps_Load();
 
     godot_jmpbuf_valid = false;
     initialized = true;
