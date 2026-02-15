@@ -1872,77 +1872,76 @@ The following integration points document how `MoHAARunner.cpp` (owned by Agent 
 5. **Create a dedicated `CanvasLayer`** for UI background at higher z-index than HUD overlay.
 6. **On mode transitions:** Call `Godot_ResetMousePosition()` when switching between UI and game input to avoid cursor jumps.
 
-## Audit: Path, Script, and Animate Entity Families ✅
+## Trigger Entity Audit for Godot GDExtension ✅
 
-### Scope
-Reviewed all source files in the path, script, and animate entity families for Godot GDExtension compatibility, shutdown safety, memory management, and missing preprocessor guards.
+Full audit of all `trigger_*` entity types for Godot GDExtension compatibility.
 
-**Files audited:**
-- `code/fgame/animate.h`, `code/fgame/animate.cpp` — animation management
-- `code/fgame/scriptmaster.h`, `code/fgame/scriptmaster.cpp` — script VM and thread manager
-- `code/fgame/scriptthread.h`, `code/fgame/scriptthread.cpp` — script execution threads
-- `code/fgame/scriptslave.h`, `code/fgame/scriptslave.cpp` — scripted mover entity
-- `code/fgame/gamescript.h`, `code/fgame/gamescript.cpp` — compiled game script objects
-- `code/fgame/scriptdelegate.h`, `code/fgame/scriptdelegate.cpp` — script delegation
-- `code/fgame/scripttimer.h`, `code/fgame/scripttimer.cpp` — script timing
-- `code/fgame/scriptflags.h`, `code/fgame/scriptflags.cpp` — script flag management
-- `code/fgame/actorpath.h`, `code/fgame/actorpath.cpp` — actor pathfinding
-- `code/fgame/gravpath.h`, `code/fgame/gravpath.cpp` — gravity/current path nodes
-- `code/fgame/navigation_path.h`, `code/fgame/navigation_path.cpp` — pathfinding interface
-- `code/fgame/navigation_legacy_path.h`, `code/fgame/navigation_legacy_path.cpp` — legacy pathfinding
-- `code/fgame/navigation_recast_path.h`, `code/fgame/navigation_recast_path.cpp` — Recast pathfinding
+### Trigger class hierarchy (31 classes)
 
-### Global objects with destructors
+```
+Animate (parent)
+└── Trigger (base) — "trigger_multiple"
+    ├── TriggerVehicle — "trigger_vehicle"
+    ├── TriggerAll — "trigger_multipleall"
+    ├── TouchField — (internal, no classname)
+    ├── TriggerOnce — "trigger_once"
+    │   ├── TriggerSave — "trigger_save"
+    │   ├── TriggerSecret — "trigger_secret"
+    │   └── TriggerByPushObject — "trigger_pushobject"
+    ├── TriggerRelay — "trigger_relay"
+    ├── TriggerUse — "trigger_use"
+    │   ├── TriggerSidedUse — "trigger_sideduse"
+    │   ├── TriggerUseOnce — "trigger_useonce"
+    │   ├── TriggerCameraUse — "trigger_camerause"
+    │   └── TriggerNoDamage — "trigger_nodamage"
+    ├── TriggerPush — "trigger_push"
+    ├── TriggerPushAny — "trigger_pushany"
+    ├── TriggerPlaySound — "play_sound_triggered"
+    │   └── TriggerSpeaker — "sound_speaker"
+    │       └── RandomSpeaker — "sound_randomspeaker"
+    ├── TriggerChangeLevel — "trigger_changelevel"
+    ├── TriggerExit — "trigger_exit"
+    ├── TriggerHurt — "trigger_hurt"
+    ├── TriggerDamageTargets — "trigger_damagetargets"
+    ├── TriggerBox — "trigger_box"
+    ├── TriggerMusic — "trigger_music"
+    ├── TriggerReverb — "trigger_reverb"
+    ├── TriggerGivePowerup — "trigger_givepowerup"
+    ├── TriggerClickItem — "trigger_clickitem"
+    ├── TriggerEntity — "trigger_entity"
+    │   └── TriggerLandmine — "trigger_landmine"
+    └── Teleporter — "trigger_teleport" (in misc.cpp)
+        └── TeleporterDestination — "func_teleportdest" (in misc.cpp)
+```
 
-Three global objects in these families have non-trivial destructors that run during library unload:
+### Spawning path
 
-| Global | File | Destructor action |
-|--------|------|-------------------|
-| `Director` (ScriptMaster) | scriptmaster.cpp:74 | Calls `Reset(false)` → `ScriptClass_allocator.FreeAll()`, `CloseGameScript()`, `StringDict.clear()`, `InitConstStrings()` |
-| `gravPathManager` (GravPathManager) | gravpath.cpp:35 | Calls `Reset()` → deletes GravPath objects, frees pathList |
-| `pathMaster` (RecastPathMaster) | navigation_recast_path.cpp:42 | Empty stubs — no-op destructor |
+Entity spawning goes through `Level::SpawnEntities()` → `SpawnArgs::SpawnInternal()` → `getClassDef()` which uses the CLASS_DECLARATION registration system. The Q3-style `G_CallSpawn()` → `spawns[]` table in `g_spawn.cpp` is dead code for trigger entities — the `SP_trigger_*` functions are forward-declared but never defined.
 
-**Finding: All three are safe under the existing shutdown mechanism.**
+### Audit results — all trigger types are Godot-compatible ✅
 
-Shutdown sequence:
-1. `uninitialize_openmohaa_module()` → `Com_Shutdown()` → `SV_Shutdown()` → `SV_ShutdownGameProgs()` → `G_ShutdownGame()` → `level.CleanUp()` → `Director.Reset()` + entity deletion (clears all GravPath instances)
-2. `Z_MarkShutdown()` — makes `Z_Free` a no-op, `Z_TagMalloc` falls back to system `malloc`
-3. Global C++ destructors run — find empty containers, second `Reset()` calls are effectively no-ops
+| Category | Status | Details |
+|----------|--------|---------|
+| Collision/touch detection | ✅ Works | Server-side `G_TouchTriggers()` → `gi.AreaEntities()` → `SOLID_TRIGGER` |
+| Event system (EV_Touch, EV_Use) | ✅ Works | Standard engine PostEvent/ProcessEvent |
+| Sound playback | ✅ Works | `Entity::Sound()` → `gi.sound()` → `godot_sound.c` capture |
+| Centre-print messages | ✅ Works | `gi.centerprintf()` → `PF_centerprintf()` in sv_game.c |
+| Music mood changes | ✅ Works | `ChangeMusic()` → `gi.SetConfigstring()` (server-side) |
+| Reverb changes | ✅ Works | `Player::SetReverb()` (server-side player state) |
+| Level transitions | ✅ Works | `G_BeginIntermission()` → `gi.SendServerCommand()` (server-side) |
+| Damage application | ✅ Works | `Entity::Damage()` (game logic, no rendering) |
+| Teleportation | ✅ Works | Direct entity state manipulation (server-side) |
+| Memory safety | ✅ Safe | `new Event()` uses engine allocator; no raw malloc/free |
+| No exit()/abort() | ✅ Verified | No fatal calls in any trigger code |
+| No rendering calls | ✅ Verified | Triggers are invisible (SVF_NOCLIENT), pure logic |
 
-The `InitConstStrings()` call from the second `Reset(false)` (during global destruction) is protected by the `Listener::EventSystemStarted` check (set to `false` by `L_ShutdownEvents()` during step 1), so it returns early without accessing the event system.
+### Bug fix: TriggerReverb classname
 
-### Memory management
+`TriggerReverb` was registered with classname `"trigger_music"` (duplicate of `TriggerMusic`) instead of `"trigger_reverb"`. This is a pre-existing upstream bug (also present in openmoh/openmohaa main branch). BSP maps with `trigger_reverb` entities would fail to spawn. Fixed by changing the CLASS_DECLARATION to use `"trigger_reverb"`.
 
-| Pattern | Routing under GODOT_GDEXTENSION | Shutdown safety |
-|---------|--------------------------------|-----------------|
-| `Container` alloc/free | `CONTAINER_Alloc` → `Z_Malloc`, `CONTAINER_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
-| `MEM_BlockAlloc` (ScriptClass_allocator) | `MEM_Alloc` → `Z_Malloc`, `MEM_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
-| `gi.Malloc`/`gi.Free` (gamescript.cpp) | → `SV_Malloc` → `Z_TagMalloc(TAG_GAME)`, → `SV_Free` → `Z_Free` | Z_MarkShutdown: Z_Free = no-op |
-| C++ `new`/`delete` (actorpath, scriptslave) | Standard allocator (not zone) | Safe — independent of engine zone |
+### Dead code: SP_trigger_* in g_spawn.cpp
 
-All memory paths in these entity families are routed through `Z_Malloc`/`Z_Free` (directly or via `gi`/`SV_*` wrappers), which are protected by `Z_MarkShutdown()`.
+The `spawns[]` table in `g_spawn.cpp` contains entries for `SP_trigger_always`, `SP_trigger_multiple`, `SP_trigger_push`, `SP_trigger_teleport`, and `SP_trigger_hurt`. These functions are forward-declared but never defined. This is harmless dead code because MOHAA's entity spawning uses `SpawnArgs::SpawnInternal()` (CLASS_DECLARATION system) and never reaches `G_CallSpawn()` for trigger entities.
 
-### Error handling
-
-- **No `gi.Error(ERR_FATAL)` calls** in any audited file — no risk of `exit()` under Godot
-- **`gi.Error(ERR_DROP)` calls** in gravpath.cpp (3 instances: lines 303, 326, 356) and scriptmaster.cpp — correctly handled by longjmp recovery under Godot
-- **`ScriptError()` calls** in animate.cpp and scriptslave.cpp — uses C++ exception mechanism (`ScriptException`), not process termination
-- **No `exit()` or `abort()` calls** in any audited file
-
-### GODOT_GDEXTENSION guards
-
-**None of the 26 audited files contain or require `#ifdef GODOT_GDEXTENSION` guards.** The Godot-specific behaviour is handled at lower levels:
-- `container.h` — routes `CONTAINER_Alloc`/`CONTAINER_Free` to `Z_Malloc`/`Z_Free`
-- `mem_blockalloc.cpp` — routes `MEM_Alloc`/`MEM_Free` to `Z_Malloc`/`Z_Free`
-- `con_arrayset.h`, `con_set.h` — route `ARRAYSET_Alloc`/`SET_Alloc` to `Z_Malloc`/`Z_Free`
-- `memory.c` — `Z_MarkShutdown()` guard for safe teardown
-
-### Minor notes (non-blocking)
-
-1. **Static allocation in scriptslave.cpp** (line ~1886): `static cSpline<4, 512> *pTmpPath = new cSpline<4, 512>;` — allocated once, never freed. Pre-existing upstream pattern; single allocation, negligible impact. Not Godot-specific.
-2. **Static `Container` objects in gamescript.cpp** (lines 358–360): `archivedEvents`, `archivedStrings`, `archivedPointerFixup` — destructors call `CONTAINER_Free` → `Z_Free` → no-op after `Z_MarkShutdown()`. Safe.
-3. **`gi.Hidemenu` call path in ScriptMaster::Reset()** — during global destruction, `m_menus` is empty (cleared during step 1), so the `Hidemenu()` loop body never executes. Safe.
-
-### Conclusion
-
-The path, script, and animate entity families are **fully compatible** with the Godot GDExtension build. The existing safety mechanisms (`Z_MarkShutdown`, `CONTAINER_Free`→`Z_Free` redirect, `gi`→`SV_*`→`Z_*` routing, `EventSystemStarted` guard) provide comprehensive protection. No code changes are required for these entity families.
+### Files modified:
+- `code/fgame/trigger.cpp` — fixed TriggerReverb CLASS_DECLARATION classname from `"trigger_music"` to `"trigger_reverb"`
