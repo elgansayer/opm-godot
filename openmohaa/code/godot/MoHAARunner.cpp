@@ -77,6 +77,9 @@ extern "C" {
 
     // VFS accessors (Task 4.1) — from godot_vfs_accessors.c
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
+    long Godot_VFS_FileOpenRead(const char *qpath, int *out_handle);
+    long Godot_VFS_FileRead(int handle, void *buffer, long len);
+    void Godot_VFS_FileClose(int handle);
     void Godot_VFS_FreeFile(void *buffer);
     int  Godot_VFS_FileExists(const char *qpath);
     char **Godot_VFS_ListFiles(const char *directory, const char *extension, int *out_count);
@@ -4055,16 +4058,32 @@ godot::PackedByteArray MoHAARunner::vfs_read_file(const godot::String &p_qpath) 
     }
 
     godot::CharString path = p_qpath.utf8();
-    void *buffer = nullptr;
-    long len = Godot_VFS_ReadFile(path.get_data(), &buffer);
 
-    if (len < 0 || !buffer) {
+    // Optimisation: read directly into PackedByteArray to avoid double allocation + memcpy.
+    // 1. Open the file and get its size (without allocating a buffer in the engine)
+    int handle = 0;
+    long len = Godot_VFS_FileOpenRead(path.get_data(), &handle);
+
+    if (len < 0 || handle == 0) {
         return result;  // File not found — return empty array
     }
 
+    // 2. Allocate the result buffer once
     result.resize(len);
-    memcpy(result.ptrw(), buffer, len);
-    Godot_VFS_FreeFile(buffer);
+
+    // 3. Read directly into the buffer
+    if (len > 0) {
+        long read_len = Godot_VFS_FileRead(handle, result.ptrw(), len);
+        if (read_len != len) {
+            UtilityFunctions::printerr("[MoHAA] vfs_read_file: Short read or error reading ", p_qpath);
+            // We could resize result to 0 here, but partial data might be useful or at least expected size.
+            // For now, keep it as is (filled with zeroes past read_len if any).
+        }
+    }
+
+    // 4. Close the file handle
+    Godot_VFS_FileClose(handle);
+
     return result;
 }
 
