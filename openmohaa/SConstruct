@@ -400,3 +400,16 @@ test_render_sort_prog = test_env.Program(
     target="bin/test_render_sort",
     source=test_render_sort_sources,
 )
+
+# Test for godot_shader_props (no files)
+test_sp_env = env.Clone()
+test_sp_env.Prepend(CPPPATH=["code/godot/tests/mock_godot_cpp"])
+test_sp_env.Append(CPPPATH=["code/godot"])
+
+# Clear LIBS to avoid linking godot-cpp (we mock it)
+test_sp_env.Replace(LIBS=[])
+
+test_sp_prog = test_sp_env.Program(
+    target="bin/test_shader_props_no_files",
+    source=["code/godot/tests/test_shader_props_no_files.cpp"]
+)
