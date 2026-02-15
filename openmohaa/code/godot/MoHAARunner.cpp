@@ -2398,24 +2398,37 @@ void MoHAARunner::update_swipe_effects() {
     arrays[Mesh::ARRAY_TEX_UV] = gUV;
     arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
-    Ref<ArrayMesh> smesh;
-    smesh.instantiate();
+    Ref<ArrayMesh> smesh = swipe_mesh->get_mesh();
+    if (smesh.is_null()) {
+        smesh.instantiate();
+        swipe_mesh->set_mesh(smesh);
+    }
+    smesh->clear_surfaces();
     smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
-    swipe_mesh->set_mesh(smesh);
 
     // Material: alpha-blended, unshaded, double-sided
     Ref<StandardMaterial3D> mat;
-    mat.instantiate();
-    mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-    mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+    Ref<Material> override_mat = swipe_mesh->get_surface_override_material(0);
+    if (override_mat.is_valid()) {
+        mat = override_mat;
+    } else {
+        mat.instantiate();
+        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+        swipe_mesh->set_surface_override_material(0, mat);
+    }
+
     if (hShader > 0) {
         Ref<ImageTexture> tex = get_shader_texture(hShader);
         if (tex.is_valid()) {
             mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+        } else {
+            mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
         }
+    } else {
+        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
     }
-    swipe_mesh->set_surface_override_material(0, mat);
     swipe_mesh->set_global_transform(Transform3D());
     swipe_mesh->set_visible(true);
 }
