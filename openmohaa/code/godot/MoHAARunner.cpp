@@ -306,6 +306,10 @@ extern "C" {
 
     // Phase 59: Mouse reset — from godot_input_bridge.c
     void  Godot_ResetMousePosition(void);
+
+    // Cursor image accessor — from stubs.cpp
+    int   Godot_GetPendingCursorImage(const unsigned char **out_pixels, int *out_w, int *out_h);
+    void  Godot_ClearPendingCursorImage(void);
 }
 
 // ──────────────────────────────────────────────
@@ -3303,6 +3307,10 @@ void MoHAARunner::update_2d_overlay() {
         hud_control = memnew(Control);
         hud_control->set_name("HUDControl");
         hud_control->set_anchors_preset(Control::PRESET_FULL_RECT);
+        // CRITICAL: Allow mouse events to pass through to _unhandled_input().
+        // Default MOUSE_FILTER_STOP would eat all mouse clicks/motion,
+        // preventing the engine's UI system from receiving input.
+        hud_control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         hud_layer->add_child(hud_control);
 
         static bool logged_hud = false;
@@ -4196,6 +4204,32 @@ void MoHAARunner::_process(double delta) {
                 }
                 Godot_ResetMousePosition();
             }
+        }
+    }
+
+    // ── Phase 146: Custom cursor from engine (gfx/2d/mouse_cursor.tga) ──
+    // The engine's UI system calls IN_SetCursorFromImage() with raw RGBA
+    // pixel data.  We pick it up here and set Godot's custom cursor.
+    {
+        const unsigned char *cursor_pixels = nullptr;
+        int cw = 0, ch = 0;
+        if (Godot_GetPendingCursorImage(&cursor_pixels, &cw, &ch)) {
+            PackedByteArray pba;
+            pba.resize(cw * ch * 4);
+            memcpy(pba.ptrw(), cursor_pixels, cw * ch * 4);
+            Ref<Image> cursor_img = Image::create_from_data(cw, ch, false, Image::FORMAT_RGBA8, pba);
+            if (cursor_img.is_valid() && !cursor_img->is_empty()) {
+                Ref<ImageTexture> cursor_tex = ImageTexture::create_from_image(cursor_img);
+                if (cursor_tex.is_valid()) {
+                    Input *input = Input::get_singleton();
+                    if (input) {
+                        input->set_custom_mouse_cursor(cursor_tex, Input::CURSOR_ARROW, Vector2(0, 0));
+                        UtilityFunctions::print(String("[MoHAA] Custom cursor set: ") +
+                            String::num_int64(cw) + String("x") + String::num_int64(ch));
+                    }
+                }
+            }
+            Godot_ClearPendingCursorImage();
         }
     }
 
@@ -5333,20 +5367,18 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     // ── Mouse motion ──
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
-        Vector2 rel = motion_event->get_relative();
-        if (ui_active) {
-            // Phase 59: Forward mouse motion to UI for cursor movement
-            Godot_UI_HandleMouseMotion((int)rel.x, (int)rel.y);
-        } else if (mouse_captured) {
+        if (mouse_captured) {
             // Game mode: forward relative motion for freelook
+            Vector2 rel = motion_event->get_relative();
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
         } else {
-            // UI/menu mode: absolute position for cursor interaction.
-            // Transform from Godot viewport coordinates to engine virtual 640×480 space,
-            // accounting for letterbox/pillarbox offsets (inverse of rendering transform).
+            // UI/menu mode: transform absolute Godot viewport position to engine
+            // virtual 640×480 coordinates, accounting for letterbox/pillarbox offsets.
+            // This applies whether ui_active or not — the engine's cursor position
+            // (cl.mousex/cl.mousey) must track the visual Godot cursor exactly.
             Vector2 pos = motion_event->get_position();
             
-            // Inverse transform: subtract offset, then divide by scale
+            // Inverse of the rendering transform: subtract offset, divide by scale
             int ex = (int)((pos.x - ui_offset_x) / ui_scale_x);
             int ey = (int)((pos.y - ui_offset_y) / ui_scale_y);
             
@@ -5356,7 +5388,10 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
             if (ex >= ui_vid_w) ex = ui_vid_w - 1;
             if (ey >= ui_vid_h) ey = ui_vid_h - 1;
             
-            Godot_InjectMousePosition(ex, ey);
+            // Set engine cursor position directly — avoids delta-accumulation drift
+            // and ensures perfect 1:1 mapping between the visual OS cursor and the
+            // engine's hit-test position used by UIWindowManager.
+            Godot_Client_SetMousePos(ex, ey);
         }
         return;
     }

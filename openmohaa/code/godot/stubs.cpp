@@ -308,11 +308,67 @@ void IN_GetMousePosition(int *x, int *y) {
     Godot_Client_GetMousePos(x, y);
 }
 
+// ── Cursor image capture for Godot-side custom cursor ──
+// IN_SetCursorFromImage stores the raw RGBA pixels here; MoHAARunner
+// picks them up via Godot_GetPendingCursorImage() and creates a Godot
+// custom cursor texture with Input::set_custom_mouse_cursor().
+static byte  *s_cursor_pixels  = NULL;
+static int    s_cursor_width   = 0;
+static int    s_cursor_height  = 0;
+static int    s_cursor_pending = 0;
+
 qboolean IN_SetCursorFromImage(const byte *pic, int width, int height, pCursorFree cursorFreeFn) {
-    return qfalse;
+    if (!pic || width <= 0 || height <= 0) return qfalse;
+
+    // Free previous buffer
+    if (s_cursor_pixels) {
+        free(s_cursor_pixels);
+        s_cursor_pixels = NULL;
+    }
+
+    int size = width * height * 4;  // RGBA
+    s_cursor_pixels = (byte *)malloc(size);
+    if (!s_cursor_pixels) return qfalse;
+
+    memcpy(s_cursor_pixels, pic, size);
+    s_cursor_width  = width;
+    s_cursor_height = height;
+    s_cursor_pending = 1;
+
+    // Free the source image if a free function was provided.
+    // (Unlike SDL which references pic directly via SDL_CreateRGBSurfaceWithFormatFrom,
+    //  we memcpy'd the data, so the original can be freed immediately.)
+    if (cursorFreeFn) {
+        cursorFreeFn((byte *)pic);
+    }
+
+    return qtrue;
 }
 
 void IN_FreeCursor(void) {
+    if (s_cursor_pixels) {
+        free(s_cursor_pixels);
+        s_cursor_pixels = NULL;
+    }
+    s_cursor_width = 0;
+    s_cursor_height = 0;
+    s_cursor_pending = 0;
+}
+
+/* Accessor for MoHAARunner to retrieve pending cursor image data.
+ * Returns 1 if a new cursor image is waiting, 0 otherwise.
+ * After the caller consumes the data, it should call
+ * Godot_ClearPendingCursorImage() to acknowledge. */
+int Godot_GetPendingCursorImage(const byte **out_pixels, int *out_w, int *out_h) {
+    if (!s_cursor_pending || !s_cursor_pixels) return 0;
+    if (out_pixels) *out_pixels = s_cursor_pixels;
+    if (out_w) *out_w = s_cursor_width;
+    if (out_h) *out_h = s_cursor_height;
+    return 1;
+}
+
+void Godot_ClearPendingCursorImage(void) {
+    s_cursor_pending = 0;
 }
 
 qboolean IN_IsCursorActive(void) {
