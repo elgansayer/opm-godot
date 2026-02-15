@@ -3710,7 +3710,7 @@ void MoHAARunner::update_audio(double delta) {
         int64_t posHash = ((int64_t)(qx & 0xFFF)) | ((int64_t)(qy & 0xFFF) << 12) | ((int64_t)(qz & 0xFFF) << 24);
         return ((int64_t)sfxHandle << 36) | posHash;
     };
-    std::unordered_map<int64_t, int> new_loops_64;
+    new_loops_64.clear();
 
     for (int i = 0; i < loop_count; i++) {
         float origin[3], velocity[3];

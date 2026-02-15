@@ -303,6 +303,7 @@ private:
     std::unordered_map<int, Ref<AudioStream>> sfx_cache;              // sfxHandle → loaded audio stream (WAV or MP3)
     // Looping sound tracking (Phase 40): key = composite of sfxHandle + quantised position
     std::unordered_map<int64_t, int> active_loops;                   // loop key → 3D player index
+    std::unordered_map<int64_t, int> new_loops_64;                   // reuse for tracking active loops each frame
     int next_3d_player = 0;                                          // Round-robin index for 3D pool
     int next_2d_player = 0;                                          // Round-robin index for 2D pool
     static const int MAX_3D_PLAYERS = 32;
