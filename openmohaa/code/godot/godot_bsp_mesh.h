@@ -116,6 +116,12 @@ int Godot_BSP_LightForPoint(const float point[3], float ambientLight[3],
 /* Phase 31: PVS visibility */
 int Godot_BSP_InPVS(const float p1[3], const float p2[3]);
 
+/* PVS cluster queries */
+int Godot_BSP_PointLeaf(const float pt[3]);
+int Godot_BSP_PointCluster(const float pt[3]);
+int Godot_BSP_ClusterVisible(int source, int target);
+int Godot_BSP_GetNumClusters(void);
+
 /// Mark-fragment query: clip a decal polygon against the world BSP.
 /// Output arrays (fragFirstPoint, fragNumPoints, fragIIndex) must
 /// each be at least maxFragments entries.
@@ -140,6 +146,12 @@ int Godot_BSP_MarkFragmentsForInlineModel(
 
 #ifdef __cplusplus
 }
+#endif
+
+/* PVS cluster mesh accessors (C++ only — return Godot types) */
+#ifdef __cplusplus
+int Godot_BSP_GetPVSNumClusters();
+godot::MeshInstance3D *Godot_BSP_GetClusterMesh(int cluster);
 #endif
 
 #endif // GODOT_BSP_MESH_H

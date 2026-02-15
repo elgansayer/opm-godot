@@ -271,6 +271,12 @@ static std::vector<BSPFogVolume> s_fog_volumes;
 /* ── Phase 74: Flare cache ── */
 static std::vector<BSPFlare> s_flares;
 
+/* ── PVS cluster mesh tracking ──
+ * Maps cluster index → MeshInstance3D node for per-cluster visibility toggling.
+ * Built during Godot_BSP_LoadWorld(), queried each frame by MoHAARunner. */
+static std::vector<godot::MeshInstance3D *> s_cluster_meshes;  /* indexed by cluster */
+static int s_pvs_num_clusters = 0;
+
 /* ===================================================================
  *  Retained BSP data for mark fragment (decal) queries
  *
@@ -288,6 +294,7 @@ struct BSPMarkData {
     /* Leaves — terminal BSP nodes */
     /* Normalised to unified format (all leaves have same fields) */
     struct MarkLeaf {
+        int32_t cluster;
         int32_t firstLeafSurface;
         int32_t numLeafSurfaces;
         int32_t firstTerraPatch;
@@ -527,13 +534,13 @@ static BezierVert bezier_eval(const bsp_drawvert_t *ctrl[3][3], float s, float t
             // Texture UVs
             result.uv  += Vector2(cv->st[0], cv->st[1]) * w;
             result.lm_uv += Vector2(cv->lightmap[0], cv->lightmap[1]) * w;
-            // Vertex colour with overbright shift (overbrightBits=1)
+            // Vertex colour
             result.col += Color(
-                fmin(1.0f, (cv->color[0] / 255.0f) * 2.0f),
-                fmin(1.0f, (cv->color[1] / 255.0f) * 2.0f),
-                fmin(1.0f, (cv->color[2] / 255.0f) * 2.0f),
+                cv->color[0] / 255.0f,
+                cv->color[1] / 255.0f,
+                cv->color[2] / 255.0f,
                 cv->color[3] / 255.0f
-                ) * w;
+            ) * w;
         }
     }
 
@@ -659,103 +666,53 @@ static Ref<ImageTexture> load_texture(const char *shader_name) {
     auto it = s_texture_cache.find(key);
     if (it != s_texture_cache.end()) return it->second;
 
-    // ── Step 1: Look up .shader definition to find the real texture path ──
-    // Mirrors R_FindShader: the shader name may be an abstract identifier.
-    // The actual texture file path lives in the first non-lightmap stage's
-    // "map" directive within the .shader definition.
-    const char *texture_path = shader_name;  // fallback: use shader name as path
-    const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
-    if (sp && sp->stage_count > 0) {
-        /* Select the best diffuse texture from the shader stages.
-         * Q3 shaders can have multiple stages: lightmap, environment map,
-         * diffuse texture.  We want the actual diffuse texture, skipping:
-         *   - Lightmap stages ($lightmap)
-         *   - Environment map stages (tcGen environment)
-         *   - $whiteimage special textures
-         * If only environment/lightmap stages exist, fall back to the
-         * first non-lightmap stage. */
-        const char *fallback_path = nullptr;
-        for (int st = 0; st < sp->stage_count; st++) {
-            if (sp->stages[st].isLightmap) continue;
-            if (!sp->stages[st].map[0]) continue;
-            if (strcmp(sp->stages[st].map, "$lightmap") == 0) continue;
-            if (strcmp(sp->stages[st].map, "$whiteimage") == 0) continue;
-            /* Remember first valid non-lightmap texture as fallback */
-            if (!fallback_path) fallback_path = sp->stages[st].map;
-            /* Skip environment map stages — these are reflections, not
-             * the actual diffuse texture */
-            if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
-            texture_path = sp->stages[st].map;
-            break;
-        }
-        /* If we only skipped env stages, use the first valid one */
-        if (texture_path == shader_name && fallback_path) {
-            texture_path = fallback_path;
-        }
+    // Strip any existing extension from the shader name
+    char base[256];
+    strncpy(base, shader_name, sizeof(base) - 5);
+    base[sizeof(base) - 5] = '\0';
+    int blen = (int)strlen(base);
+
+    // Remove extension if present (.tga, .jpg, .bmp, etc.)
+    if (blen > 4 && base[blen - 4] == '.') {
+        base[blen - 4] = '\0';
+        blen -= 4;
     }
 
-    // ── Step 2: Try loading the texture from VFS with extension probing ──
-    // Try the resolved texture_path first, then fall back to shader_name
-    // if they differ (handles both defined and implicit shaders).
-    const char *candidates[3] = { texture_path, nullptr, nullptr };
-    if (strcmp(texture_path, shader_name) != 0) {
-        candidates[1] = shader_name;  // also try the raw name as fallback
-    }
+    // Extensions to try in order (matching engine behaviour)
+    static const char *extensions[] = { ".jpg", ".tga", nullptr };
 
-    for (int c = 0; candidates[c]; c++) {
-        // Strip any existing extension from the candidate path
-        char base[256];
-        strncpy(base, candidates[c], sizeof(base) - 5);
-        base[sizeof(base) - 5] = '\0';
-        int blen = (int)strlen(base);
+    for (int e = 0; extensions[e]; e++) {
+        char path[264];
+        snprintf(path, sizeof(path), "%s%s", base, extensions[e]);
 
-        // Remove extension if present (.tga, .jpg, .bmp, etc.)
-        if (blen > 4 && base[blen - 4] == '.') {
-            base[blen - 4] = '\0';
-            blen -= 4;
+        void *raw = nullptr;
+        long len = Godot_VFS_ReadFile(path, &raw);
+        if (len <= 0 || !raw) continue;
+
+        // Build PackedByteArray from raw data
+        PackedByteArray buf;
+        buf.resize(len);
+        memcpy(buf.ptrw(), raw, len);
+        Godot_VFS_FreeFile(raw);
+
+        // Try loading via Godot's Image class
+        Ref<Image> img;
+        img.instantiate();
+        Error err;
+
+        if (extensions[e][1] == 'j') {
+            err = img->load_jpg_from_buffer(buf);
+        } else {
+            err = img->load_tga_from_buffer(buf);
         }
 
-        // Extensions to try in order (matching engine: no ext, .tga, .jpg, .png)
-        static const char *extensions[] = { "", ".tga", ".jpg", ".png", nullptr };
+        if (err == OK && img->get_width() > 0 && img->get_height() > 0) {
+            // Generate mipmaps for better rendering quality
+            img->generate_mipmaps();
 
-        for (int e = 0; extensions[e]; e++) {
-            char path[264];
-            snprintf(path, sizeof(path), "%s%s", base, extensions[e]);
-
-            void *raw = nullptr;
-            long len = Godot_VFS_ReadFile(path, &raw);
-            if (len <= 0 || !raw) continue;
-
-            // Build PackedByteArray from raw data
-            PackedByteArray buf;
-            buf.resize(len);
-            memcpy(buf.ptrw(), raw, len);
-            Godot_VFS_FreeFile(raw);
-
-            // Detect format by magic bytes (more robust than extension)
-            Ref<Image> img;
-            img.instantiate();
-            Error err = ERR_FILE_UNRECOGNIZED;
-            const uint8_t *data = buf.ptr();
-
-            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
-                err = img->load_jpg_from_buffer(buf);
-            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
-                err = img->load_png_from_buffer(buf);
-            } else {
-                // TGA has no reliable magic — try TGA first, then JPG
-                err = img->load_tga_from_buffer(buf);
-                if (err != OK) {
-                    err = img->load_jpg_from_buffer(buf);
-                }
-            }
-
-            if (err == OK && img->get_width() > 0 && img->get_height() > 0) {
-                img->generate_mipmaps();
-                Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
-                s_texture_cache[key] = tex;
-                return tex;
-            }
+            Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
+            s_texture_cache[key] = tex;
+            return tex;
         }
     }
 
@@ -794,20 +751,13 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
             // Light-shift: mimic R_ColorShiftLightingBytes with overbrightBits=1
-            // Shift left by 1 (multiply by 2), then normalise to preserve
-            // colour ratios when any channel overflows.
             int r = src[p * 3 + 0] << 1;
             int g = src[p * 3 + 1] << 1;
             int b = src[p * 3 + 2] << 1;
-            // Normalise by max-component to preserve hue
-            int mx = r;
-            if (g > mx) mx = g;
-            if (b > mx) mx = b;
-            if (mx > 255) {
-                r = r * 255 / mx;
-                g = g * 255 / mx;
-                b = b * 255 / mx;
-            }
+            // Clamp and normalise
+            if (r > 255) r = 255;
+            if (g > 255) g = 255;
+            if (b > 255) b = 255;
 
             dst[p * 4 + 0] = (uint8_t)r;
             dst[p * 4 + 1] = (uint8_t)g;
@@ -870,7 +820,7 @@ static bool is_tool_shader(const char *name) {
  * ================================================================ */
 
 static Ref<ArrayMesh> batches_to_array_mesh(
-    std::unordered_map<int64_t, ShaderBatch> &batches,
+    std::unordered_map<int, ShaderBatch> &batches,
     int *out_tex_loaded = nullptr,
     int *out_tex_failed = nullptr)
 {
@@ -923,13 +873,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
         // Material with texture and shader properties
         Ref<StandardMaterial3D> mat;
         mat.instantiate();
-        // BSP world surfaces are single-sided (only front faces exist).
-        // Default to CULL_BACK; shader definitions may override.
-        mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-        // MOHAA BSP lighting is fully baked into lightmaps and vertex
-        // colours.  Disable Godot's realtime lighting so surfaces whose
-        // normals face away from the DirectionalLight3D don't go dark.
-        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
 
         bool has_texture = false;
         if (batch.shader_name) {
@@ -940,9 +884,6 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                 tex_ok++;
             } else {
                 tex_bad++;
-                UtilityFunctions::print(String("[BSP] Missing texture for shader: '") +
-                    batch.shader_name + "' (batch " + String::num_int64(surface_idx) +
-                    ", " + String::num_int64((int)batch.positions.size()) + " verts)");
             }
 
             // Apply shader transparency / cull from .shader definitions
@@ -975,7 +916,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                         mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
                         break;
                     case SHADER_CULL_NONE:
-                        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                        /* Already CULL_DISABLED from default */
                         break;
                 }
             }
@@ -1026,7 +967,7 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
                              const bsp_drawvert_t *verts, int num_verts,
                              const int32_t *indices, int num_indices,
                              const bsp_shader_t *shaders, int num_shaders,
-                             std::unordered_map<int64_t, ShaderBatch> &batches,
+                             std::unordered_map<int, ShaderBatch> &batches,
                              int &skipped_nodraw, int &skipped_sky)
 {
     // Skip unsupported surface types
@@ -1053,11 +994,8 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (surf->numIndexes <= 0) return false;
     }
 
-    // Get or create batch — keyed by (shader + lightmap) composite.
-    // Each unique combination of shader and lightmap page gets its own
-    // batch so that every surface receives the correct lightmap texture.
-    int64_t batch_key = ((int64_t)surf->shaderNum << 16) | (int64_t)(surf->lightmapNum & 0xFFFF);
-    ShaderBatch &batch = batches[batch_key];
+    // Get or create batch
+    ShaderBatch &batch = batches[surf->shaderNum];
     if (!batch.shader_name && surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
         batch.shader_name = shaders[surf->shaderNum].shader;
         batch.surface_flags = shaders[surf->shaderNum].surfaceFlags;
@@ -1085,12 +1023,9 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         batch.normals.push_back(id_to_godot_dir(dv->normal));
         batch.uvs.push_back(Vector2(dv->st[0], dv->st[1]));
         batch.lm_uvs.push_back(Vector2(dv->lightmap[0], dv->lightmap[1]));
-        // Vertex colour with overbright shift (overbrightBits=1)
         batch.colors.push_back(Color(
-            fmin(1.0f, (dv->color[0] / 255.0f) * 2.0f),
-            fmin(1.0f, (dv->color[1] / 255.0f) * 2.0f),
-            fmin(1.0f, (dv->color[2] / 255.0f) * 2.0f),
-            dv->color[3] / 255.0f));
+            dv->color[0] / 255.0f, dv->color[1] / 255.0f,
+            dv->color[2] / 255.0f, dv->color[3] / 255.0f));
     }
 
     for (int i = 0; i < surf->numIndexes; i++) {
@@ -1260,6 +1195,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 const bsp_leaf_t_v17 *pl = reinterpret_cast<const bsp_leaf_t_v17 *>(data + l_leaves->fileofs);
                 s_mark_data.leaves.resize(nl);
                 for (int i = 0; i < nl; i++) {
+                    s_mark_data.leaves[i].cluster          = pl[i].cluster;
                     s_mark_data.leaves[i].firstLeafSurface = pl[i].firstLeafSurface;
                     s_mark_data.leaves[i].numLeafSurfaces  = pl[i].numLeafSurfaces;
                     s_mark_data.leaves[i].firstTerraPatch  = pl[i].firstTerraPatch;
@@ -1270,6 +1206,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 const bsp_leaf_t *pl = reinterpret_cast<const bsp_leaf_t *>(data + l_leaves->fileofs);
                 s_mark_data.leaves.resize(nl);
                 for (int i = 0; i < nl; i++) {
+                    s_mark_data.leaves[i].cluster          = pl[i].cluster;
                     s_mark_data.leaves[i].firstLeafSurface = pl[i].firstLeafSurface;
                     s_mark_data.leaves[i].numLeafSurfaces  = pl[i].numLeafSurfaces;
                     s_mark_data.leaves[i].firstTerraPatch  = pl[i].firstTerraPatch;
@@ -1465,12 +1402,36 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
     }
 
-    // ── 5. Accumulate world surfaces into per-(shader, lightmap) batches ──
-    // Each batch groups surfaces that share both the same shader AND the
-    // same lightmap page.  This ensures each surface gets the correct
-    // lightmap atlas — different surfaces with the same shader may reference
-    // different 128×128 lightmap pages.
-    std::unordered_map<int64_t, ShaderBatch> batches;
+    // ── 5. Build surface-to-cluster mapping from leaf data ──
+    //
+    // Walk all BSP leaves and build a mapping from surface index to the
+    // PVS cluster that "owns" it. A surface may be referenced by multiple
+    // leaves; we assign it to the first cluster encountered. Surfaces with
+    // no cluster assignment (cluster -1 or not referenced) go into a
+    // special "always-visible" group (cluster -1).
+    std::vector<int> surface_cluster(num_surfaces, -1);  // -1 = unassigned
+
+    if (s_mark_data.loaded && !s_mark_data.leaves.empty()) {
+        for (int li = 0; li < (int)s_mark_data.leaves.size(); li++) {
+            const auto &leaf = s_mark_data.leaves[li];
+            if (leaf.cluster < 0) continue;  // solid/void leaf
+            for (int si = 0; si < leaf.numLeafSurfaces; si++) {
+                int lsIdx = leaf.firstLeafSurface + si;
+                if (lsIdx < 0 || lsIdx >= (int)s_mark_data.leafSurfaces.size())
+                    continue;
+                int surfIdx = s_mark_data.leafSurfaces[lsIdx];
+                if (surfIdx < 0 || surfIdx >= num_surfaces) continue;
+                if (surface_cluster[surfIdx] < 0) {
+                    surface_cluster[surfIdx] = leaf.cluster;
+                }
+            }
+        }
+    }
+
+    // ── 5b. Accumulate world surfaces into per-cluster, per-shader batches ──
+    // Key: cluster → {shaderNum → ShaderBatch}
+    // Cluster -1 is the "always visible" fallback group.
+    std::unordered_map<int, std::unordered_map<int, ShaderBatch>> cluster_batches;
 
     int skipped_nodraw = 0;
     int skipped_type   = 0;
@@ -1479,31 +1440,10 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     int processed      = 0;
     int processed_patches = 0;
 
-    // Determine world model surface range — model 0 defines which surfaces
-    // are world geometry.  Surfaces outside this range belong to sub-models.
-    int world_first = 0;
-    int world_count = num_surfaces;
-    if (bsp_models && num_models > 0) {
-        world_first = bsp_models[0].firstSurface;
-        world_count = bsp_models[0].numSurfaces;
-        UtilityFunctions::print(String("[BSP] Model 0 (world): firstSurface=") +
-            String::num_int64(world_first) + " numSurfaces=" +
-            String::num_int64(world_count) + " total_surfaces=" +
-            String::num_int64(num_surfaces));
-        if (world_count != num_surfaces) {
-            UtilityFunctions::print(String("[BSP] WARNING: model 0 has ") +
-                String::num_int64(world_count) + " surfaces but BSP has " +
-                String::num_int64(num_surfaces) +
-                " — extra surfaces may be sub-model surfaces!");
-        }
-    }
-    int world_end = world_first + world_count;
-    if (world_end > num_surfaces) world_end = num_surfaces;
-
     /* Phase 74: Collect flare surface positions */
     s_flares.clear();
 
-    for (int s = world_first; s < world_end; s++) {
+    for (int s = 0; s < num_surfaces; s++) {
         const bsp_surface_t *surf = &surfaces[s];
 
         // Skip surfaces belonging to brush sub-models — they render at
@@ -1558,7 +1498,8 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
 
         if (process_surface(surf, s, verts, num_verts, indices, num_indices,
-                            shaders, num_shaders, batches,
+                            shaders, num_shaders,
+                            cluster_batches[surface_cluster[s]],
                             skipped_nodraw, skipped_sky)) {
             if (surf->surfaceType == MST_PATCH) processed_patches++;
             processed++;
@@ -1570,7 +1511,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             String::num_int64((int64_t)s_flares.size()) + " flare surfaces.");
     }
 
-    // ── 5b. Load and process terrain patches (LUMP_TERRAIN) ──
+    // ── 5c. Load and process terrain patches (LUMP_TERRAIN) ──
     //
     // MOHAA terrain is a separate system from BSP surfaces. Each patch
     // covers 512×512 world units with a 9×9 heightmap grid.  We render
@@ -1606,22 +1547,40 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             // Skip patches with invalid lightmap scale
             if (patch->lmapScale == 0) continue;
 
-            // Get or create shader batch — keyed by (shader + lightmap)
-            int lm_num = (patch->iLightMap > 0) ? (int)patch->iLightMap : -1;
-            int64_t terrain_key = ((int64_t)patch->iShader << 16) | (int64_t)(lm_num & 0xFFFF);
-            ShaderBatch &batch = batches[terrain_key];
+            // Compute world-space origin
+            float x0 = (float)((int)patch->x << 6);
+            float y0 = (float)((int)patch->y << 6);
+            float z0 = (float)patch->iBaseHeight;
+
+            // Determine PVS cluster for this terrain patch from its centre
+            float terrain_centre[3] = { x0 + 256.0f, y0 + 256.0f, z0 + 128.0f };
+            int terrain_cluster = -1;
+            if (s_mark_data.loaded && !s_mark_data.nodes.empty()) {
+                int nodeNum = 0;
+                while (nodeNum >= 0) {
+                    if (nodeNum >= (int)s_mark_data.nodes.size()) break;
+                    const bsp_node_t &nd = s_mark_data.nodes[nodeNum];
+                    if (nd.planeNum < 0 || nd.planeNum >= (int)s_mark_data.planes.size()) break;
+                    const bsp_plane_t &pl = s_mark_data.planes[nd.planeNum];
+                    float d = terrain_centre[0]*pl.normal[0] + terrain_centre[1]*pl.normal[1] +
+                              terrain_centre[2]*pl.normal[2] - pl.dist;
+                    nodeNum = (d >= 0) ? nd.children[0] : nd.children[1];
+                }
+                if (nodeNum < 0) {
+                    int leafIdx = -(nodeNum + 1);
+                    if (leafIdx >= 0 && leafIdx < (int)s_mark_data.leaves.size())
+                        terrain_cluster = s_mark_data.leaves[leafIdx].cluster;
+                }
+            }
+
+            // Get or create shader batch for this cluster
+            ShaderBatch &batch = cluster_batches[terrain_cluster][patch->iShader];
             if (!batch.shader_name) {
                 batch.shader_name = sh->shader;
             }
             if (batch.lightmap_num < 0 && patch->iLightMap > 0) {
                 batch.lightmap_num = (int)patch->iLightMap;
             }
-
-            // Compute world-space origin
-            float x0 = (float)((int)patch->x << 6);
-            float y0 = (float)((int)patch->y << 6);
-            float z0 = (float)patch->iBaseHeight;
-
             // Corner diffuse texture coordinates
             //   [0][0] = SW (col=0,row=0)
             //   [0][1] = NW (col=0,row=8)
@@ -1698,6 +1657,11 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
         }
     }
 
+    // Count total shader batches across all clusters
+    int total_shader_batches = 0;
+    for (auto &cp : cluster_batches)
+        total_shader_batches += (int)cp.second.size();
+
     UtilityFunctions::print(String("[BSP] Processed ") + String::num_int64(processed) +
                             " surfaces (" + String::num_int64(processed_patches) +
                             " patches tessellated), " +
@@ -1708,56 +1672,32 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                             " (sky), " + String::num_int64(skipped_type) +
                             " (flare), " + String::num_int64(skipped_bmodel) +
                             " (brushmodel). " +
-                            String::num_int64((int64_t)batches.size()) + " shader batches.");
+                            String::num_int64((int64_t)cluster_batches.size()) +
+                            " clusters, " +
+                            String::num_int64(total_shader_batches) + " shader batches.");
 
-    if (batches.empty()) {
+    if (cluster_batches.empty()) {
         UtilityFunctions::printerr("[BSP] No renderable surfaces found.");
         Godot_VFS_FreeFile(raw);
         return nullptr;
     }
 
-    // ── 6. Create world Godot ArrayMesh ──
-    /* Diagnostic: log how many batches have each transparency type */
-    {
-        int b_opaque = 0, b_alpha_test = 0, b_alpha_blend = 0, b_additive = 0, b_multi = 0, b_none = 0;
-        for (auto &kv : batches) {
-            const GodotShaderProps *sp = kv.second.shader_name ? Godot_ShaderProps_Find(kv.second.shader_name) : nullptr;
-            if (!sp) { b_none++; continue; }
-            switch (sp->transparency) {
-                case SHADER_OPAQUE: b_opaque++; break;
-                case SHADER_ALPHA_TEST: b_alpha_test++; break;
-                case SHADER_ALPHA_BLEND: b_alpha_blend++; break;
-                case SHADER_ADDITIVE: b_additive++; break;
-                case SHADER_MULTIPLICATIVE: b_multi++; break;
-            }
-        }
-        UtilityFunctions::print(String("[BSP] Batch transparency: ") +
-            String::num_int64(b_opaque) + " opaque, " +
-            String::num_int64(b_alpha_test) + " atest, " +
-            String::num_int64(b_alpha_blend) + " ablend, " +
-            String::num_int64(b_additive) + " add, " +
-            String::num_int64(b_multi) + " mul, " +
-            String::num_int64(b_none) + " no-def");
-        if (b_multi > 0 || b_alpha_blend > 0) {
-            for (auto &kv : batches) {
-                const GodotShaderProps *sp = kv.second.shader_name ? Godot_ShaderProps_Find(kv.second.shader_name) : nullptr;
-                if (sp && (sp->transparency == SHADER_MULTIPLICATIVE || sp->transparency == SHADER_ALPHA_BLEND)) {
-                    UtilityFunctions::print(String("[BSP]   TRANS batch: ") +
-                        String(kv.second.shader_name) +
-                        " t=" + String::num_int64((int)sp->transparency) +
-                        " verts=" + String::num_int64((int)kv.second.positions.size()));
-                }
-            }
-        }
-    }
+    // ── 6. Create per-cluster Godot ArrayMesh nodes for PVS culling ──
+    //
+    // Each PVS cluster gets its own MeshInstance3D so that MoHAARunner
+    // can toggle visibility per-cluster each frame based on the camera's
+    // PVS bitset. Cluster -1 is the "always-visible" fallback group.
     int tex_loaded = 0, tex_failed = 0;
-    Ref<ArrayMesh> mesh = batches_to_array_mesh(batches, &tex_loaded, &tex_failed);
-    int surface_idx = mesh->get_surface_count();
+    int clusters_with_geometry = 0;
 
-    UtilityFunctions::print(String("[BSP] Created world ArrayMesh with ") +
-                            String::num_int64(surface_idx) + " surfaces. " +
-                            "Textures loaded: " + String::num_int64(tex_loaded) +
-                            ", missing: " + String::num_int64(tex_failed));
+    // Determine the highest cluster index for the lookup table
+    int max_cluster = -1;
+    for (auto &cp : cluster_batches) {
+        if (cp.first > max_cluster) max_cluster = cp.first;
+    }
+    s_pvs_num_clusters = (max_cluster >= 0) ? (max_cluster + 1) : 0;
+    s_cluster_meshes.clear();
+    s_cluster_meshes.resize(s_pvs_num_clusters, nullptr);
 
     // ── 6b. Build brush sub-model meshes ──
     //
@@ -1772,14 +1712,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             int first = bsp_models[m].firstSurface;
             int count = bsp_models[m].numSurfaces;
 
-            if (m <= 15) {
-                UtilityFunctions::print(String("[BSP] Sub-model *") +
-                    String::num_int64(m) + " first=" + String::num_int64(first) +
-                    " count=" + String::num_int64(count) +
-                    " (total_surfaces=" + String::num_int64(num_surfaces) + ")");
-            }
-
-            std::unordered_map<int64_t, ShaderBatch> bm_batches;
+            std::unordered_map<int, ShaderBatch> bm_batches;
             int bm_skip_nd = 0, bm_skip_sky = 0;
 
             for (int si = first; si < first + count && si < num_surfaces; si++) {
@@ -1791,22 +1724,8 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             }
 
             if (!bm_batches.empty()) {
-                int bm_tex_ok = 0, bm_tex_bad = 0;
-                s_brush_models[m - 1] = batches_to_array_mesh(bm_batches, &bm_tex_ok, &bm_tex_bad);
+                s_brush_models[m - 1] = batches_to_array_mesh(bm_batches);
                 bmodels_built++;
-                if (bm_tex_bad > 0) {
-                    UtilityFunctions::print(String("[BSP] Brush sub-model *") +
-                        String::num_int64(m) + ": " +
-                        String::num_int64((int)bm_batches.size()) + " batches, " +
-                        String::num_int64(bm_tex_ok) + " tex ok, " +
-                        String::num_int64(bm_tex_bad) + " tex MISSING");
-                }
-            } else {
-                UtilityFunctions::print(String("[BSP] Brush sub-model *") +
-                    String::num_int64(m) + " has 0 visible batches (" +
-                    String::num_int64(count) + " surfaces, " +
-                    String::num_int64(bm_skip_nd) + " nodraw, " +
-                    String::num_int64(bm_skip_sky) + " sky)");
             }
         }
 
@@ -1853,14 +1772,59 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                                 " static model definitions.");
     }
 
-    // ── 7. Create scene tree nodes ──
+    // ── 7. Create scene tree with per-cluster MeshInstance3D nodes ──
     Node3D *root = memnew(Node3D);
     root->set_name("BSPMap");
 
-    MeshInstance3D *mi = memnew(MeshInstance3D);
-    mi->set_name("WorldGeometry");
-    mi->set_mesh(mesh);
-    root->add_child(mi);
+    Node3D *cluster_root = memnew(Node3D);
+    cluster_root->set_name("ClusterGeometry");
+    root->add_child(cluster_root);
+
+    // Always-visible group (cluster -1): surfaces not in any PVS cluster
+    MeshInstance3D *always_visible_mi = nullptr;
+    auto it_fallback = cluster_batches.find(-1);
+    if (it_fallback != cluster_batches.end() && !it_fallback->second.empty()) {
+        int tl = 0, tf = 0;
+        Ref<ArrayMesh> fb_mesh = batches_to_array_mesh(it_fallback->second, &tl, &tf);
+        tex_loaded += tl; tex_failed += tf;
+        if (fb_mesh.is_valid() && fb_mesh->get_surface_count() > 0) {
+            always_visible_mi = memnew(MeshInstance3D);
+            always_visible_mi->set_name("Cluster_AlwaysVisible");
+            always_visible_mi->set_mesh(fb_mesh);
+            cluster_root->add_child(always_visible_mi);
+            clusters_with_geometry++;
+        }
+    }
+
+    // Per-cluster meshes
+    for (auto &cp : cluster_batches) {
+        int cluster = cp.first;
+        if (cluster < 0) continue;  // already handled above
+
+        auto &shader_batches = cp.second;
+        if (shader_batches.empty()) continue;
+
+        int tl = 0, tf = 0;
+        Ref<ArrayMesh> cmesh = batches_to_array_mesh(shader_batches, &tl, &tf);
+        tex_loaded += tl; tex_failed += tf;
+        if (!cmesh.is_valid() || cmesh->get_surface_count() == 0) continue;
+
+        MeshInstance3D *cmi = memnew(MeshInstance3D);
+        cmi->set_name(String("Cluster_") + String::num_int64(cluster));
+        cmi->set_mesh(cmesh);
+        cluster_root->add_child(cmi);
+
+        if (cluster < s_pvs_num_clusters)
+            s_cluster_meshes[cluster] = cmi;
+
+        clusters_with_geometry++;
+    }
+
+    UtilityFunctions::print(String("[BSP] Created ") +
+                            String::num_int64(clusters_with_geometry) +
+                            " cluster mesh nodes. " +
+                            "Textures loaded: " + String::num_int64(tex_loaded) +
+                            ", missing: " + String::num_int64(tex_failed));
 
     // ── 8. Free BSP data ──
     Godot_VFS_FreeFile(raw);
@@ -1876,6 +1840,8 @@ void Godot_BSP_Unload() {
     s_brush_models.clear();
     s_fog_volumes.clear();
     s_flares.clear();
+    s_cluster_meshes.clear();  // PVS cluster references (nodes owned by scene tree)
+    s_pvs_num_clusters = 0;
     s_mark_data = BSPMarkData();  // release all retained mark fragment data
     s_world_data = BSPWorldData();  // release entity string, model bounds, lightgrid, PVS
     Godot_ShaderProps_Unload();
@@ -1933,6 +1899,22 @@ int Godot_BSP_GetFlareCount() {
 const BSPFlare *Godot_BSP_GetFlare(int index) {
     if (index < 0 || index >= (int)s_flares.size()) return nullptr;
     return &s_flares[index];
+}
+
+/* ===================================================================
+ *  PVS cluster mesh accessors
+ *
+ *  Called by MoHAARunner each frame to toggle per-cluster visibility
+ *  based on the camera's PVS bitset.
+ * ================================================================ */
+
+int Godot_BSP_GetPVSNumClusters() {
+    return s_pvs_num_clusters;
+}
+
+godot::MeshInstance3D *Godot_BSP_GetClusterMesh(int cluster) {
+    if (cluster < 0 || cluster >= (int)s_cluster_meshes.size()) return nullptr;
+    return s_cluster_meshes[cluster];
 }
 
 /* ===================================================================
@@ -2583,14 +2565,6 @@ void Godot_BSP_ResetEntityTokenParse(void)
     s_world_data.entityParseOffset = 0;
 }
 
-/* Phase 47: Raw entity string accessor for speaker entity parsing */
-const char *Godot_BSP_GetEntityString(void)
-{
-    if (!s_world_data.loaded || s_world_data.entityString.empty())
-        return nullptr;
-    return s_world_data.entityString.c_str();
-}
-
 /* Phase 19: Inline model bounds — from BSP model lump */
 void Godot_BSP_GetInlineModelBounds(int index, float *mins, float *maxs)
 {
@@ -2684,41 +2658,80 @@ int Godot_BSP_LightForPoint(const float point[3], float ambientLight[3],
     return 1;
 }
 
+/* ── PVS helper: walk BSP tree to find the leaf index containing a point ── */
+int Godot_BSP_PointLeaf(const float pt[3])
+{
+    if (!s_mark_data.loaded || s_mark_data.nodes.empty())
+        return -1;
+
+    int nodeNum = 0;
+    while (nodeNum >= 0) {
+        if (nodeNum >= (int)s_mark_data.nodes.size()) return -1;
+        const bsp_node_t &node = s_mark_data.nodes[nodeNum];
+        if (node.planeNum < 0 || node.planeNum >= (int)s_mark_data.planes.size()) return -1;
+        const bsp_plane_t &plane = s_mark_data.planes[node.planeNum];
+        float d = pt[0]*plane.normal[0] + pt[1]*plane.normal[1] + pt[2]*plane.normal[2] - plane.dist;
+        nodeNum = (d >= 0) ? node.children[0] : node.children[1];
+    }
+    return -(nodeNum + 1);
+}
+
+/* ── PVS helper: get the cluster index for a point in id Tech 3 coords ── */
+int Godot_BSP_PointCluster(const float pt[3])
+{
+    int leaf = Godot_BSP_PointLeaf(pt);
+    if (leaf < 0 || leaf >= (int)s_mark_data.leaves.size())
+        return -1;
+    return s_mark_data.leaves[leaf].cluster;
+}
+
+/* ── PVS helper: test if cluster 'target' is visible from cluster 'source' ── */
+int Godot_BSP_ClusterVisible(int source, int target)
+{
+    if (s_world_data.visData.empty() || s_world_data.numClusters <= 0)
+        return 1;  /* no PVS data — assume visible */
+    if (source < 0 || target < 0)
+        return 1;  /* outside world — assume visible */
+    if (source == target)
+        return 1;  /* same cluster — always visible */
+    if (source >= s_world_data.numClusters || target >= s_world_data.numClusters)
+        return 1;
+
+    int byteOfs = source * s_world_data.clusterBytes + (target >> 3);
+    if (byteOfs < 0 || byteOfs >= (int)s_world_data.visData.size())
+        return 1;
+
+    return (s_world_data.visData[byteOfs] & (1 << (target & 7))) ? 1 : 0;
+}
+
+/* ── PVS helper: number of PVS clusters in the loaded BSP ── */
+int Godot_BSP_GetNumClusters(void)
+{
+    return s_world_data.numClusters;
+}
+
 /* Phase 31: PVS query — check if two points are in the same PVS */
 int Godot_BSP_InPVS(const float p1[3], const float p2[3])
 {
-    /* Without retained BSP cluster info for arbitrary points, we'd need a
-     * full leaf-lookup.  We have the node tree and leaves retained in
-     * s_mark_data for mark fragments.  Use that for leaf lookup. */
     if (!s_world_data.loaded || s_world_data.numClusters <= 0 ||
         s_world_data.visData.empty() || !s_mark_data.loaded)
         return 1;  /* assume visible when no PVS data */
 
-    /* Find leaf for a point by walking the BSP tree */
-    auto findLeaf = [](const float pt[3]) -> int {
-        int nodeNum = 0;
-        while (nodeNum >= 0) {
-            if (nodeNum >= (int)s_mark_data.nodes.size()) return -1;
-            const bsp_node_t &node = s_mark_data.nodes[nodeNum];
-            if (node.planeNum < 0 || node.planeNum >= (int)s_mark_data.planes.size()) return -1;
-            const bsp_plane_t &plane = s_mark_data.planes[node.planeNum];
-            float d = pt[0]*plane.normal[0] + pt[1]*plane.normal[1] + pt[2]*plane.normal[2] - plane.dist;
-            nodeNum = (d >= 0) ? node.children[0] : node.children[1];
-        }
-        return -(nodeNum + 1);
-    };
+    int leaf1 = Godot_BSP_PointLeaf(p1);
+    int leaf2 = Godot_BSP_PointLeaf(p2);
 
-    int leaf1 = findLeaf(p1);
-    int leaf2 = findLeaf(p2);
+    if (leaf1 < 0 || leaf1 >= (int)s_mark_data.leaves.size() ||
+        leaf2 < 0 || leaf2 >= (int)s_mark_data.leaves.size())
+        return 1;
 
-    /* Look up cluster for each leaf — we stored cluster in MarkLeaf? No, 
-     * MarkLeaf doesn't store cluster.  We need leaf cluster info. */
-    /* Since MarkLeaf doesn't store cluster, and we don't retain the full
-     * leaf data, return true (conservative). This is an acceptable fallback
-     * since PVS is primarily an optimisation, not correctness. */
-    (void)leaf1;
-    (void)leaf2;
-    return 1;
+    int cluster1 = s_mark_data.leaves[leaf1].cluster;
+    int cluster2 = s_mark_data.leaves[leaf2].cluster;
+
+    /* Cluster -1 means the leaf is not in any visible cluster (solid/void) */
+    if (cluster1 < 0 || cluster2 < 0)
+        return 1;
+
+    return Godot_BSP_ClusterVisible(cluster1, cluster2);
 }
 
 }  /* extern "C" */

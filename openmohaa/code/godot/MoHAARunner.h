@@ -185,6 +185,12 @@ private:
     Node3D *bsp_map_node = nullptr;          // Currently loaded BSP mesh tree
     String loaded_bsp_name;                  // Path of the currently loaded BSP
 
+    // PVS cluster culling
+    int pvs_current_cluster = -1;            // Camera's current PVS cluster
+    float pvs_last_origin[3] = {0, 0, 0};   // Camera origin used for last PVS update (id coords)
+    int pvs_log_count = 0;                   // Limits PVS debug log messages per map
+    void update_pvs_visibility();            // Toggle per-cluster mesh visibility
+
     // Static BSP models (Phase 10)
     Node3D *static_model_root = nullptr;     // Container for TIKI static models from BSP
 
