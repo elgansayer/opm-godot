@@ -10,6 +10,7 @@
 
 // Define global variable for capturing error
 std::string g_mock_printerr_last;
+int g_mock_vfs_free_calls = 0;
 
 namespace godot {
     void UtilityFunctions::print(const String &msg) {
@@ -29,7 +30,9 @@ extern "C" {
         if (out_buffer) *out_buffer = nullptr;
         return 0; // 0 or negative indicates failure in engine
     }
-    void Godot_VFS_FreeFile(void *buffer) {}
+    void Godot_VFS_FreeFile(void *buffer) {
+        g_mock_vfs_free_calls++;
+    }
 
     // We don't need these for the failure path, but might need symbols
     char **Godot_VFS_ListFiles(const char *directory, const char *extension, int *out_count) {
@@ -87,6 +90,14 @@ int main() {
         passed = false;
     } else {
         std::cout << "SUCCESS: Error message verified." << std::endl;
+    }
+
+    // Verify VFS free was not called (since read failed)
+    if (g_mock_vfs_free_calls != 0) {
+        std::cerr << "FAILED: Godot_VFS_FreeFile called unexpectedly." << std::endl;
+        passed = false;
+    } else {
+        std::cout << "SUCCESS: Godot_VFS_FreeFile not called." << std::endl;
     }
 
     if (passed) {

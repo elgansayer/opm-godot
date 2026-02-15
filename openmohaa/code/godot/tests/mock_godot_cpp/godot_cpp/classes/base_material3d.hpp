@@ -39,7 +39,8 @@ public:
     };
     enum Flags {
         FLAG_ALBEDO_FROM_VERTEX_COLOR = 0,
-        FLAG_UV2_USE_TRIPLANAR = 1
+        FLAG_UV2_USE_TRIPLANAR = 1,
+        FLAG_USE_TEXTURE_REPEAT = 2
     };
 
     void set_cull_mode(CullMode mode) {}

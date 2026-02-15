@@ -400,3 +400,31 @@ test_render_sort_prog = test_env.Program(
     target="bin/test_render_sort",
     source=test_render_sort_sources,
 )
+
+# Test for bsp load failure (using mock godot-cpp)
+test_mock_env = env.Clone()
+
+# Remove real godot-cpp paths to force using mocks
+# We iterate a copy of CPPPATH to avoid issues while modifying
+original_cpppath = test_mock_env["CPPPATH"]
+new_cpppath = []
+for p in original_cpppath:
+    # Filter out paths that look like they belong to godot-cpp
+    if "godot-cpp" not in str(p):
+         new_cpppath.append(p)
+
+# Add our mock path
+new_cpppath.insert(0, "code/godot/tests/mock_godot_cpp")
+# Also need code/godot because the test includes headers from there
+new_cpppath.append("code/godot")
+
+test_mock_env.Replace(CPPPATH=new_cpppath)
+
+test_bsp_load_failure_sources = [
+    "code/godot/tests/test_bsp_load_failure.cpp",
+]
+
+test_bsp_load_failure_prog = test_mock_env.Program(
+    target="bin/test_bsp_load_failure",
+    source=test_bsp_load_failure_sources,
+)
