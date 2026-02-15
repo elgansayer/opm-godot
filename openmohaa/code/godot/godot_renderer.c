@@ -160,7 +160,7 @@ static int         gr_numShaders = 1;  /* slot 0 = sentinel */
  *  MoHAARunner reads via Godot_Renderer_Get2DCmd* accessors.
  * ---------------------------------------------------------------- */
 
-#define GR_MAX_2D_CMDS 4096
+#define GR_MAX_2D_CMDS 8192
 
 typedef enum {
     GR_2D_STRETCHPIC,  /* textured quad */
@@ -2089,6 +2089,23 @@ static void GR_Set2DInitialShaderTime( float startTime )
     gr_2dShaderStartTime = startTime;
 }
 
+/* -------------------------------------------------------------------
+ *  Weapon effects (Phase 224)
+ * ---------------------------------------------------------------- */
+
+extern void Godot_MuzzleFlash_Spawn_C(float *pos, float *dir, float intensity);
+extern void Godot_ShellCasing_Eject_C(float *pos, float *vel, int type);
+
+static void GR_AddMuzzleFlash( const vec3_t origin, const vec3_t dir, float intensity )
+{
+    Godot_MuzzleFlash_Spawn_C( (float*)origin, (float*)dir, intensity );
+}
+
+static void GR_AddShellCasing( const vec3_t origin, const vec3_t velocity, int type )
+{
+    Godot_ShellCasing_Eject_C( (float*)origin, (float*)velocity, type );
+}
+
 /* ===================================================================
  *  Camera bridge C accessors (Phase 7a)
  *
@@ -2786,6 +2803,11 @@ refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
     re.LoadRawImage        = GR_LoadRawImage;
     re.FreeRawImage        = GR_FreeRawImage;
     re.Set2DInitialShaderTime = GR_Set2DInitialShaderTime;
+
+#ifdef GODOT_GDEXTENSION
+    re.AddMuzzleFlash      = GR_AddMuzzleFlash;
+    re.AddShellCasing      = GR_AddShellCasing;
+#endif
 
     return &re;
 }

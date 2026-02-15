@@ -220,6 +220,10 @@ def should_exclude(filepath):
         if pat in fp:
             return True
 
+    # Exclude standalone tests
+    if "code/godot/tests" in fp:
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)
@@ -288,6 +292,7 @@ cgame_env.Append(CPPPATH=[
 
 cgame_env.Append(CPPDEFINES=[
     "CGAME_DLL",
+    "GODOT_GDEXTENSION",
 ])
 
 # Use a separate build directory so SCons doesn't conflict with the main build
@@ -377,3 +382,21 @@ cgame_lib = cgame_env.SharedLibrary(
 
 # Build cgame alongside the main library
 Default(cgame_lib)
+
+# ══════════════════════════════════════════════
+#  Unit Tests
+# ══════════════════════════════════════════════
+
+# Test for godot_render_sort
+test_env = env.Clone()
+test_env.Append(CPPPATH=["code/godot"])
+
+test_render_sort_sources = [
+    "code/godot/tests/test_render_sort.cpp",
+    "code/godot/godot_render_sort.cpp",
+]
+
+test_render_sort_prog = test_env.Program(
+    target="bin/test_render_sort",
+    source=test_render_sort_sources,
+)

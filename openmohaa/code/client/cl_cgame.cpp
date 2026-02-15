@@ -688,6 +688,11 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->R_GetLightingForSmoke			= re.GetLightingForSmoke;
 	cgi->R_GatherLightSources			= re.R_GatherLightSources;
 
+#ifdef GODOT_GDEXTENSION
+	cgi->AddMuzzleFlash					= re.AddMuzzleFlash;
+	cgi->AddShellCasing					= re.AddShellCasing;
+#endif
+
 	cgi->S_StartSound					= S_StartSound;
 	cgi->S_StartLocalSound				= CL_StartLocalSound;
 	cgi->S_StopSound					= S_StopSound;

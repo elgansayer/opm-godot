@@ -10,6 +10,7 @@
  */
 
 #include "godot_shader_material.h"
+#include "godot_vertex_deform.h"
 
 #include <cstdio>
 #include <cstring>
@@ -156,6 +157,16 @@ static std::string make_cache_key(const GodotShaderProps *props) {
             key += "fc" + std::to_string(s->animMapFrameCount);
         }
     }
+    /* deformVertexes parameters — different deforms produce different vertex shaders */
+    if (props->has_deform) {
+        key += "D" + std::to_string(props->deform_type);
+        key += "," + ftos(props->deform_div);
+        key += "," + ftos(props->deform_base);
+        key += "," + ftos(props->deform_amplitude);
+        key += "," + ftos(props->deform_frequency);
+        key += "," + ftos(props->deform_phase);
+    }
+
     return key;
 }
 
@@ -522,6 +533,18 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
     /* Wave function definitions (if needed) */
     if (needs_wave_functions(props))
         emit_wave_functions(code);
+
+    /* Vertex shader — injected when deformVertexes is present */
+    if (props->has_deform) {
+        String deform_glsl = Godot_Deform_GenerateVertexShader(
+            props->deform_type, props->deform_div, props->deform_base,
+            props->deform_amplitude, props->deform_frequency, props->deform_phase);
+        if (!deform_glsl.is_empty()) {
+            code += "void vertex() {\n";
+            code += std::string(deform_glsl.utf8().get_data());
+            code += "}\n\n";
+        }
+    }
 
     /* Fragment shader */
     code += "void fragment() {\n";
