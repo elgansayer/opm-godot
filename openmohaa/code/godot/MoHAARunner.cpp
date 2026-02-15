@@ -3016,11 +3016,30 @@ void MoHAARunner::update_shader_animations(double delta) {
             if (!smat.is_valid()) continue;
 
             // Check resource metadata for shader name (stored during BSP build)
-            String shader_name = smat->get_meta("shader_name", "");
-            if (shader_name.is_empty()) continue;
+            // Phase 36: Optimization - Cache pointer to avoid repeated string hashing/lookup
+            static const StringName s_shader_name("shader_name");
+            static const StringName s_shader_props_ptr("shader_props_ptr");
 
-            CharString cs = shader_name.ascii();
-            const GodotShaderProps *sp = Godot_ShaderProps_Find(cs.get_data());
+            const GodotShaderProps *sp = nullptr;
+            uint64_t ptr_val = smat->get_meta(s_shader_props_ptr, 0);
+
+            if (ptr_val == 0) {
+                // Not cached yet
+                String shader_name = smat->get_meta(s_shader_name, "");
+                if (!shader_name.is_empty()) {
+                    CharString cs = shader_name.ascii();
+                    sp = Godot_ShaderProps_Find(cs.get_data());
+                }
+                // Cache it (+1 encoding: 0=unset, 1=null, >1=valid)
+                smat->set_meta(s_shader_props_ptr, (uint64_t)sp + 1);
+            } else if (ptr_val > 1) {
+                // Valid pointer
+                sp = (const GodotShaderProps *)(ptr_val - 1);
+            } else {
+                // Known to be null (val == 1)
+                sp = nullptr;
+            }
+
             if (!sp) continue;
 
             // Apply UV tcMod animation: scroll + turb

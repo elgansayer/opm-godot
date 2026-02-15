@@ -3,13 +3,14 @@
 
 #include <string>
 #include <cstring>
+#include <algorithm>
 
 namespace godot {
 
 class CharString {
 public:
     std::string _data;
-    CharString(const char* s) : _data(s) {}
+    CharString(const char* s) : _data(s ? s : "") {}
     const char* get_data() const { return _data.c_str(); }
 };
 
@@ -31,6 +32,11 @@ public:
     String operator+(const char* other) const {
         return String(_data + (other ? other : ""));
     }
+
+    // Comparison
+    bool operator==(const String& other) const { return _data == other._data; }
+    bool operator<(const String& other) const { return _data < other._data; }
+    bool is_empty() const { return _data.empty(); }
 
     static String num_int64(int64_t num) {
         return String(std::to_string(num));
