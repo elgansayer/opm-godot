@@ -1406,35 +1406,31 @@ void MoHAARunner::update_entities() {
             }
         }
 
-        // Phase 133: Frustum culling — skip entities entirely outside the view.
+        // Phase 133: Frustum and draw distance culling — skip entities that
+        // are outside the camera frustum or beyond the far-plane cull distance.
         // First-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) are always
         // visible because they are the view weapon.
-#ifdef HAS_FRUSTUM_CULL_MODULE
+#if defined(HAS_FRUSTUM_CULL_MODULE) || defined(HAS_DRAW_DISTANCE_MODULE)
         if (!(renderfx & 0x06)) {
             Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
-            // Use a conservative bounding sphere (2 m radius ≈ 78 inches,
+#ifdef HAS_FRUSTUM_CULL_MODULE
+            // Conservative bounding sphere (2 m radius ≈ 78 inches,
             // covers most player-sized entities and props).
             if (!Godot_FrustumCull_TestSphere(ent_pos, 2.0f)) {
                 mi->set_visible(false);
                 continue;
             }
-        }
 #endif
-
-        // Phase 133: Draw distance culling — skip entities beyond the far-plane
-        // cull distance when farplane_cull is enabled.
 #ifdef HAS_DRAW_DISTANCE_MODULE
-        if (!(renderfx & 0x06)) {
             float cull_dist = Godot_DrawDistance_GetCullDistance();
             if (cull_dist > 0.0f) {
-                Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
                 Vector3 cam_pos = camera ? camera->get_global_position() : Vector3();
-                float dist = ent_pos.distance_to(cam_pos);
-                if (dist > cull_dist) {
+                if (ent_pos.distance_to(cam_pos) > cull_dist) {
                     mi->set_visible(false);
                     continue;
                 }
             }
+#endif
         }
 #endif
 
