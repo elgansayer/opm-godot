@@ -49,10 +49,13 @@ static std::string ftos(float v) {
 static bool needs_wave_functions(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         if (s->rgbGen == STAGE_RGBGEN_WAVE) return true;
         if (s->alphaGen == STAGE_ALPHAGEN_WAVE) return true;
         for (int t = 0; t < s->tcModCount; t++) {
-            if (s->tcMods[t].type == TCMOD_STRETCH) return true;
+            if (s->tcMods[t].type == TCMOD_STRETCH ||
+                s->tcMods[t].type == TCMOD_WAVETRANS ||
+                s->tcMods[t].type == TCMOD_WAVETRANT) return true;
         }
     }
     return false;
@@ -61,6 +64,7 @@ static bool needs_wave_functions(const GodotShaderProps *props) {
 /* Returns true if any stage uses tcGen environment */
 static bool needs_env_mapping(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
         if (props->stages[i].tcGen == STAGE_TCGEN_ENVIRONMENT)
             return true;
     }
@@ -70,6 +74,7 @@ static bool needs_env_mapping(const GodotShaderProps *props) {
 /* Returns true if any stage uses tcGen vector */
 static bool needs_tcgen_vector(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
         if (props->stages[i].tcGen == STAGE_TCGEN_VECTOR)
             return true;
     }
@@ -79,6 +84,7 @@ static bool needs_tcgen_vector(const GodotShaderProps *props) {
 /* Returns true if any stage has tcMod directives */
 static bool needs_tcmod(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
         if (props->stages[i].tcModCount > 0) return true;
     }
     return false;
@@ -87,6 +93,7 @@ static bool needs_tcmod(const GodotShaderProps *props) {
 /* Returns true if any stage uses animMap */
 static bool needs_animmap(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
         if (props->stages[i].animMapFrameCount > 0) return true;
     }
     return false;
@@ -96,6 +103,7 @@ static bool needs_animmap(const GodotShaderProps *props) {
 static bool needs_entity_color(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         if (s->rgbGen == STAGE_RGBGEN_ENTITY || s->rgbGen == STAGE_RGBGEN_ONE_MINUS_ENTITY)
             return true;
         if (s->alphaGen == STAGE_ALPHAGEN_ENTITY || s->alphaGen == STAGE_ALPHAGEN_ONE_MINUS_ENTITY)
@@ -107,6 +115,7 @@ static bool needs_entity_color(const GodotShaderProps *props) {
 /* Returns true if any stage uses lighting diffuse (needs lit shading) */
 static bool needs_diffuse_lighting(const GodotShaderProps *props) {
     for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
         if (props->stages[i].rgbGen == STAGE_RGBGEN_LIGHTING_DIFFUSE)
             return true;
     }
@@ -126,6 +135,7 @@ static std::string make_cache_key(const GodotShaderProps *props) {
     key += "n" + std::to_string(props->stage_count);
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         key += "|s" + std::to_string(i);
         key += "m" + std::string(s->map);
         key += "b" + std::to_string(s->blendSrc) + "," + std::to_string(s->blendDst);
@@ -137,6 +147,7 @@ static std::string make_cache_key(const GodotShaderProps *props) {
         key += "af" + std::to_string(s->animMapFrameCount);
         key += "cl" + std::to_string(s->isClampMap);
         key += "lm" + std::to_string(s->isLightmap);
+        key += "nb" + std::to_string(s->hasNextBundleLightmap);
         if (s->rgbGen == STAGE_RGBGEN_WAVE) {
             key += "rw" + ftos(s->rgbWave.base) + "," + ftos(s->rgbWave.amplitude) +
                    "," + ftos(s->rgbWave.phase) + "," + ftos(s->rgbWave.frequency) +
@@ -150,7 +161,14 @@ static std::string make_cache_key(const GodotShaderProps *props) {
         for (int t = 0; t < s->tcModCount; t++) {
             const MohaaStageTcMod *tm = &s->tcMods[t];
             key += "tm" + std::to_string(tm->type);
+            key += "f" + std::to_string(tm->flags);
             key += "," + ftos(tm->params[0]) + "," + ftos(tm->params[1]);
+            key += "," + ftos(tm->params[2]) + "," + ftos(tm->params[3]);
+            key += "," + ftos(tm->params[4]) + "," + ftos(tm->params[5]);
+            key += "," + ftos(tm->params[6]) + "," + ftos(tm->params[7]);
+            key += ",w" + std::to_string(tm->wave.func);
+            key += "," + ftos(tm->wave.base) + "," + ftos(tm->wave.amplitude);
+            key += "," + ftos(tm->wave.phase) + "," + ftos(tm->wave.frequency);
         }
         if (s->animMapFrameCount > 0) {
             key += "freq" + ftos(s->animMapFreq);
@@ -209,8 +227,15 @@ static std::string gen_uv_code(int stage_idx, const MohaaShaderStage *s) {
     std::string si = std::to_string(stage_idx);
     std::string code;
 
-    /* Base UV selection based on tcGen */
-    switch (s->tcGen) {
+    /* Base UV selection based on tcGen.
+     * Safety: if the stage is flagged as isLightmap (from `map $lightmap`),
+     * always use UV2 regardless of tcGen — the parser should already set
+     * tcGen = STAGE_TCGEN_LIGHTMAP, but this guards against any mismatch. */
+    MohaaStageTcGen effective_tcgen = s->tcGen;
+    if (s->isLightmap && effective_tcgen == STAGE_TCGEN_BASE)
+        effective_tcgen = STAGE_TCGEN_LIGHTMAP;
+
+    switch (effective_tcgen) {
         case STAGE_TCGEN_LIGHTMAP:
             code += "    vec2 uv" + si + " = UV2;\n";
             break;
@@ -236,13 +261,26 @@ static std::string gen_uv_code(int stage_idx, const MohaaShaderStage *s) {
     for (int t = 0; t < s->tcModCount; t++) {
         const MohaaStageTcMod *tm = &s->tcMods[t];
         switch (tm->type) {
-            case TCMOD_SCROLL:
-                code += "    uv" + si + " += vec2(" + ftos(tm->params[0]) + ", " +
-                        ftos(tm->params[1]) + ") * TIME;\n";
+            case TCMOD_SCROLL: {
+                std::string s_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_S)
+                    ? "entity_tcmod_scroll.x"
+                    : ftos(tm->params[0]);
+                std::string t_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_T)
+                    ? "entity_tcmod_scroll.y"
+                    : ftos(tm->params[1]);
+                code += "    uv" + si + " += vec2(" + s_expr + ", " + t_expr + ") * TIME;\n";
                 break;
+            }
             case TCMOD_ROTATE: {
                 code += "    {\n";
-                code += "        float rot_angle" + si + " = radians(" + ftos(tm->params[0]) + " * TIME);\n";
+                std::string speed_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_ROT_SPEED)
+                    ? "entity_tcmod_rotate_speed"
+                    : ftos(tm->params[0]);
+                std::string start_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_ROT_START)
+                    ? "entity_tcmod_rotate_start"
+                    : ftos(tm->params[1]);
+                code += "        float rot_angle" + si + " = radians((" + speed_expr + " * TIME + " +
+                        start_expr + ") * " + ftos(tm->params[2]) + ");\n";
                 code += "        float rc" + si + " = cos(rot_angle" + si + ");\n";
                 code += "        float rs" + si + " = sin(rot_angle" + si + ");\n";
                 code += "        vec2 rot_center" + si + " = vec2(0.5, 0.5);\n";
@@ -276,8 +314,47 @@ static std::string gen_uv_code(int stage_idx, const MohaaShaderStage *s) {
                 break;
             }
             case TCMOD_OFFSET:
-                /* Phase 144: static UV offset — simply add S and T offsets */
-                code += "    uv" + si + " += vec2(" + ftos(tm->params[0]) + ", " +
+            {
+                std::string s_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_S)
+                    ? "entity_tcmod_offset.x"
+                    : ftos(tm->params[0]);
+                std::string t_expr = (tm->flags & TCMOD_FLAG_FROMENTITY_T)
+                    ? "entity_tcmod_offset.y"
+                    : ftos(tm->params[1]);
+                code += "    uv" + si + " += vec2(" + s_expr + ", " + t_expr + ");\n";
+                break;
+            }
+            case TCMOD_WAVETRANS: {
+                std::string wv = wave_call(&tm->wave, "TIME");
+                code += "    uv" + si + ".x += " + wv + ";\n";
+                break;
+            }
+            case TCMOD_WAVETRANT: {
+                std::string wv = wave_call(&tm->wave, "TIME");
+                code += "    uv" + si + ".y += " + wv + ";\n";
+                break;
+            }
+            case TCMOD_BULGE:
+                code += "    uv" + si + " += vec2(sin((uv" + si + ".y * " + ftos(tm->wave.frequency) +
+                        " + TIME + " + ftos(tm->wave.phase) + ") * 6.283185), "
+                        "sin((uv" + si + ".x * " + ftos(tm->wave.frequency) +
+                        " + TIME + " + ftos(tm->wave.phase) + ") * 6.283185)) * " +
+                        ftos(tm->wave.amplitude) + " + vec2(" + ftos(tm->wave.base) + ");\n";
+                break;
+            case TCMOD_TRANSFORM:
+                code += "    uv" + si + " = mat2(" + ftos(tm->params[0]) + ", " + ftos(tm->params[1]) + ", " +
+                        ftos(tm->params[2]) + ", " + ftos(tm->params[3]) + ") * uv" + si +
+                        " + vec2(" + ftos(tm->params[4]) + ", " + ftos(tm->params[5]) + ");\n";
+                break;
+            case TCMOD_ENTITY_TRANSLATE:
+                code += "    uv" + si + " += entity_tcmod_translate;\n";
+                break;
+            case TCMOD_PARALLAX:
+                code += "    uv" + si + " += normalize(VIEW).xy * vec2(" + ftos(tm->params[0]) + ", " +
+                        ftos(tm->params[1]) + ");\n";
+                break;
+            case TCMOD_MACRO:
+                code += "    uv" + si + " *= vec2(" + ftos(tm->params[0]) + ", " +
                         ftos(tm->params[1]) + ");\n";
                 break;
             default:
@@ -513,6 +590,7 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
     /* Uniforms */
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         if (s->animMapFrameCount > 0) {
             for (int f = 0; f < s->animMapFrameCount; f++) {
                 code += "uniform sampler2D stage" + std::to_string(i) + "_frame" + std::to_string(f);
@@ -523,19 +601,34 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
             code += "uniform sampler2D stage" + std::to_string(i) + "_tex";
             if (s->isClampMap) code += " : repeat_disable";
             code += ";\n";
+            /* nextBundle $lightmap: emit a separate lightmap sampler */
+            if (s->hasNextBundleLightmap) {
+                code += "uniform sampler2D stage" + std::to_string(i) + "_lm;\n";
+            }
         }
     }
 
     /* Overbright factor for lightmap compositing */
     bool has_lightmap = false;
     for (int i = 0; i < props->stage_count; i++) {
-        if (props->stages[i].isLightmap) { has_lightmap = true; break; }
+        if (!props->stages[i].active) continue;
+        if (props->stages[i].isLightmap || props->stages[i].hasNextBundleLightmap) {
+            has_lightmap = true; break;
+        }
     }
     if (has_lightmap)
         code += "uniform float overbright_factor = 2.0;\n";
 
     if (needs_entity_color(props))
         code += "uniform vec4 entity_color = vec4(1.0, 1.0, 1.0, 1.0);\n";
+
+    if (needs_tcmod(props)) {
+        code += "uniform vec2 entity_tcmod_scroll = vec2(0.0, 0.0);\n";
+        code += "uniform vec2 entity_tcmod_offset = vec2(0.0, 0.0);\n";
+        code += "uniform float entity_tcmod_rotate_speed = 0.0;\n";
+        code += "uniform float entity_tcmod_rotate_start = 0.0;\n";
+        code += "uniform vec2 entity_tcmod_translate = vec2(0.0, 0.0);\n";
+    }
 
     code += "\n";
 
@@ -561,6 +654,7 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
     /* Per-stage UV computation, texture sampling, and color modulation */
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         std::string si = std::to_string(i);
 
         code += "    // Stage " + si + "\n";
@@ -577,16 +671,25 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
 
     /* Compositing */
     code += "\n    // Compositing\n";
+    bool have_result = false;
     for (int i = 0; i < props->stage_count; i++) {
         const MohaaShaderStage *s = &props->stages[i];
+        if (!s->active) continue;
         std::string si = std::to_string(i);
 
-        if (i == 0 && !s->hasBlendFunc) {
-            code += "    vec4 result = s0;\n";
-        } else if (i == 0 && s->hasBlendFunc) {
-            /* First stage with explicit blend — start with black, blend in */
-            code += "    vec4 result = vec4(0.0);\n";
-            code += gen_blend_code(i, s);
+        if (!have_result) {
+            /* First active stage always provides the base colour.
+             * Its blendFunc (if any) controls how the FINAL surface
+             * blends with the framebuffer (handled by render_mode),
+             * NOT internal stage compositing.  Starting from vec4(0.0)
+             * was wrong: filter blending (DST_COLOR * ZERO) produced
+             * all-black, and alpha-blend double-applied the alpha. */
+            code += "    vec4 result = s" + si + ";\n";
+            /* nextBundle $lightmap: multiply diffuse by lightmap from UV2 */
+            if (s->hasNextBundleLightmap) {
+                code += "    result.rgb *= texture(stage" + si + "_lm, UV2).rgb * overbright_factor;\n";
+            }
+            have_result = true;
         } else {
             /* Lightmap modulation special case */
             if (s->isLightmap && s->blendSrc == BLEND_DST_COLOR && s->blendDst == BLEND_ZERO) {
@@ -595,6 +698,10 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
                 code += gen_blend_code(i, s);
             }
         }
+    }
+
+    if (!have_result) {
+        code += "    vec4 result = vec4(0.0);\n";
     }
 
     /* Output */

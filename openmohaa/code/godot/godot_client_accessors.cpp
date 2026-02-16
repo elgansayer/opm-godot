@@ -146,4 +146,47 @@ int Godot_Client_IsMenuUp(void) {
     return UI_MenuUp() ? 1 : 0;
 }
 
+/*
+ * Godot_Client_GetKeyBinding — Return the binding string for an engine
+ *   keynum.  Returns "" if no binding.  Caller must NOT free the pointer.
+ */
+const char *Godot_Client_GetKeyBinding(int keynum) {
+    if (keynum < 0 || keynum >= MAX_KEYS) return "";
+    if (!keys[keynum].binding) return "";
+    return keys[keynum].binding;
+}
+
+/*
+ * Godot_Client_GetMouseButtons — Return the current cl.mouseButtons bitmask.
+ */
+int Godot_Client_GetMouseButtons(void) {
+    return cl.mouseButtons;
+}
+
+/*
+ * Godot_Client_DumpInputState — Print a comprehensive debug dump of input
+ *   state to the engine console (Com_Printf).  Called from Godot debug key.
+ */
+void Godot_Client_DumpInputState(void) {
+    Com_Printf("=== Input State Dump ===\n");
+    Com_Printf("  clc.state:      %d (0=DISC,3=CONN,4=LOAD,5=PRIM,6=ACT)\n", (int)clc.state);
+    Com_Printf("  cls.keyCatchers: 0x%X (UI=0x2, CON=0x1, MSG=0x4)\n", cls.keyCatchers);
+    Com_Printf("  in_guimouse:    %d\n", (int)in_guimouse);
+    Com_Printf("  cls.startStage: %d (0=intro finished)\n", cls.startStage);
+    Com_Printf("  paused:         %d\n", paused ? paused->integer : -1);
+    Com_Printf("  cl.mousex:      %d\n", cl.mousex);
+    Com_Printf("  cl.mousey:      %d\n", cl.mousey);
+    Com_Printf("  cl.mouseButtons: 0x%X\n", cl.mouseButtons);
+    Com_Printf("  server_running: %d\n", com_sv_running ? com_sv_running->integer : -1);
+    Com_Printf("  --- Key Bindings ---\n");
+    Com_Printf("  w: '%s'\n", keys['w'].binding ? keys['w'].binding : "(null)");
+    Com_Printf("  a: '%s'\n", keys['a'].binding ? keys['a'].binding : "(null)");
+    Com_Printf("  s: '%s'\n", keys['s'].binding ? keys['s'].binding : "(null)");
+    Com_Printf("  d: '%s'\n", keys['d'].binding ? keys['d'].binding : "(null)");
+    Com_Printf("  MOUSE1: '%s'\n", keys[K_MOUSE1].binding ? keys[K_MOUSE1].binding : "(null)");
+    Com_Printf("  ESC: '%s'\n", keys[K_ESCAPE].binding ? keys[K_ESCAPE].binding : "(null)");
+    Com_Printf("  SPACE: '%s'\n", keys[' '].binding ? keys[' '].binding : "(null)");
+    Com_Printf("========================\n");
+}
+
 } /* extern "C" */

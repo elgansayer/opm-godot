@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cctype>
 #include <cstdlib>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -54,6 +55,9 @@ extern "C" {
     int   Q_stricmp(const char *s1, const char *s2);
     int   Q_stricmpn(const char *s1, const char *s2, unsigned long n);
     void  Q_strncpyz(char *dest, const char *src, unsigned long destsize);
+    float Cvar_VariableValue(const char *var_name);
+    int   Cvar_VariableIntegerValue(const char *var_name);
+    void  Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
 }
 
 /* ===================================================================
@@ -102,20 +106,38 @@ static GodotShaderTransparency classify_blend(const char *src, const char *dst) 
 static GodotShaderTransparency classify_blend_factors(MohaaBlendFactor src,
                                                        MohaaBlendFactor dst)
 {
+    /* Exact matches first (most common MOHAA patterns) */
     if (src == BLEND_SRC_ALPHA && dst == BLEND_ONE_MINUS_SRC_ALPHA)
+        return SHADER_ALPHA_BLEND;
+    if (src == BLEND_ONE_MINUS_SRC_ALPHA && dst == BLEND_SRC_ALPHA)
         return SHADER_ALPHA_BLEND;
     if (src == BLEND_ONE && dst == BLEND_ONE)
         return SHADER_ADDITIVE;
+    if (src == BLEND_SRC_ALPHA && dst == BLEND_ONE)
+        return SHADER_ADDITIVE;            /* alphaadd */
     if (src == BLEND_DST_COLOR && dst == BLEND_ZERO)
+        return SHADER_MULTIPLICATIVE;
+    if (src == BLEND_ZERO && dst == BLEND_SRC_COLOR)
         return SHADER_MULTIPLICATIVE;
     if (src == BLEND_ONE && dst == BLEND_ZERO)
         return SHADER_OPAQUE;
-    if (src == BLEND_ZERO && dst == BLEND_SRC_COLOR)
-        return SHADER_MULTIPLICATIVE;
+    if (src == BLEND_ZERO && dst == BLEND_ONE)
+        return SHADER_OPAQUE;
+    /* Premultiplied alpha */
+    if (src == BLEND_ONE && dst == BLEND_ONE_MINUS_SRC_ALPHA)
+        return SHADER_ALPHA_BLEND;
+
+    /* Broad catch-all by source factor */
     if (src == BLEND_SRC_ALPHA)
         return SHADER_ALPHA_BLEND;
-    if (src == BLEND_ONE)
+    if (src == BLEND_ONE && (dst == BLEND_ONE_MINUS_DST_COLOR ||
+                              dst == BLEND_SRC_COLOR))
         return SHADER_ADDITIVE;
+    if (src == BLEND_DST_COLOR || dst == BLEND_SRC_COLOR)
+        return SHADER_MULTIPLICATIVE;
+
+    /* Unknown combination — default to alpha blend (Q3 SortNewShader
+     * treats any blendFunc as transparent / SS_BLEND0). */
     return SHADER_ALPHA_BLEND;
 }
 
@@ -144,6 +166,60 @@ static MohaaWaveFunc parse_wave_func(const char *tok) {
     return WAVE_SIN;
 }
 
+static bool eval_shader_if_condition(const char *tok, bool invert) {
+    bool passed = false;
+
+    if (!Q_stricmp(tok, "separate_env")) {
+        passed = (Cvar_VariableIntegerValue("r_textureDetails") != 0);
+    } else if (!Q_stricmp(tok, "0") || !Q_stricmp(tok, "false")) {
+        passed = false;
+    } else if (!Q_stricmp(tok, "1") || !Q_stricmp(tok, "true")) {
+        passed = true;
+    }
+
+    if (invert) {
+        passed = !passed;
+    }
+    return passed;
+}
+
+static bool eval_if_cvar(const char *var_name, const char *expected, bool is_not) {
+    float var_value = Cvar_VariableValue(var_name);
+    float expected_value = (float)atof(expected);
+
+    char var_string[256];
+    Cvar_VariableStringBuffer(var_name, var_string, sizeof(var_string));
+
+    bool evaluated = false;
+    if (expected_value != var_value) {
+        evaluated = false;
+    } else if (var_value != 0.0f) {
+        evaluated = true;
+    } else if (expected[0] == '0' || (expected[0] == '.' && expected[1] == '0')) {
+        evaluated = true;
+    } else if (!Q_stricmp(var_string, expected)) {
+        evaluated = true;
+    }
+
+    return (evaluated ^ is_not);
+}
+
+static bool is_from_entity_token(const char *tok) {
+    return tok && tok[0] && !Q_stricmp(tok, "fromEntity");
+}
+
+static float apply_rand_perturb(float base, float randv, bool plus_one) {
+    if (randv == 0.0f) return base;
+
+    float mag = fabsf(randv) * 1000.0f + (plus_one ? 1.0f : 0.0f);
+    int denom = (int)mag;
+    if (denom <= 0) return base;
+
+    float delta = (float)(rand() % denom) / 1000.0f;
+    if (randv < 0.0f) return base - delta;
+    return base + delta;
+}
+
 /* ===================================================================
  *  parse_stage — mirrors renderergl1/tr_shader.c::ParseStage()
  *
@@ -154,6 +230,7 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                          bool first_stage)
 {
     char *token;
+    bool should_process = true;
     int cntBundle = 0;  /* Tracks which texture bundle we're in (mirrors tr_shader.c).
                          * Bundle 0 = primary (diffuse) texture.
                          * Bundle 1+ = secondary (usually $lightmap) via nextBundle.
@@ -163,6 +240,7 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
     if (stage_index >= 0 && stage_index < MOHAA_SHADER_STAGE_MAX) {
         stg = &props->stages[stage_index];
         memset(stg, 0, sizeof(MohaaShaderStage));
+        stg->active = true;
         stg->blendSrc = BLEND_ONE;
         stg->blendDst = BLEND_ZERO;
         stg->alphaConst = 1.0f;
@@ -209,8 +287,15 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                     Q_strncpyz(stg->map, token, sizeof(stg->map));
                     if (is_clamp)
                         stg->isClampMap = true;
-                    if (!Q_stricmp(token, "$lightmap"))
+                    if (!Q_stricmp(token, "$lightmap")) {
                         stg->isLightmap = true;
+                        /* Implicit tcGen lightmap — mirrors tr_shader.c which
+                         * automatically uses lightmap texcoords for $lightmap
+                         * stages.  Without this, the ShaderMaterial would
+                         * sample the lightmap atlas using UV (texture coords)
+                         * instead of UV2 (lightmap coords). */
+                        stg->tcGen = STAGE_TCGEN_LIGHTMAP;
+                    }
                 } else {
                     /* Bundle 1+: secondary texture (usually lightmap).
                      * Don't overwrite stg->map — keep the diffuse path.
@@ -233,6 +318,10 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
             float thresh = 0.5f;
             if (!Q_stricmp(token, "GT0"))
                 thresh = 0.01f;
+            else if (!Q_stricmp(token, "LT128") || !Q_stricmp(token, "GE128") ||
+                     !Q_stricmp(token, "LT_FOLIAGE1") || !Q_stricmp(token, "GE_FOLIAGE1") ||
+                     !Q_stricmp(token, "LT_FOLIAGE2") || !Q_stricmp(token, "GE_FOLIAGE2"))
+                thresh = 0.5f;
             props->alpha_threshold = thresh;
             if (stg) {
                 stg->hasAlphaFunc = true;
@@ -329,7 +418,8 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
         else if (!Q_stricmp(token, "tcGen") || !Q_stricmp(token, "tcgen"))
         {
             token = COM_ParseExt(text, 0);
-            if (!Q_stricmp(token, "environment") || !Q_stricmp(token, "environmentmodel"))
+            if (!Q_stricmp(token, "environment") || !Q_stricmp(token, "environmentmodel") ||
+                !Q_stricmp(token, "sunreflection"))
             {
                 if (cntBundle == 0) {
                     if (first_stage) props->tcgen_environment = true;
@@ -542,10 +632,26 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
             token = COM_ParseExt(text, 0);
             if (!Q_stricmp(token, "scroll"))
             {
-                token = COM_ParseExt(text, 0);
-                float s = (float)atof(token);
-                token = COM_ParseExt(text, 0);
-                float t = (float)atof(token);
+                char *stok = COM_ParseExt(text, 0);
+                if (!stok[0]) { SkipRestOfLine(text); continue; }
+                char *ttok = COM_ParseExt(text, 0);
+                if (!ttok[0]) { SkipRestOfLine(text); continue; }
+
+                bool s_from_entity = is_from_entity_token(stok);
+                bool t_from_entity = is_from_entity_token(ttok);
+                float s = s_from_entity ? 0.0f : (float)atof(stok);
+                float t = t_from_entity ? 0.0f : (float)atof(ttok);
+
+                /* Optional random offsets: [randS] [randT] */
+                char *rands = COM_ParseExt(text, 0);
+                if (rands[0] && !s_from_entity) {
+                    s = apply_rand_perturb(s, (float)atof(rands), false);
+                }
+                char *randt = COM_ParseExt(text, 0);
+                if (randt[0] && !t_from_entity) {
+                    t = apply_rand_perturb(t, (float)atof(randt), false);
+                }
+
                 if (first_stage) {
                     props->tcmod_scroll_s = s;
                     props->tcmod_scroll_t = t;
@@ -556,20 +662,37 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                     tm->type = TCMOD_SCROLL;
                     tm->params[0] = s;
                     tm->params[1] = t;
+                    if (s_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_S;
+                    if (t_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_T;
                 }
             }
             else if (!Q_stricmp(token, "rotate"))
             {
-                token = COM_ParseExt(text, 0);
-                float r = (float)atof(token);
+                char *rtok = COM_ParseExt(text, 0);
+                if (!rtok[0]) { SkipRestOfLine(text); continue; }
+                bool speed_from_entity = is_from_entity_token(rtok);
+                float speed = speed_from_entity ? 0.0f : (float)atof(rtok);
+
+                char *starttok = COM_ParseExt(text, 0);
+                bool has_start = (starttok[0] != 0);
+                bool start_from_entity = has_start && is_from_entity_token(starttok);
+                float start = has_start ? (start_from_entity ? 0.0f : (float)atof(starttok)) : 0.0f;
+
+                char *coeftok = COM_ParseExt(text, 0);
+                float coef = coeftok[0] ? (float)atof(coeftok) : 1.0f;
+
                 if (first_stage) {
-                    props->tcmod_rotate = r;
+                    props->tcmod_rotate = speed;
                     props->has_tcmod = true;
                 }
                 if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
                     MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
                     tm->type = TCMOD_ROTATE;
-                    tm->params[0] = r;
+                    tm->params[0] = speed;
+                    tm->params[1] = start;
+                    tm->params[2] = coef;
+                    if (speed_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_ROT_SPEED;
+                    if (start_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_ROT_START;
                 }
             }
             else if (!Q_stricmp(token, "scale"))
@@ -645,17 +768,127 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                     tm->wave.frequency = freq;
                 }
             }
+            else if (!Q_stricmp(token, "wavetrans"))
+            {
+                char func_tok[64];
+                token = COM_ParseExt(text, 0);
+                Q_strncpyz(func_tok, token, sizeof(func_tok));
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_WAVETRANS;
+                    tm->wave.func      = parse_wave_func(func_tok);
+                    tm->wave.base      = base;
+                    tm->wave.amplitude = amp;
+                    tm->wave.phase     = phase;
+                    tm->wave.frequency = freq;
+                }
+            }
+            else if (!Q_stricmp(token, "wavetrant"))
+            {
+                char func_tok[64];
+                token = COM_ParseExt(text, 0);
+                Q_strncpyz(func_tok, token, sizeof(func_tok));
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_WAVETRANT;
+                    tm->wave.func      = parse_wave_func(func_tok);
+                    tm->wave.base      = base;
+                    tm->wave.amplitude = amp;
+                    tm->wave.phase     = phase;
+                    tm->wave.frequency = freq;
+                }
+            }
+            else if (!Q_stricmp(token, "bulge"))
+            {
+                token = COM_ParseExt(text, 0);
+                float base = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float amp = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float freq = (float)atof(token);
+                token = COM_ParseExt(text, 0);
+                float phase = (float)atof(token);
+
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_BULGE;
+                    tm->wave.base = base;
+                    tm->wave.amplitude = amp;
+                    tm->wave.frequency = freq;
+                    tm->wave.phase = phase;
+                }
+            }
+            else if (!Q_stricmp(token, "transform"))
+            {
+                float m00 = (float)atof(COM_ParseExt(text, 0));
+                float m01 = (float)atof(COM_ParseExt(text, 0));
+                float m10 = (float)atof(COM_ParseExt(text, 0));
+                float m11 = (float)atof(COM_ParseExt(text, 0));
+                float tr0 = (float)atof(COM_ParseExt(text, 0));
+                float tr1 = (float)atof(COM_ParseExt(text, 0));
+
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_TRANSFORM;
+                    tm->params[0] = m00; tm->params[1] = m01;
+                    tm->params[2] = m10; tm->params[3] = m11;
+                    tm->params[4] = tr0; tm->params[5] = tr1;
+                }
+            }
+            else if (!Q_stricmp(token, "entityTranslate") || !Q_stricmp(token, "entitytranslate"))
+            {
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_ENTITY_TRANSLATE;
+                }
+            }
             else if (!Q_stricmp(token, "offset"))
             {
                 /* Phase 144: tcMod offset — static UV shift (MOHAA extension)
                  * Format: tcMod offset <s> <t> [randS] [randT]
-                 * "fromEntity" (1234567) sentinel supported in engine but ignored here. */
-                token = COM_ParseExt(text, 0);
-                float s = (float)atof(token);
-                token = COM_ParseExt(text, 0);
-                float t = (float)atof(token);
-                /* Skip optional randS/randT parameters */
-                SkipRestOfLine(text);
+                 * and supports "fromEntity" sentinel. */
+                char *stok = COM_ParseExt(text, 0);
+                if (!stok[0]) { SkipRestOfLine(text); continue; }
+                char *ttok = COM_ParseExt(text, 0);
+                if (!ttok[0]) { SkipRestOfLine(text); continue; }
+
+                bool s_from_entity = is_from_entity_token(stok);
+                bool t_from_entity = is_from_entity_token(ttok);
+                float s = s_from_entity ? 0.0f : (float)atof(stok);
+                float t = t_from_entity ? 0.0f : (float)atof(ttok);
+
+                char *rands = COM_ParseExt(text, 0);
+                if (rands[0] && !s_from_entity) {
+                    s = apply_rand_perturb(s, (float)atof(rands), true);
+                }
+                char *randt = COM_ParseExt(text, 0);
+                if (randt[0] && !t_from_entity) {
+                    t = apply_rand_perturb(t, (float)atof(randt), true);
+                }
+
                 if (first_stage) {
                     props->tcmod_offset_s = s;
                     props->tcmod_offset_t = t;
@@ -664,6 +897,34 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
                     MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
                     tm->type = TCMOD_OFFSET;
+                    tm->params[0] = s;
+                    tm->params[1] = t;
+                    if (s_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_S;
+                    if (t_from_entity) tm->flags |= TCMOD_FLAG_FROMENTITY_T;
+                }
+            }
+            else if (!Q_stricmp(token, "parallax"))
+            {
+                float rs = (float)atof(COM_ParseExt(text, 0));
+                float rt = (float)atof(COM_ParseExt(text, 0));
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_PARALLAX;
+                    tm->params[0] = rs;
+                    tm->params[1] = rt;
+                }
+            }
+            else if (!Q_stricmp(token, "macro"))
+            {
+                float s = (float)atof(COM_ParseExt(text, 0));
+                float t = (float)atof(COM_ParseExt(text, 0));
+                if (s != 0.0f) s = 1.0f / s;
+                if (t != 0.0f) t = 1.0f / t;
+                if (first_stage) props->has_tcmod = true;
+                if (stg && stg->tcModCount < MOHAA_SHADER_STAGE_MAX_TCMODS) {
+                    MohaaStageTcMod *tm = &stg->tcMods[stg->tcModCount++];
+                    tm->type = TCMOD_MACRO;
                     tm->params[0] = s;
                     tm->params[1] = t;
                 }
@@ -698,10 +959,33 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 stg->noDepthTest = true;
             }
         }
+        else if (!Q_stricmp(token, "ifCvar") || !Q_stricmp(token, "ifCvarnot"))
+        {
+            bool is_not = token[6] != 0;
+
+            char *cvar_name = COM_ParseExt(text, 0);
+            if (!cvar_name[0]) {
+                should_process = false;
+                continue;
+            }
+
+            char *expected = COM_ParseExt(text, 0);
+            if (!expected[0]) {
+                should_process = false;
+                continue;
+            }
+
+            should_process = should_process && eval_if_cvar(cvar_name, expected, is_not);
+            continue;
+        }
         else
         {
             SkipRestOfLine(text);
         }
+    }
+
+    if (stg) {
+        stg->active = should_process;
     }
 }
 
@@ -716,6 +1000,8 @@ static void parse_shader(char **text, GodotShaderProps *props)
     char *token;
     int stage_idx = 0;
     bool first_stage = true;
+    int matchingendifs = 0;
+    bool in_else_block = false;
 
     while (1) {
         token = COM_ParseExt(text, 1 /* qtrue — cross line boundaries */);
@@ -845,8 +1131,23 @@ static void parse_shader(char **text, GodotShaderProps *props)
             {
                 props->deform_type = 4;
             }
+            else if (!Q_stricmp(token, "lightglow"))
+            {
+                /* Parsed and accepted; currently no Godot-side vertex deformation needed. */
+                props->has_deform = false;
+            }
+            else if (!Q_stricmp(token, "flap"))
+            {
+                /* flap <s|t> <spread> <waveform> [min max] — recognised but not yet
+                 * represented in Godot vertex deform. Keep parser in sync and avoid
+                 * applying incorrect fallback deformation. */
+                SkipRestOfLine(text);
+                props->has_deform = false;
+            }
             else
             {
+                /* Unknown deform type — don't apply any deform fallback. */
+                props->has_deform = false;
                 SkipRestOfLine(text);
             }
         }
@@ -856,7 +1157,9 @@ static void parse_shader(char **text, GodotShaderProps *props)
             if (!Q_stricmp(token, "portal"))          props->sort_key = 1;
             else if (!Q_stricmp(token, "sky"))        props->sort_key = 2;
             else if (!Q_stricmp(token, "opaque"))     props->sort_key = 3;
+            else if (!Q_stricmp(token, "decal"))      props->sort_key = 5;
             else if (!Q_stricmp(token, "banner"))     props->sort_key = 6;
+            else if (!Q_stricmp(token, "seeThrough")) props->sort_key = 7;
             else if (!Q_stricmp(token, "underwater")) props->sort_key = 8;
             else if (!Q_stricmp(token, "additive"))   props->sort_key = 9;
             else if (!Q_stricmp(token, "nearest"))    props->sort_key = 16;
@@ -919,26 +1222,56 @@ static void parse_shader(char **text, GodotShaderProps *props)
         /* ── MOHAA #if / #else / #endif conditional blocks ── */
         else if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
         {
-            /* For now, treat the condition as false: skip to #else or #endif.
-             * This matches the engine's behaviour when the condition evaluates
-             * to false (e.g. #if separate_env with r_textureDetails == 0). */
-            int nested = 1;
-            while (nested > 0) {
-                token = COM_ParseExt(text, 1);
-                if (!token[0]) break;
-                if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
-                    nested++;
-                else if (!Q_stricmp(token, "#endif"))
-                    nested--;
-                else if (!Q_stricmp(token, "#else") && nested == 1) {
-                    /* Take the else branch */
-                    break;
+            bool invert = !Q_stricmp(token, "#if_not");
+            token = COM_ParseExt(text, 0);
+            bool condition_passed = eval_shader_if_condition(token, invert);
+
+            if (!condition_passed) {
+                int nestedifs = 0;
+                SkipRestOfLine(text);
+
+                while (1) {
+                    token = COM_ParseExt(text, 1);
+                    if (!token[0]) break;
+
+                    if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not")) {
+                        nestedifs++;
+                        SkipRestOfLine(text);
+                    } else if (!Q_stricmp(token, "#endif")) {
+                        nestedifs--;
+                    } else if (!Q_stricmp(token, "#else")) {
+                        if (in_else_block) {
+                            break;
+                        }
+                        if (!nestedifs) {
+                            matchingendifs++;
+                            break;
+                        }
+                        nestedifs++;
+                    } else {
+                        SkipRestOfLine(text);
+                    }
+
+                    if (nestedifs == -1) {
+                        break;
+                    }
                 }
+            } else {
+                matchingendifs++;
             }
         }
         else if (!Q_stricmp(token, "#else"))
         {
-            /* We were in the true branch — skip to #endif */
+            if (in_else_block) {
+                continue;
+            }
+
+            matchingendifs--;
+            if (matchingendifs < 0) {
+                matchingendifs = 0;
+            }
+            in_else_block = true;
+
             int nested = 1;
             while (nested > 0) {
                 token = COM_ParseExt(text, 1);
@@ -951,7 +1284,11 @@ static void parse_shader(char **text, GodotShaderProps *props)
         }
         else if (!Q_stricmp(token, "#endif"))
         {
-            /* Nothing to do */
+            matchingendifs--;
+            if (matchingendifs < 0) {
+                matchingendifs = 0;
+            }
+            in_else_block = false;
         }
         /* ── Unknown outer directive — skip the rest of the line ── */
         else
@@ -964,6 +1301,8 @@ static void parse_shader(char **text, GodotShaderProps *props)
 /* ===================================================================
  *  Public API
  * ================================================================ */
+
+extern "C" void Godot_Renderer_InvalidateShaderDimCache(void);
 
 void Godot_ShaderProps_Load() {
     s_shader_props.clear();
@@ -1074,6 +1413,7 @@ void Godot_ShaderProps_Load() {
              * (MOHAA single-pass pattern). */
             bool has_lightmap_stage = false;
             for (int s = 0; s < props.stage_count; s++) {
+                if (!props.stages[s].active) continue;
                 if (props.stages[s].isLightmap || props.stages[s].hasNextBundleLightmap) {
                     has_lightmap_stage = true;
                     break;
@@ -1087,6 +1427,7 @@ void Godot_ShaderProps_Load() {
             int best = -1;
             int fallback_nl = -1;
             for (int s = 0; s < props.stage_count; s++) {
+                if (!props.stages[s].active) continue;
                 if (props.stages[s].isLightmap) continue;
                 if (!props.stages[s].hasBlendFunc) {
                     /* First non-lightmap stage with no blendFunc: if it's
@@ -1157,6 +1498,7 @@ void Godot_ShaderProps_Load() {
                 if (kv.second.transparency == SHADER_MULTIPLICATIVE && logged < 10) {
                     const char *lm_info = "no-lm";
                     for (int s2 = 0; s2 < kv.second.stage_count; s2++) {
+                        if (!kv.second.stages[s2].active) continue;
                         if (kv.second.stages[s2].isLightmap) { lm_info = "lm-stage"; break; }
                         if (kv.second.stages[s2].hasNextBundleLightmap) { lm_info = "nb-lm"; break; }
                     }
@@ -1174,6 +1516,11 @@ void Godot_ShaderProps_Load() {
                             String::num_int64(files_loaded) + " shader files (" +
                             String::num_int64(numFiles) + " found), " +
                             String::num_int64(total_defs) + " definitions.");
+
+    /* Invalidate the renderer's shader dimension cache so that shaders
+     * queried before shader props were available get re-resolved with
+     * correct texture paths (e.g. menu UI shaders like 'multiarrow'). */
+    Godot_Renderer_InvalidateShaderDimCache();
 }
 
 void Godot_ShaderProps_Unload() {
@@ -1211,11 +1558,23 @@ extern "C" int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *ou
     if (!shader_name || !out_path || out_size <= 0) return 0;
 
     const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
+
+    /* UI scripts sometimes pass namespaced aliases (e.g. "MENU/multiarrow")
+     * while the shader definition key is the leaf name ("multiarrow").
+     * Mirror renderer robustness by retrying with the basename. */
+    if (!sp) {
+        const char *slash = strrchr(shader_name, '/');
+        if (slash && slash[1]) {
+            sp = Godot_ShaderProps_Find(slash + 1);
+        }
+    }
+
     if (!sp || sp->stage_count <= 0) return 0;
 
     /* Find first non-lightmap stage with a valid map path */
     for (int i = 0; i < sp->stage_count; i++) {
         const MohaaShaderStage *st = &sp->stages[i];
+        if (!st->active) continue;
         if (st->isLightmap) continue;
         if (st->map[0] == '\0') continue;
         /* Skip $lightmap, $whiteimage, $blankimage */

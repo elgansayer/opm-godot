@@ -1736,6 +1736,16 @@ void UI_ActivateView3D(void)
 
     view3d->setShow(true);
     uWinMan.ActivateControl(view3d);
+#ifdef GODOT_GDEXTENSION
+    /* Under Godot, ActivateControl() may not fire W_Activated if view3d
+       is already the active widget (the "wid == active" no-op path in
+       UIWindowManager::ActivateControl).  When that happens,
+       View3D::OnActivate never clears KEYCATCH_UI, so keys route to
+       UI_KeyEvent instead of game bindings (WASD etc).
+       Explicitly clear KEYCATCH_UI and switch to game mouse mode. */
+    Key_SetCatcher(Key_GetCatcher() & ~KEYCATCH_UI);
+    IN_MouseOff();
+#endif
 }
 
 /*
@@ -1837,6 +1847,14 @@ void UI_Update(void)
      * (player pressed ESC, options, etc.) we fall through to the
      * full UI_Update rendering so menus paint correctly. */
     if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu()) {
+        /* Safety net: clear KEYCATCH_UI when in gameplay with no menus.
+         * ActivateControl() may not fire View3D::OnActivate if view3d was
+         * already active, leaving KEYCATCH_UI stuck and routing WASD keys
+         * to UI_KeyEvent instead of game bindings. */
+        if (Key_GetCatcher() & KEYCATCH_UI) {
+            Key_SetCatcher(Key_GetCatcher() & ~KEYCATCH_UI);
+            IN_MouseOff();
+        }
 #else
     if (cls.no_menus && clc.state == CA_ACTIVE) {
 #endif

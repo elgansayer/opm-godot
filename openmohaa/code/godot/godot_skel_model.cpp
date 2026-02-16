@@ -203,14 +203,14 @@ GodotSkelModelCache::CachedModel *GodotSkelModelCache::build_model(int hModel)
                 godotUVs.set(v, Vector2(u, vt));
             }
 
-            /* Copy indices — winding order may need reversing due to
-             * coordinate system change (right-hand → left-hand swap).
-             * Id Tech 3 uses CW front face; Godot uses CCW.
-             * The axis remapping flips handedness, so we reverse winding. */
+            /* Copy indices as-is.  The id_to_godot_point conversion
+             * has det = +1 (proper rotation), so winding is preserved.
+             * Q3/MOHAA model triangles are already CCW from the visible
+             * side, matching Godot's default front-face convention. */
             for (int t = 0; t < numTris; t++) {
                 godotIndices.set(t * 3 + 0, indices[t * 3 + 0]);
-                godotIndices.set(t * 3 + 1, indices[t * 3 + 2]);
-                godotIndices.set(t * 3 + 2, indices[t * 3 + 1]);
+                godotIndices.set(t * 3 + 1, indices[t * 3 + 1]);
+                godotIndices.set(t * 3 + 2, indices[t * 3 + 2]);
             }
 
             /* Build ArrayMesh surface */

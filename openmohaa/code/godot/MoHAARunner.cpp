@@ -14,6 +14,7 @@
 #include <godot_cpp/classes/sphere_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
+#include <godot_cpp/classes/geometry_instance3d.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/control.hpp>
@@ -24,6 +25,7 @@
 #include <godot_cpp/classes/cubemap.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
+#include <godot_cpp/classes/light3d.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/sub_viewport.hpp>
@@ -215,6 +217,9 @@ extern "C" {
     void Godot_Client_SetMousePos(int x, int y);
     int  Godot_Client_IsUIStarted(void);
     int  Godot_Client_IsMenuUp(void);
+    const char *Godot_Client_GetKeyBinding(int keynum);
+    int  Godot_Client_GetMouseButtons(void);
+    void Godot_Client_DumpInputState(void);
 
     // Save/load bridge — from godot_save_accessors.c
     void Godot_Save_QuickSave(void);
@@ -448,6 +453,9 @@ MoHAARunner::MoHAARunner() {
 MoHAARunner::~MoHAARunner() {
 #ifdef HAS_WEAPON_VIEWPORT_MODULE
     Godot_WeaponViewport::get().destroy();
+#endif
+#ifdef HAS_VFX_MODULE
+    Godot_VFX_Shutdown();
 #endif
 #ifdef HAS_MUSIC_MODULE
     Godot_Music_Shutdown();
@@ -810,6 +818,9 @@ void MoHAARunner::check_world_load() {
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
+            shader_textures.clear();              // Shader handles are re-registered on next map
+            animmap_info.clear();
+            animmap_frames.clear();
 #ifdef HAS_MESH_CACHE_MODULE
             Godot_MeshCache::get().clear();
             Godot_MaterialCache::get().clear();
@@ -1024,6 +1035,7 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
     // passes GL_CLAMP for clampMap stages.
     if (sp->stage_count > 0) {
         for (int st = 0; st < sp->stage_count; st++) {
+            if (!sp->stages[st].active) continue;
             if (sp->stages[st].isLightmap) continue;
             if (sp->stages[st].isClampMap) {
                 mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);
@@ -1963,11 +1975,11 @@ void MoHAARunner::update_entities() {
                                             texcoords[v*2+1]));
                                     }
 
-                                    // Reverse winding (id CW → Godot CCW)
+                                    // Indices used as-is — id_to_godot_point preserves winding
                                     for (int t = 0; t < numTris; t++) {
                                         gIdx.set(t*3+0, indices[t*3+0]);
-                                        gIdx.set(t*3+1, indices[t*3+2]);
-                                        gIdx.set(t*3+2, indices[t*3+1]);
+                                        gIdx.set(t*3+1, indices[t*3+1]);
+                                        gIdx.set(t*3+2, indices[t*3+2]);
                                     }
 
                                     Array arrays;
@@ -2207,6 +2219,7 @@ void MoHAARunner::update_entities() {
                     if (sp && sp->stage_count > 0) {
                         // Find first non-lightmap stage (same logic as get_shader_texture)
                         for (int st = 0; st < sp->stage_count; st++) {
+                            if (!sp->stages[st].active) continue;
                             if (sp->stages[st].isLightmap) continue;
                             // MohaaStageRgbGen: IDENTITY=0, IDENTITY_LIGHTING=1, VERTEX=2, WAVE=3, ENTITY=4, ONE_MINUS_ENTITY=5, LIGHTING_DIFFUSE=6, CONST=7
                             if (sp->stages[st].rgbGen == 4) { // STAGE_RGBGEN_ENTITY
@@ -3149,19 +3162,157 @@ void MoHAARunner::update_shader_animations(double delta) {
 // ──────────────────────────────────────────────
 
 Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
-    // Check cache
-    auto it = shader_textures.find(shader_handle);
-    if (it != shader_textures.end()) {
-        return it->second;
-    }
+    static std::unordered_map<int, bool> logged_missing;
+    static std::unordered_map<int, bool> logged_empty_name;
+    static std::unordered_map<int, bool> logged_serverback_ok;
 
     // Look up shader name (Phase 52: apply shader remap if active)
     const char *raw_name = Godot_Renderer_GetShaderName(shader_handle);
     const char *remapped = Godot_Renderer_GetShaderRemap(raw_name);
     const char *name = (remapped && remapped[0]) ? remapped : raw_name;
     if (!name || !name[0]) {
-        shader_textures[shader_handle] = Ref<ImageTexture>();
+        if (logged_empty_name.find(shader_handle) == logged_empty_name.end()) {
+            logged_empty_name[shader_handle] = true;
+            UtilityFunctions::print(String("[MoHAA][2D] Shader has no name yet: #") + String::num_int64(shader_handle));
+        }
         return Ref<ImageTexture>();
+    }
+
+    const bool is_serverback = (strstr(name, "serverback") != nullptr);
+    const char *lookup_name = name;
+    const GodotShaderProps *sp = Godot_ShaderProps_Find(name);
+
+    // UI scripts may provide namespaced aliases (e.g. "MENU/multiarrow")
+    // while the .shader definition key is the leaf token ("multiarrow").
+    // Retry lookups using basename to match renderer behaviour.
+    if (!sp) {
+        const char *slash = strrchr(name, '/');
+        if (slash && slash[1]) {
+            const GodotShaderProps *sp_base = Godot_ShaderProps_Find(slash + 1);
+            if (sp_base) {
+                sp = sp_base;
+                lookup_name = slash + 1;
+            }
+        }
+    }
+
+    auto load_texture_from_qpath = [&](const char *qpath) -> Ref<ImageTexture> {
+        if (!qpath || !qpath[0]) {
+            return Ref<ImageTexture>();
+        }
+
+        const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
+        for (int ext_i = 0; extensions[ext_i]; ext_i++) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s%s", qpath, extensions[ext_i]);
+
+            void *buf = NULL;
+            long len = Godot_VFS_ReadFile(path, &buf);
+            if (len <= 0 || !buf) {
+                if (buf) {
+                    Godot_VFS_FreeFile(buf);
+                }
+                continue;
+            }
+
+            PackedByteArray pba;
+            pba.resize(len);
+            memcpy(pba.ptrw(), buf, len);
+            Godot_VFS_FreeFile(buf);
+
+            Ref<Image> img;
+            img.instantiate();
+            Error err;
+
+            // Detect format by magic bytes
+            const uint8_t *data = pba.ptr();
+            if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
+                err = img->load_jpg_from_buffer(pba);
+            } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
+                err = img->load_png_from_buffer(pba);
+            } else {
+                // Try TGA first, then JPEG
+                err = img->load_tga_from_buffer(pba);
+                if (err != OK) {
+                    err = img->load_jpg_from_buffer(pba);
+                }
+            }
+
+            if (err == OK && !img->is_empty()) {
+                img->generate_mipmaps();
+                Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
+                if (is_serverback && logged_serverback_ok.find(shader_handle) == logged_serverback_ok.end()) {
+                    logged_serverback_ok[shader_handle] = true;
+                    UtilityFunctions::print(String("[MoHAA][2D] serverback loaded #") +
+                                            String::num_int64(shader_handle) +
+                                            String(" shader='") + String(name) +
+                                            String("' path='") + String(path) +
+                                            String("' size=") +
+                                            String::num_int64(img->get_width()) + String("x") +
+                                            String::num_int64(img->get_height()));
+                }
+                return tex;
+            }
+
+            if (is_serverback) {
+                UtilityFunctions::print(String("[MoHAA][2D] serverback decode failed shader='") +
+                                        String(name) + String("' path='") + String(path) +
+                                        String("' err=") + String::num_int64(err));
+            }
+        }
+
+        return Ref<ImageTexture>();
+    };
+
+    // animMap UI shaders must return a frame based on time; never return a
+    // frozen cached texture for these (e.g. fan_anim1 in the main menu).
+    if (sp && sp->has_animmap && sp->animmap_num_frames > 0 && sp->animmap_freq > 0.0f) {
+        shader_textures.erase(shader_handle);
+
+        auto it_anim = animmap_info.find(shader_handle);
+        auto it_frames = animmap_frames.find(shader_handle);
+
+        bool need_init = (it_anim == animmap_info.end() ||
+                          it_frames == animmap_frames.end() ||
+                          (int)it_frames->second.size() < sp->animmap_num_frames);
+
+        if (need_init) {
+            AnimMapInfo info;
+            info.freq = sp->animmap_freq;
+            info.num_frames = sp->animmap_num_frames;
+            animmap_info[shader_handle] = info;
+
+            std::vector<Ref<ImageTexture>> frames;
+            frames.resize(sp->animmap_num_frames);
+            for (int fi = 0; fi < sp->animmap_num_frames; fi++) {
+                if (!sp->animmap_frames[fi][0]) {
+                    continue;
+                }
+                frames[fi] = load_texture_from_qpath(sp->animmap_frames[fi]);
+            }
+            animmap_frames[shader_handle] = frames;
+
+            it_anim = animmap_info.find(shader_handle);
+            it_frames = animmap_frames.find(shader_handle);
+        }
+
+        if (it_anim != animmap_info.end() && it_frames != animmap_frames.end()) {
+            const AnimMapInfo &ai = it_anim->second;
+            if (ai.num_frames > 0 && (int)it_frames->second.size() >= ai.num_frames) {
+                int frame_idx = (int)floor(shader_anim_time * ai.freq) % ai.num_frames;
+                if (frame_idx < 0) frame_idx += ai.num_frames;
+                Ref<ImageTexture> frame_tex = it_frames->second[frame_idx];
+                if (frame_tex.is_valid()) {
+                    return frame_tex;
+                }
+            }
+        }
+    }
+
+    // Non-animated shaders use static texture caching.
+    auto it = shader_textures.find(shader_handle);
+    if (it != shader_textures.end()) {
+        return it->second;
     }
 
     // ── Determine the actual texture image path(s) to try ──
@@ -3173,7 +3324,6 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     const char *texture_paths[4] = { NULL, NULL, NULL, NULL };
     int num_texture_paths = 0;
 
-    const GodotShaderProps *sp = Godot_ShaderProps_Find(name);
     if (sp && sp->stage_count > 0) {
         /* Select the best diffuse texture: skip lightmap, $whiteimage,
          * and environment map stages (tcGen environment = reflections).
@@ -3181,6 +3331,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
          * Also handle animMap stages: use the first frame as the texture. */
         const char *fallback = NULL;
         for (int st = 0; st < sp->stage_count && num_texture_paths == 0; st++) {
+            if (!sp->stages[st].active) continue;
             if (sp->stages[st].isLightmap) continue;
 
             /* Determine the candidate texture path for this stage:
@@ -3211,12 +3362,28 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         texture_paths[num_texture_paths++] = name;
     }
 
+    // If a namespaced alias resolved via basename, also try the basename as a
+    // direct image path fallback (for implicit shaders without .shader blocks).
+    if (lookup_name != name && num_texture_paths < 4) {
+        bool exists = false;
+        for (int i = 0; i < num_texture_paths; i++) {
+            if (texture_paths[i] && strcmp(texture_paths[i], lookup_name) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            texture_paths[num_texture_paths++] = lookup_name;
+        }
+    }
+
     // ── Handle $whiteimage shaders (e.g. menu_button_trans) ──
     // If the shader definition exists but uses only $whiteimage stages
     // (no real texture paths), create a 1x1 white texture.
     if (num_texture_paths <= 1 && sp && sp->stage_count > 0) {
         bool all_white = true;
         for (int st = 0; st < sp->stage_count; st++) {
+            if (!sp->stages[st].active) continue;
             if (sp->stages[st].isLightmap) continue;
             const char *sm = sp->stages[st].map;
             if (sm[0] && strcmp(sm, "$whiteimage") != 0 && strcmp(sm, "$lightmap") != 0) {
@@ -3230,67 +3397,44 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         }
         if (all_white && num_texture_paths == 1) {
             // All stages are $whiteimage — return a 1x1 white texture
-            static Ref<ImageTexture> white_tex;
-            if (white_tex.is_null()) {
+            static Ref<ImageTexture> *white_tex = new Ref<ImageTexture>();
+            if (white_tex->is_null()) {
                 PackedByteArray wdata;
                 wdata.resize(4);
                 wdata.ptrw()[0] = 255; wdata.ptrw()[1] = 255;
                 wdata.ptrw()[2] = 255; wdata.ptrw()[3] = 255;
                 Ref<Image> wimg = Image::create_from_data(1, 1, false, Image::FORMAT_RGBA8, wdata);
-                white_tex = ImageTexture::create_from_image(wimg);
+                *white_tex = ImageTexture::create_from_image(wimg);
             }
-            shader_textures[shader_handle] = white_tex;
-            return white_tex;
+            shader_textures[shader_handle] = *white_tex;
+            return *white_tex;
         }
     }
 
     // ── Try loading each candidate path via VFS ──
     Ref<ImageTexture> tex;
-    const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
-
     for (int tp = 0; tp < num_texture_paths && tex.is_null(); tp++) {
-        for (int ext_i = 0; extensions[ext_i]; ext_i++) {
-            char path[256];
-            snprintf(path, sizeof(path), "%s%s", texture_paths[tp], extensions[ext_i]);
+        tex = load_texture_from_qpath(texture_paths[tp]);
+    }
 
-            void *buf = NULL;
-            long len = Godot_VFS_ReadFile(path, &buf);
-            if (len > 0 && buf) {
-                PackedByteArray pba;
-                pba.resize(len);
-                memcpy(pba.ptrw(), buf, len);
-                Godot_VFS_FreeFile(buf);
-                buf = NULL;
-
-                Ref<Image> img;
-                img.instantiate();
-                Error err;
-
-                // Detect format by magic bytes
-                const uint8_t *data = pba.ptr();
-                if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
-                    err = img->load_jpg_from_buffer(pba);
-                } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
-                    err = img->load_png_from_buffer(pba);
-                } else {
-                    // Try TGA first, then JPEG
-                    err = img->load_tga_from_buffer(pba);
-                    if (err != OK) {
-                        err = img->load_jpg_from_buffer(pba);
-                    }
-                }
-
-                if (err == OK && !img->is_empty()) {
-                    img->generate_mipmaps();
-                    tex = ImageTexture::create_from_image(img);
-                    break;
-                }
+    if (tex.is_null()) {
+        if (logged_missing.find(shader_handle) == logged_missing.end()) {
+            logged_missing[shader_handle] = true;
+            String dbg = String("[MoHAA][2D] Missing texture for shader #") +
+                         String::num_int64(shader_handle) + String(" name='") +
+                         String(name) + String("' candidates=");
+            for (int i = 0; i < num_texture_paths; i++) {
+                if (!texture_paths[i] || !texture_paths[i][0]) continue;
+                if (i > 0) dbg += String(",");
+                dbg += String(texture_paths[i]);
             }
-            if (buf) Godot_VFS_FreeFile(buf);
+            UtilityFunctions::print(dbg);
         }
     }
 
-    shader_textures[shader_handle] = tex;
+    if (!tex.is_null()) {
+        shader_textures[shader_handle] = tex;
+    }
     return tex;
 }
 
@@ -3343,6 +3487,8 @@ void MoHAARunner::update_ui_transform() {
 }
 
 void MoHAARunner::update_2d_overlay() {
+    static std::unordered_set<int> logged_serverback_draw;
+    static std::unordered_set<int> logged_serverback_geometry;
     int cmd_count = Godot_Renderer_Get2DCmdCount();
     if (cmd_count == 0 && !hud_layer) return;
     if (!hud_visible) return;  // F9 toggled off
@@ -3387,8 +3533,8 @@ void MoHAARunner::update_2d_overlay() {
         const unsigned char *bg_data = nullptr;
         if (Godot_Renderer_GetBackground(&cols, &rows, &bgr, &bg_data) &&
             cols > 0 && rows > 0 && bg_data && !Godot_Renderer_IsWorldMapLoaded()) {
-            static Ref<ImageTexture> bg_tex;
-            static Ref<Image> bg_img;
+            static Ref<ImageTexture> *bg_tex = new Ref<ImageTexture>();
+            static Ref<Image> *bg_img = new Ref<Image>();
 
             PackedByteArray pixels;
             pixels.resize(cols * rows * 4);
@@ -3409,16 +3555,16 @@ void MoHAARunner::update_2d_overlay() {
                 }
             }
 
-            bg_img = Image::create_from_data(cols, rows, false, Image::FORMAT_RGBA8, pixels);
-            if (bg_img.is_valid()) {
-                if (bg_tex.is_null()) {
-                    bg_tex = ImageTexture::create_from_image(bg_img);
+            *bg_img = Image::create_from_data(cols, rows, false, Image::FORMAT_RGBA8, pixels);
+            if (bg_img->is_valid()) {
+                if (bg_tex->is_null()) {
+                    *bg_tex = ImageTexture::create_from_image(*bg_img);
                 } else {
-                    bg_tex->update(bg_img);
+                    (*bg_tex)->update(*bg_img);
                 }
             }
 
-            if (bg_tex.is_valid()) {
+            if (bg_tex->is_valid()) {
                 // Use actual viewport size for fullscreen background
                 Vector2 vp = hud_control->get_size();
                 if (vp.x < 1.0f || vp.y < 1.0f) {
@@ -3426,7 +3572,7 @@ void MoHAARunner::update_2d_overlay() {
                     vp = visible_rect.size;
                 }
                 Rect2 full(0.0f, 0.0f, vp.x, vp.y);
-                rs->canvas_item_add_texture_rect(ci, full, bg_tex->get_rid());
+                rs->canvas_item_add_texture_rect(ci, full, (*bg_tex)->get_rid());
             }
         }
     }
@@ -3447,12 +3593,30 @@ void MoHAARunner::update_2d_overlay() {
     bool world_loaded = Godot_Renderer_IsWorldMapLoaded() != 0;
     bool allow_fullscreen_fills = overlay_on || !in_active_game || !world_loaded;
 
+    bool scissor_enabled = false;
+    bool saw_textured_draw = false;
+    static bool logged_late_clear_skip = false;
+    Rect2 scissor_rect;
+
     for (int i = 0; i < cmd_count; i++) {
         int type, shader;
         float x, y, w, h, s1, t1, s2, t2, color[4];
 
         if (!Godot_Renderer_Get2DCmd(i, &type, &x, &y, &w, &h,
                                       &s1, &t1, &s2, &t2, color, &shader)) {
+            continue;
+        }
+
+        // Menu/UI path: a late fullscreen black box can appear after textured
+        // quads and hide the backdrop. In GL this is constrained by state;
+        // in our flattened 2D stream we suppress that specific late clear.
+        if (overlay_on && saw_textured_draw && type == 1 &&
+            w * h > vid_area * 0.5f && color[3] > 0.95f &&
+            color[0] < 0.05f && color[1] < 0.05f && color[2] < 0.05f) {
+            if (!logged_late_clear_skip) {
+                logged_late_clear_skip = true;
+                UtilityFunctions::print("[MoHAA][2D] Skipping late fullscreen black clear after textured UI draws");
+            }
             continue;
         }
 
@@ -3468,25 +3632,57 @@ void MoHAARunner::update_2d_overlay() {
                    w * ui_scale_x, h * ui_scale_y);
         Color col(color[0], color[1], color[2], color[3]);
 
+        if (type == 2) {
+            // GR_2D_SCISSOR — clip subsequent draw calls.
+            // Coordinates are in engine space; apply the same transform
+            // as other 2D commands before clipping.
+            if (w <= 0.0f || h <= 0.0f) {
+                scissor_enabled = false;
+            } else {
+                scissor_enabled = true;
+                scissor_rect = rect;
+            }
+            continue;
+        }
+
+        Rect2 draw_rect = rect;
+        if (scissor_enabled) {
+            draw_rect = draw_rect.intersection(scissor_rect);
+            if (draw_rect.size.x <= 0.0f || draw_rect.size.y <= 0.0f) {
+                continue;
+            }
+        }
+
         if (type == 1) {
             // GR_2D_BOX — solid colour rectangle
-            rs->canvas_item_add_rect(ci, rect, col);
-        } else if (type == 2) {
-            // GR_2D_SCISSOR — currently a no-op.
-            // True scissor clipping would require nested canvas items with
-            // proper z-ordering, which breaks draw-order guarantees.
-            // The menu renders correctly without scissor clipping; it only
-            // matters for text overflow in list/scroll widgets.
+            rs->canvas_item_add_rect(ci, draw_rect, col);
         } else if (type == 0 && shader > 0) {
             // GR_2D_STRETCHPIC — textured quad
             Ref<ImageTexture> tex = get_shader_texture(shader);
+
             if (tex.is_valid()) {
                 RID tex_rid = tex->get_rid();
                 float tw = (float)tex->get_width();
                 float th = (float)tex->get_height();
                 Rect2 src(s1 * tw, t1 * th, (s2 - s1) * tw, (t2 - t1) * th);
 
-                // ── Apply shader stage alphaGen/blendFunc to draw colour ──
+                if (scissor_enabled) {
+                    if (rect.size.x <= 0.0f || rect.size.y <= 0.0f) {
+                        continue;
+                    }
+
+                    float u0 = (draw_rect.position.x - rect.position.x) / rect.size.x;
+                    float v0 = (draw_rect.position.y - rect.position.y) / rect.size.y;
+                    float u1 = (draw_rect.position.x + draw_rect.size.x - rect.position.x) / rect.size.x;
+                    float v1 = (draw_rect.position.y + draw_rect.size.y - rect.position.y) / rect.size.y;
+
+                    src.position.x += src.size.x * u0;
+                    src.position.y += src.size.y * v0;
+                    src.size.x *= (u1 - u0);
+                    src.size.y *= (v1 - v0);
+                }
+
+                // ── Apply shader stage rgbGen/alphaGen semantics to draw colour ──
                 // The real GL renderer processes per-stage alphaGen (e.g.
                 // "alphagen constant 0.0") which overrides the vertex alpha
                 // set by SetColor.  Our 2D overlay must replicate this.
@@ -3497,36 +3693,102 @@ void MoHAARunner::update_2d_overlay() {
                     if (sp && sp->stage_count > 0) {
                         // Find first non-lightmap stage (same as get_shader_texture)
                         for (int st = 0; st < sp->stage_count; st++) {
+                            if (!sp->stages[st].active) continue;
                             if (sp->stages[st].isLightmap) continue;
                             const MohaaShaderStage *stg = &sp->stages[st];
 
-                            // Apply alphaGen constant: overrides vertex alpha
-                            if (stg->alphaGen == STAGE_ALPHAGEN_CONST) {
-                                draw_col.a *= stg->alphaConst;
+                            // rgbGen handling: identity/const override vertex colour.
+                            if (stg->rgbGen == STAGE_RGBGEN_IDENTITY ||
+                                stg->rgbGen == STAGE_RGBGEN_IDENTITY_LIGHTING) {
+                                draw_col.r = 1.0f;
+                                draw_col.g = 1.0f;
+                                draw_col.b = 1.0f;
+                            } else if (stg->rgbGen == STAGE_RGBGEN_CONST) {
+                                draw_col.r = stg->rgbConst[0];
+                                draw_col.g = stg->rgbConst[1];
+                                draw_col.b = stg->rgbConst[2];
                             }
 
-                            // Apply rgbGen constant: overrides vertex colour
-                            if (stg->rgbGen == STAGE_RGBGEN_CONST) {
-                                draw_col.r *= stg->rgbConst[0];
-                                draw_col.g *= stg->rgbConst[1];
-                                draw_col.b *= stg->rgbConst[2];
+                            // alphaGen handling: identity/const override vertex alpha.
+                            if (stg->alphaGen == STAGE_ALPHAGEN_IDENTITY) {
+                                draw_col.a = 1.0f;
+                            } else if (stg->alphaGen == STAGE_ALPHAGEN_CONST) {
+                                draw_col.a = stg->alphaConst;
                             }
                             break;  // Only process first non-lightmap stage
                         }
                     }
                 }
 
+                if (sname && strstr(sname, "serverback") &&
+                    logged_serverback_draw.find(shader) == logged_serverback_draw.end()) {
+                    logged_serverback_draw.insert(shader);
+                    UtilityFunctions::print(String("[MoHAA][2D] serverback draw colour src=") +
+                                            String::num(col.r, 3) + String(",") +
+                                            String::num(col.g, 3) + String(",") +
+                                            String::num(col.b, 3) + String(",") +
+                                            String::num(col.a, 3) + String(" -> final=") +
+                                            String::num(draw_col.r, 3) + String(",") +
+                                            String::num(draw_col.g, 3) + String(",") +
+                                            String::num(draw_col.b, 3) + String(",") +
+                                            String::num(draw_col.a, 3) +
+                                            String(" shader='") + String(sname) + String("'"));
+                }
+
+                if (sname && strstr(sname, "serverback") &&
+                    logged_serverback_geometry.find(shader) == logged_serverback_geometry.end()) {
+                    logged_serverback_geometry.insert(shader);
+
+                    int fullscreen_opaque_after = 0;
+                    String first_opaque_info;
+                    for (int j = i + 1; j < cmd_count; j++) {
+                        int t2 = 0, sh2 = 0;
+                        float x2 = 0, y2 = 0, w2 = 0, h2 = 0, ss1 = 0, tt1 = 0, ss2 = 0, tt2 = 0, c2[4] = {0, 0, 0, 0};
+                        if (!Godot_Renderer_Get2DCmd(j, &t2, &x2, &y2, &w2, &h2, &ss1, &tt1, &ss2, &tt2, c2, &sh2)) {
+                            continue;
+                        }
+                        if (t2 == 1 && (w2 * h2) > (vid_area * 0.5f) && c2[3] > 0.9f) {
+                            fullscreen_opaque_after++;
+                            if (first_opaque_info.is_empty()) {
+                                first_opaque_info = String(" idx=") + String::num_int64(j) +
+                                                    String(" rect=") + String::num(x2, 1) + String(",") +
+                                                    String::num(y2, 1) + String(" ") +
+                                                    String::num(w2, 1) + String("x") +
+                                                    String::num(h2, 1) + String(" rgba=") +
+                                                    String::num(c2[0], 3) + String(",") +
+                                                    String::num(c2[1], 3) + String(",") +
+                                                    String::num(c2[2], 3) + String(",") +
+                                                    String::num(c2[3], 3);
+                            }
+                        }
+                    }
+
+                    UtilityFunctions::print(String("[MoHAA][2D] serverback draw geometry cmd=") +
+                                            String::num_int64(i) + String(" rect=") +
+                                            String::num(rect.position.x, 1) + String(",") +
+                                            String::num(rect.position.y, 1) + String(" ") +
+                                            String::num(rect.size.x, 1) + String("x") +
+                                            String::num(rect.size.y, 1) + String(" uv=") +
+                                            String::num(s1, 3) + String(",") +
+                                            String::num(t1, 3) + String(" -> ") +
+                                            String::num(s2, 3) + String(",") +
+                                            String::num(t2, 3) + String(" post_fullscreen_opaque=") +
+                                            String::num_int64(fullscreen_opaque_after) +
+                                            first_opaque_info);
+                }
+
                 // Skip fully transparent draws (alphaConst=0 → invisible)
                 if (draw_col.a < 0.001f) continue;
 
-                rs->canvas_item_add_texture_rect_region(ci, rect, tex_rid, src, draw_col);
+                rs->canvas_item_add_texture_rect_region(ci, draw_rect, tex_rid, src, draw_col);
+                saw_textured_draw = true;
             }
             // If texture not loaded, skip — don't draw opaque coloured rect fallback
         } else if (type == 0) {
             // StretchPic with no shader — draw unless it's a large opaque fill
             // that would cover the 3D view when in-game with no overlay.
             if (allow_fullscreen_fills || w * h < vid_area * 0.5f || color[3] < 0.9f) {
-                rs->canvas_item_add_rect(ci, rect, col);
+                rs->canvas_item_add_rect(ci, draw_rect, col);
             }
         }
     }
@@ -3800,94 +4062,140 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
 void MoHAARunner::update_hud_models() {
     int count = Godot_Renderer_GetHudModelCount();
 
-    /* If no HUD models requested, hide/disable the viewport */
+    /* If no HUD models requested, hide/disable all preview slots. */
     if (count == 0) {
-        if (hud_model_viewport) {
-            hud_model_viewport->set_update_mode(SubViewport::UPDATE_DISABLED);
-            if (hud_model_mesh) hud_model_mesh->set_visible(false);
+        for (size_t i = 0; i < hud_model_viewports.size(); i++) {
+            if (hud_model_viewports[i]) {
+                hud_model_viewports[i]->set_update_mode(SubViewport::UPDATE_DISABLED);
+            }
+            if (i < hud_model_meshes.size() && hud_model_meshes[i]) {
+                hud_model_meshes[i]->set_visible(false);
+            }
         }
         return;
     }
 
-    /* Process only the first HUD model (most common case) */
-    float origin[3], axis[9], ent_scale = 1.0f;
-    float rect[4], vieworg[3], viewaxis[9], fov[2];
-    int hModel = 0;
-    unsigned char rgba[4] = {255, 255, 255, 255};
-    void *tiki = nullptr;
+    /* Create missing SubViewport slots when multiple HUD models are requested. */
+    while ((int)hud_model_viewports.size() < count) {
+        int idx = (int)hud_model_viewports.size();
 
-    if (!Godot_Renderer_GetHudModel(0, origin, axis, &ent_scale, &hModel, rgba, &tiki,
-                                    rect, vieworg, viewaxis, fov)) {
-        return;
+        SubViewport *vp = memnew(SubViewport);
+        vp->set_name(String("HudModelViewport") + String::num_int64(idx));
+        vp->set_transparent_background(true);
+        vp->set_update_mode(SubViewport::UPDATE_ALWAYS);
+        vp->set_use_own_world_3d(true);
+        add_child(vp);
+
+        Camera3D *cam = memnew(Camera3D);
+        cam->set_name(String("HudModelCamera") + String::num_int64(idx));
+        cam->set_near(0.01);
+        cam->set_far(100.0);
+        vp->add_child(cam);
+
+        WorldEnvironment *we = memnew(WorldEnvironment);
+        we->set_name(String("HudModelWorldEnv") + String::num_int64(idx));
+        Ref<Environment> env;
+        env.instantiate();
+        env->set_ambient_light_color(Color(1.0, 1.0, 1.0, 1.0));
+        env->set_ambient_light_energy(1.7f);
+        env->set_ambient_light_sky_contribution(0.0f);
+        we->set_environment(env);
+        vp->add_child(we);
+
+        DirectionalLight3D *key = memnew(DirectionalLight3D);
+        key->set_name(String("HudModelKeyLight") + String::num_int64(idx));
+        key->set_color(Color(1.0, 1.0, 1.0, 1.0));
+        key->set_param(Light3D::PARAM_ENERGY, 2.0f);
+        key->set_rotation(Vector3(Math::deg_to_rad(-30.0f), Math::deg_to_rad(45.0f), 0.0f));
+        vp->add_child(key);
+
+        OmniLight3D *fill = memnew(OmniLight3D);
+        fill->set_name(String("HudModelFillLight") + String::num_int64(idx));
+        fill->set_color(Color(1.0, 0.97, 0.92, 1.0));
+        fill->set_param(Light3D::PARAM_ENERGY, 2.6f);
+        fill->set_param(Light3D::PARAM_RANGE, 6.0f);
+        vp->add_child(fill);
+
+        MeshInstance3D *mesh = memnew(MeshInstance3D);
+        mesh->set_name(String("HudModelMesh") + String::num_int64(idx));
+        mesh->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+        vp->add_child(mesh);
+
+        hud_model_viewports.push_back(vp);
+        hud_model_cameras.push_back(cam);
+        hud_model_world_envs.push_back(we);
+        hud_model_key_lights.push_back(key);
+        hud_model_fill_lights.push_back(fill);
+        hud_model_meshes.push_back(mesh);
+        hud_model_last_hmodels.push_back(-1);
+        hud_model_last_anim_hashes.push_back(0);
+
+        UtilityFunctions::print(String("[MoHAA] HUD model SubViewport slot created: ") + String::num_int64(idx));
     }
 
-    /* Create SubViewport infrastructure on first use */
-    if (!hud_model_viewport) {
-        hud_model_viewport = memnew(SubViewport);
-        hud_model_viewport->set_name("HudModelViewport");
-        hud_model_viewport->set_transparent_background(true);
+    /* Disable/clear unused slots this frame. */
+    for (size_t i = (size_t)count; i < hud_model_viewports.size(); i++) {
+        if (hud_model_viewports[i]) {
+            hud_model_viewports[i]->set_update_mode(SubViewport::UPDATE_DISABLED);
+        }
+        if (hud_model_meshes[i]) {
+            hud_model_meshes[i]->set_visible(false);
+        }
+    }
+
+    /* Process every HUD model (e.g. both Allies + Axis previews in mpoptions). */
+    for (int hud_idx = 0; hud_idx < count; hud_idx++) {
+        float origin[3], axis[9], ent_scale = 1.0f;
+        float rect[4], vieworg[3], viewaxis[9], fov[2];
+        int hModel = 0;
+        unsigned char rgba[4] = {255, 255, 255, 255};
+        void *tiki = nullptr;
+
+        if (!Godot_Renderer_GetHudModel(hud_idx, origin, axis, &ent_scale, &hModel, rgba, &tiki,
+                                        rect, vieworg, viewaxis, fov)) {
+            continue;
+        }
+
+        SubViewport *hud_model_viewport = hud_model_viewports[hud_idx];
+        Camera3D *hud_model_camera = hud_model_cameras[hud_idx];
+        OmniLight3D *hud_model_fill_light = hud_model_fill_lights[hud_idx];
+        MeshInstance3D *hud_model_mesh = hud_model_meshes[hud_idx];
+
+        /* Set viewport size proportional to widget rect */
+        int vp_w = Math::max((int)rect[2], 64);
+        int vp_h = Math::max((int)rect[3], 64);
+        hud_model_viewport->set_size(Vector2i(vp_w, vp_h));
         hud_model_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
-        /* Own World3D so it doesn't render the main scene */
-        hud_model_viewport->set_use_own_world_3d(true);
-        add_child(hud_model_viewport);
 
-        hud_model_camera = memnew(Camera3D);
-        hud_model_camera->set_name("HudModelCamera");
-        hud_model_camera->set_near(0.01);
-        hud_model_camera->set_far(100.0);
-        hud_model_viewport->add_child(hud_model_camera);
+        /* ── Camera setup ── */
+        Vector3 cam_pos = id_to_godot_position(vieworg[0], vieworg[1], vieworg[2]);
 
-        hud_model_light = memnew(DirectionalLight3D);
-        hud_model_light->set_name("HudModelLight");
-        hud_model_light->set_color(Color(1.0, 1.0, 1.0, 1.0));
-        /* Angle light from above-left for model preview visibility */
-        hud_model_light->set_rotation(Vector3(Math::deg_to_rad(-30.0f),
-                                               Math::deg_to_rad(45.0f), 0));
-        hud_model_viewport->add_child(hud_model_light);
+        float *va_fwd = &viewaxis[0];
+        float *va_lft = &viewaxis[3];
+        float *va_up  = &viewaxis[6];
+        Vector3 forward_g = id_to_godot_point(va_fwd[0], va_fwd[1], va_fwd[2]);
+        Vector3 left_g    = id_to_godot_point(va_lft[0], va_lft[1], va_lft[2]);
+        Vector3 up_g      = id_to_godot_point(va_up[0],  va_up[1],  va_up[2]);
 
-        hud_model_mesh = memnew(MeshInstance3D);
-        hud_model_mesh->set_name("HudModelMesh");
-        hud_model_viewport->add_child(hud_model_mesh);
+        Vector3 right_g = -left_g;
+        Vector3 back_g  = -forward_g;
+        Basis cam_basis(right_g, up_g, back_g);
+        hud_model_camera->set_global_transform(Transform3D(cam_basis, cam_pos));
 
-        static bool logged_hud_model = false;
-        if (!logged_hud_model) {
-            UtilityFunctions::print("[MoHAA] HUD model SubViewport created.");
-            logged_hud_model = true;
+        if (hud_model_fill_light) {
+            // Add frontal fill so preview models do not fall into near-black silhouettes.
+            hud_model_fill_light->set_global_position(cam_pos + (-back_g.normalized()) * 0.65f + up_g.normalized() * 0.1f);
         }
-    }
 
-    /* Set viewport size proportional to widget rect */
-    int vp_w = Math::max((int)rect[2], 64);
-    int vp_h = Math::max((int)rect[3], 64);
-    hud_model_viewport->set_size(Vector2i(vp_w, vp_h));
-    hud_model_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+        /* FOV — use fov_y for vertical FOV */
+        if (fov[1] > 1.0f && fov[1] < 170.0f) {
+            hud_model_camera->set_fov((double)fov[1]);
+        } else if (fov[0] > 1.0f && fov[0] < 170.0f) {
+            hud_model_camera->set_fov((double)fov[0]);
+        }
 
-    /* ── Camera setup ── */
-    /* Convert vieworg from id coords to Godot coords */
-    Vector3 cam_pos = id_to_godot_position(vieworg[0], vieworg[1], vieworg[2]);
-
-    /* Build camera basis from viewaxis (forward/left/up in id coords) */
-    float *va_fwd = &viewaxis[0];
-    float *va_lft = &viewaxis[3];
-    float *va_up  = &viewaxis[6];
-    Vector3 forward_g = id_to_godot_point(va_fwd[0], va_fwd[1], va_fwd[2]);
-    Vector3 left_g    = id_to_godot_point(va_lft[0], va_lft[1], va_lft[2]);
-    Vector3 up_g      = id_to_godot_point(va_up[0],  va_up[1],  va_up[2]);
-
-    Vector3 right_g = -left_g;
-    Vector3 back_g  = -forward_g;
-    Basis cam_basis(right_g, up_g, back_g);
-    hud_model_camera->set_global_transform(Transform3D(cam_basis, cam_pos));
-
-    /* FOV — use fov_y for vertical FOV */
-    if (fov[1] > 1.0f && fov[1] < 170.0f) {
-        hud_model_camera->set_fov((double)fov[1]);
-    } else if (fov[0] > 1.0f && fov[0] < 170.0f) {
-        hud_model_camera->set_fov((double)fov[0]);
-    }
-
-    /* ── Build skeletal mesh for the entity ── */
-    if (tiki) {
+        /* ── Build skeletal mesh for the entity ── */
+        if (tiki) {
         /* Get animation data */
         alignas(8) char frameInfoBuf[256];
         int boneTagBuf[5];
@@ -3895,7 +4203,7 @@ void MoHAARunner::update_hud_models() {
         float actionWeight = 0, anim_scale = 1.0f;
 
         bool has_anim = Godot_Renderer_GetHudModelAnim(
-            0, frameInfoBuf, boneTagBuf, boneQuatBuf,
+            hud_idx, frameInfoBuf, boneTagBuf, boneQuatBuf,
             &actionWeight, &anim_scale) != 0;
 
         /* Compute anim hash to skip rebuild when pose unchanged */
@@ -3913,8 +4221,8 @@ void MoHAARunner::update_hud_models() {
         fnv(&actionWeight, sizeof(actionWeight));
         fnv(&hModel, sizeof(hModel));
 
-        bool need_rebuild = (hModel != hud_model_last_hmodel) ||
-                            (anim_hash != hud_model_last_anim_hash);
+        bool need_rebuild = (hModel != hud_model_last_hmodels[hud_idx]) ||
+                    (anim_hash != hud_model_last_anim_hashes[hud_idx]);
 
         if (need_rebuild && has_anim) {
             int boneCount = 0;
@@ -3985,11 +4293,11 @@ void MoHAARunner::update_hud_models() {
                             gUVs.set(v, Vector2(texcoords[v*2+0], texcoords[v*2+1]));
                         }
 
-                        /* Reverse winding (id CW → Godot CCW) */
+                        /* Indices as-is — det(id_to_godot_point) = +1, winding preserved */
                         for (int t = 0; t < numTris; t++) {
                             gIdx.set(t*3+0, indices[t*3+0]);
-                            gIdx.set(t*3+1, indices[t*3+2]);
-                            gIdx.set(t*3+2, indices[t*3+1]);
+                            gIdx.set(t*3+1, indices[t*3+1]);
+                            gIdx.set(t*3+2, indices[t*3+2]);
                         }
 
                         Array arrays;
@@ -4005,6 +4313,14 @@ void MoHAARunner::update_hud_models() {
                             Ref<StandardMaterial3D> mat;
                             mat.instantiate();
                             mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
+                            mat->set_roughness(1.0f);
+                            // HUD preview models should be clearly readable and not
+                            // depend on dynamic lighting direction.  Use fullbright
+                            // shading to match the original menu preview appearance.
+                            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                            mat->set_specular(0.0f);
+                            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, false);
+                            mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
 
                             int sh = Godot_Renderer_RegisterShader(shaderName);
                             if (sh > 0) {
@@ -4027,53 +4343,73 @@ void MoHAARunner::update_hud_models() {
                 if (mesh.is_valid() && mesh->get_surface_count() > 0) {
                     hud_model_mesh->set_mesh(mesh);
                     hud_model_mesh->set_visible(true);
-                    hud_model_last_hmodel = hModel;
-                    hud_model_last_anim_hash = anim_hash;
+                    hud_model_last_hmodels[hud_idx] = hModel;
+                    hud_model_last_anim_hashes[hud_idx] = anim_hash;
                 }
             }
         } else if (!need_rebuild) {
             /* Same model and pose — just ensure visibility */
             hud_model_mesh->set_visible(true);
         }
-    } else {
-        /* No tiki — hide the mesh */
-        if (hud_model_mesh) hud_model_mesh->set_visible(false);
-    }
+        } else {
+            /* No tiki — hide the mesh */
+            if (hud_model_mesh) hud_model_mesh->set_visible(false);
+        }
 
-    /* ── Position the mesh in SubViewport space ── */
-    if (hud_model_mesh && hud_model_mesh->is_visible()) {
-        Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+        /* ── Position the mesh in SubViewport space ── */
+        if (hud_model_mesh && hud_model_mesh->is_visible()) {
+            Vector3 ent_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
 
-        /* Build entity axis basis (same as normal entity transform) */
-        float *e_fwd = &axis[0];
-        float *e_lft = &axis[3];
-        float *e_up  = &axis[6];
-        Vector3 ef = id_to_godot_point(e_fwd[0], e_fwd[1], e_fwd[2]) * ent_scale;
-        Vector3 el = id_to_godot_point(e_lft[0], e_lft[1], e_lft[2]) * ent_scale;
-        Vector3 eu = id_to_godot_point(e_up[0],  e_up[1],  e_up[2])  * ent_scale;
+            float *e_fwd = &axis[0];
+            float *e_lft = &axis[3];
+            float *e_up  = &axis[6];
+            Vector3 ef = id_to_godot_point(e_fwd[0], e_fwd[1], e_fwd[2]) * ent_scale;
+            Vector3 el = id_to_godot_point(e_lft[0], e_lft[1], e_lft[2]) * ent_scale;
+            Vector3 eu = id_to_godot_point(e_up[0],  e_up[1],  e_up[2])  * ent_scale;
 
-        Vector3 ent_right = -el;
-        Vector3 ent_back  = -ef;
-        Basis ent_basis(ent_right, eu, ent_back);
+            Vector3 ent_right = -el;
+            Vector3 ent_back  = -ef;
+            Basis ent_basis(ent_right, eu, ent_back);
 
-        hud_model_mesh->set_global_transform(Transform3D(ent_basis, ent_pos));
-    }
+            hud_model_mesh->set_global_transform(Transform3D(ent_basis, ent_pos));
+        }
 
-    /* ── Draw SubViewport texture into 2D overlay ── */
-    if (hud_layer && hud_control && hud_model_viewport) {
-        Ref<ViewportTexture> vp_tex = hud_model_viewport->get_texture();
-        if (vp_tex.is_valid()) {
-            RID ci = hud_control->get_canvas_item();
-            RenderingServer *rs = RenderingServer::get_singleton();
+        /* ── Draw this SubViewport texture into a canvas layer BELOW the main HUD ──
+         * This ensures 2D overlay elements (dropdown menus) render on top of
+         * the 3D model previews, matching the original engine's draw order. */
+        if (hud_model_viewport) {
+            /* Create the HUD model canvas layer on first use (layer 99, below HUD at 100) */
+            if (!hud_model_canvas_layer) {
+                hud_model_canvas_layer = memnew(CanvasLayer);
+                hud_model_canvas_layer->set_layer(99);
+                hud_model_canvas_layer->set_name("HUDModelLayer");
+                add_child(hud_model_canvas_layer);
 
-            /* Transform rect from engine 640×480 coords to screen coords */
-            Rect2 screen_rect(
-                ui_offset_x + rect[0] * ui_scale_x,
-                ui_offset_y + rect[1] * ui_scale_y,
-                rect[2] * ui_scale_x,
-                rect[3] * ui_scale_y);
+                hud_model_canvas_control = memnew(Control);
+                hud_model_canvas_control->set_name("HUDModelControl");
+                hud_model_canvas_control->set_anchors_preset(Control::PRESET_FULL_RECT);
+                hud_model_canvas_control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+                hud_model_canvas_layer->add_child(hud_model_canvas_control);
+            }
 
-            rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+            Ref<ViewportTexture> vp_tex = hud_model_viewport->get_texture();
+            if (vp_tex.is_valid()) {
+                RID ci = hud_model_canvas_control->get_canvas_item();
+                RenderingServer *rs = RenderingServer::get_singleton();
+
+                /* Clear on first HUD model draw this frame */
+                if (hud_idx == 0) {
+                    rs->canvas_item_clear(ci);
+                }
+
+                Rect2 screen_rect(
+                    ui_offset_x + rect[0] * ui_scale_x,
+                    ui_offset_y + rect[1] * ui_scale_y,
+                    rect[2] * ui_scale_x,
+                    rect[3] * ui_scale_y);
+
+                rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+            }
         }
     }
 }
@@ -4521,6 +4857,29 @@ void MoHAARunner::_process(double delta) {
     Com_Frame();
     godot_jmpbuf_valid = false;
 
+    // ── Cursor management: read engine's in_guimouse to set Godot cursor mode ──
+    // The engine manages in_guimouse internally via IN_MouseOn()/IN_MouseOff()
+    // when menus open/close (UI_FocusMenuIfExists, UI_MenuEscape, etc.).
+    // We simply mirror that state to Godot's cursor mode.
+    // This is the ONLY place that sets mouse_captured / Godot mouse mode.
+    // Placed AFTER Com_Frame() so state changes during the frame are immediate.
+    {
+        bool engine_wants_gui = Godot_Client_GetGuiMouse() != 0;
+        bool should_capture = !engine_wants_gui;
+        if (should_capture != mouse_captured) {
+            mouse_captured = should_capture;
+            Input *input = Input::get_singleton();
+            if (input) {
+                if (should_capture) {
+                    input->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
+                } else {
+                    input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
+                }
+            }
+            Godot_ResetMousePosition();
+        }
+    }
+
     // ── Phase 149: Apply engine cvar settings to Godot systems ──
     // Audio volume: read s_volume / s_musicvolume and apply to Godot AudioServer bus
     {
@@ -4575,6 +4934,12 @@ void MoHAARunner::_process(double delta) {
     {
         int fs = 0, vw = 0, vh = 0;
         if (Godot_Renderer_ConsumeVidRestart(&fs, &vw, &vh)) {
+            /* Renderer shader/model tables are rebuilt on vid_restart.
+               Drop handle-keyed caches so 2D/UI textures are re-resolved. */
+            shader_textures.clear();
+            animmap_info.clear();
+            animmap_frames.clear();
+
             DisplayServer *ds = DisplayServer::get_singleton();
             if (ds) {
                 if (fs) {
@@ -4600,24 +4965,9 @@ void MoHAARunner::_process(double delta) {
     // ── Phase 59: Poll UI state machine before rendering/input ──
     Godot_UI_Update();
 
-    // ── Phase 59: Cursor management — toggle mouse mode based on UI state ──
-    {
-        bool show_cursor = Godot_UI_ShouldShowCursor() != 0;
-        if (show_cursor != last_ui_cursor_shown) {
-            last_ui_cursor_shown = show_cursor;
-            Input *input = Input::get_singleton();
-            if (input) {
-                if (show_cursor) {
-                    input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
-                    mouse_captured = false;
-                } else {
-                    input->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
-                    mouse_captured = true;
-                }
-                Godot_ResetMousePosition();
-            }
-        }
-    }
+    // NOTE: Cursor management moved to after Com_Frame() so that state
+    // changes during the frame (menu open/close, map load, etc.) are
+    // reflected immediately without a 1-frame lag.
 
     // ── Phase 146: Custom cursor from engine (gfx/2d/mouse_cursor.tga) ──
     // The engine's UI system calls IN_SetCursorFromImage() with raw RGBA
@@ -4950,51 +5300,16 @@ bool MoHAARunner::is_hud_visible() const {
 // ──────────────────────────────────────────────
 
 /*
- * update_input_routing — Sync Godot cursor mode with the engine's
- *   keyCatcher state each frame.
- *
- *   - When an overlay is active (UI menu, console, chat) the cursor is
- *     released so the player can interact with the overlay.
- *   - When no overlay is active and a map is loaded, the cursor is
- *     captured for gameplay freelook.
- *   - When no map is loaded (boot, main menu), the cursor stays visible.
- *   - On transitions between modes, mouse position tracking is reset to
- *     prevent large delta jumps.
+ * update_input_routing — Now a no-op.  Cursor mode is driven entirely
+ *   by the engine's in_guimouse flag, which is synced at the top of
+ *   _process().  The engine manages in_guimouse via IN_MouseOn/Off
+ *   when menus open/close (UI_FocusMenuIfExists, UI_MenuEscape, etc.).
+ *   We do NOT forcibly clear keyCatchers or call SetGameInputMode —
+ *   the engine owns its own UI state.
  */
 void MoHAARunner::update_input_routing() {
-    if (!initialized) return;
-
-    bool overlay_active = Godot_Client_IsAnyOverlayActive();
-    int sv_state = Godot_GetServerState();
-    bool in_map = (sv_state == 3);  // SS_GAME
-
-    // Determine desired cursor state:
-    //   captured (hidden, relative motion) when in-game with no overlay
-    //   visible (free cursor, absolute position) otherwise
-    bool should_capture = in_map && !overlay_active && !cin_was_active;
-
-    // Detect overlay transitions and reset mouse tracking to avoid jumps
-    if (overlay_active != overlay_was_active) {
-        Godot_ResetMousePosition();
-        // When transitioning TO overlay (menu), centre the engine cursor
-        // so the UI starts with the pointer in a sensible position.
-        if (overlay_active) {
-            int rw = 0, rh = 0;
-            Godot_Renderer_GetVidSize(&rw, &rh);
-            if (rw > 0 && rh > 0) {
-                Godot_Client_SetMousePos(rw / 2, rh / 2);
-            }
-        }
-        overlay_was_active = overlay_active;
-    }
-
-    // Apply cursor mode change if needed
-    if (should_capture != mouse_captured) {
-        set_mouse_captured(should_capture);
-        if (should_capture) {
-            Godot_Client_SetGameInputMode();
-        }
-    }
+    // Intentionally empty — cursor sync is handled at top of _process()
+    // by reading Godot_Client_GetGuiMouse().
 }
 
 // ──────────────────────────────────────────────
@@ -5598,9 +5913,6 @@ bool MoHAARunner::is_menu_active() const {
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (!initialized) return;
 
-    // Phase 59: Check if UI should capture input
-    bool ui_active = Godot_UI_ShouldCaptureInput() != 0;
-
     // ── Keyboard events ──
     InputEventKey *key_event = Object::cast_to<InputEventKey>(p_event.ptr());
     if (key_event) {
@@ -5736,6 +6048,16 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
             return;
         }
 
+        // F11 — dump input state (debug: keyCatchers, bindings, mouse, pause)
+        if (pressed && !echo && key_event->get_keycode() == Key::KEY_F11) {
+            Godot_Client_DumpInputState();
+            UtilityFunctions::print(String("[MoHAA] mouse_captured=") +
+                String::num_int64(mouse_captured ? 1 : 0) +
+                String(" godot_mouse_mode=") +
+                String::num_int64((int)Input::get_singleton()->get_mouse_mode()));
+            return;
+        }
+
         // Get the keycode (logical key, respects keyboard layout)
         int godot_key = (int)key_event->get_keycode();
         if (godot_key == 0) {
@@ -5751,27 +6073,17 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
             bool is_console_key = (godot_key == GODOT_KEY_BACKTICK
                                    || godot_key == GODOT_KEY_TILDE);
 
-            if (ui_active) {
-                // Phase 59: Route through UI input handlers when UI is active
-                if (!echo) {
-                    Godot_UI_HandleKeyEvent(godot_key, pressed ? 1 : 0);
-                }
-                if ((pressed || echo) && !is_console_key) {
-                    int64_t unicode = key_event->get_unicode();
-                    if (unicode > 0) {
-                        Godot_UI_HandleCharEvent((int)unicode);
-                    }
-                }
-            } else {
-                // Game mode: inject directly to engine
-                if (!echo) {
-                    Godot_InjectKeyEvent(godot_key, pressed ? 1 : 0);
-                }
-                if ((pressed || echo) && !is_console_key) {
-                    int64_t unicode = key_event->get_unicode();
-                    if (unicode > 0) {
-                        Godot_InjectCharEvent((int)unicode);
-                    }
+            // Always inject key events into the engine's event queue.
+            // The engine's CL_KeyEvent (cl_keys.cpp) checks keyCatchers
+            // internally and routes to UI_KeyEvent / Console_Key / game
+            // bindings as appropriate.  No need for a parallel routing layer.
+            if (!echo) {
+                Godot_InjectKeyEvent(godot_key, pressed ? 1 : 0);
+            }
+            if ((pressed || echo) && !is_console_key) {
+                int64_t unicode = key_event->get_unicode();
+                if (unicode > 0) {
+                    Godot_InjectCharEvent((int)unicode);
                 }
             }
         }
@@ -5783,29 +6095,25 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
     if (motion_event) {
         if (mouse_captured) {
-            // Game mode: forward relative motion for freelook
+            // Game mode (in_guimouse == false): forward relative motion.
+            // The engine's CL_MouseEvent stores deltas in cl.mouseDx/Dy
+            // which CL_MouseMove uses for freelook view rotation.
             Vector2 rel = motion_event->get_relative();
             Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
         } else {
-            // UI/menu mode: transform absolute Godot viewport position to engine
-            // virtual 640×480 coordinates, accounting for letterbox/pillarbox offsets.
-            // This applies whether ui_active or not — the engine's cursor position
-            // (cl.mousex/cl.mousey) must track the visual Godot cursor exactly.
+            // UI/menu mode (in_guimouse == true): the engine's CL_MouseEvent
+            // accumulates SE_MOUSE deltas into cl.mousex/mousey when
+            // in_guimouse is set.  However, Godot provides absolute cursor
+            // coordinates and the delta-based accumulation drifts.  Instead,
+            // we set the engine cursor position directly from the Godot
+            // viewport position mapped to engine's 640×480 virtual space.
             Vector2 pos = motion_event->get_position();
-            
-            // Inverse of the rendering transform: subtract offset, divide by scale
             int ex = (int)((pos.x - ui_offset_x) / ui_scale_x);
             int ey = (int)((pos.y - ui_offset_y) / ui_scale_y);
-            
-            // Clamp to virtual screen bounds
             if (ex < 0) ex = 0;
             if (ey < 0) ey = 0;
             if (ex >= ui_vid_w) ex = ui_vid_w - 1;
             if (ey >= ui_vid_h) ey = ui_vid_h - 1;
-            
-            // Set engine cursor position directly — avoids delta-accumulation drift
-            // and ensures perfect 1:1 mapping between the visual OS cursor and the
-            // engine's hit-test position used by UIWindowManager.
             Godot_Client_SetMousePos(ex, ey);
         }
         return;
@@ -5817,31 +6125,19 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         int godot_button = (int)button_event->get_button_index();
         bool pressed = button_event->is_pressed();
 
-        if (ui_active) {
-            // Phase 59: Route mouse buttons through UI system
-            if (godot_button >= 1 && godot_button <= 3) {
-                Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
-            } else if (godot_button >= 4 && godot_button <= 5) {
-                if (pressed) {
-                    Godot_UI_HandleMouseButton(godot_button, 1);
-                    Godot_UI_HandleMouseButton(godot_button, 0);
-                }
-            } else if (godot_button == 8 || godot_button == 9) {
-                Godot_UI_HandleMouseButton(godot_button, pressed ? 1 : 0);
-            }
-        } else {
-            // Game mode: inject directly
-            if (godot_button >= 1 && godot_button <= 3) {
-                Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-            }
-            else if (godot_button == 8 || godot_button == 9) {
-                Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-            }
-            else if (godot_button >= 4 && godot_button <= 5) {
-                if (pressed) {
-                    Godot_InjectMouseButton(godot_button, 1);  // press
-                    Godot_InjectMouseButton(godot_button, 0);  // release
-                }
+        // Always inject mouse buttons into the engine's event queue.
+        // CL_KeyEvent handles UI routing based on keyCatchers internally.
+        // In UI mode the engine tracks cl.mouseButtons for hit testing.
+        if (godot_button >= 1 && godot_button <= 3) {
+            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+        } else if (godot_button == 8 || godot_button == 9) {
+            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+        } else if (godot_button >= 4 && godot_button <= 5) {
+            // Wheel events: Godot only fires pressed=true, engine expects
+            // both press and release.
+            if (pressed) {
+                Godot_InjectMouseButton(godot_button, 1);
+                Godot_InjectMouseButton(godot_button, 0);
             }
         }
 

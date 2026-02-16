@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa"
+PROJECT_BIN_DIR="$SCRIPT_DIR/project/bin"
+CGAME_DEPLOY_DIR="$HOME/.local/share/openmohaa/main"
+
 # Build OpenMoHAA GDExtension
-cd "$(dirname "$0")/openmohaa"
+cd "$OPENMOHAA_DIR"
 
 # If you edited widely included headers (e.g. qcommon.h), uncomment:
 # rm -f .sconsign.dblite
 
-scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes
+scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes "$@"
+
+# Validate artifacts before deploy
+[[ -f bin/libopenmohaa.so ]]
+[[ -f bin/libcgame.so ]]
 
 # Deploy artifacts
-cp -f bin/libopenmohaa.so ../project/bin/libopenmohaa.so
-cp -f bin/libcgame.so "$HOME/.local/share/openmohaa/main/cgame.so"
+mkdir -p "$PROJECT_BIN_DIR" "$CGAME_DEPLOY_DIR"
+command cp -f bin/libopenmohaa.so "$PROJECT_BIN_DIR/libopenmohaa.so"
+command cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so"

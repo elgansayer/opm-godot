@@ -134,6 +134,7 @@ static qhandle_t GR_RegisterModelInternal( const char *name, qboolean bBeginTiki
 
 static int next_shader_handle = 1;
 static int next_skin_handle   = 1;
+static int gr_fontHandlesDirty = 0;
 
 /* -------------------------------------------------------------------
  *  Shader name table (Phase 7h — 2D overlay rendering)
@@ -476,6 +477,7 @@ static void GR_Shutdown( qboolean destroyWindow )
 
 static void GR_BeginRegistration( glconfig_t *config )
 {
+    int i;
     ri.Printf( PRINT_ALL, "[GodotRenderer] BeginRegistration\n" );
 
     /* (Re-)initialise the model table */
@@ -491,8 +493,10 @@ static void GR_BeginRegistration( glconfig_t *config )
         gr_shaderHeights[i] = GR_DIM_UNKNOWN;
     }
 
-    /* Note: fonts are NOT reset here — the UI retains font pointers across
-       map loads, so zeroing them would leave dangling references. */
+     /* Fonts persist across map loads; shader handles must be rebound into
+         the rebuilt gr_shaders table.  Mark dirty and refresh lazily when
+         text is drawn (after font tables/functions are in scope). */
+     gr_fontHandlesDirty = 1;
 
     memset( config, 0, sizeof( *config ) );
 
@@ -715,7 +719,6 @@ static void GR_ClearScene( void )
     gr_numTerrainMarks     = 0;
     gr_numTerrainMarkVerts = 0;
     gr_bgActive     = 0;
-    gr_numHudModels = 0;
     gr_mainSceneRendered = 0;
 }
 
@@ -1233,6 +1236,21 @@ static void GR_RegisterFont( const char *fontName, int pointSize,
     if ( font ) memset( font, 0, sizeof( *font ) );
 }
 
+static void GR_RefreshFontHandlesIfNeeded( void )
+{
+    int i;
+
+    if ( !gr_fontHandlesDirty ) return;
+
+    for ( i = 0; i < gr_numFontsSgl; i++ ) {
+        char shaderName[128];
+        Com_sprintf( shaderName, sizeof( shaderName ), "gfx/fonts/%s", gr_fontsgl[i].name );
+        gr_fontsgl[i].trhandle = GR_RegisterShaderNoMip( shaderName );
+    }
+
+    gr_fontHandlesDirty = 0;
+}
+
 /* ---- load a single-page .RitualFont ---- */
 
 static fontheader_sgl_t *GR_LoadFont_sgl( const char *name )
@@ -1488,6 +1506,8 @@ static void GR_DrawString_sgl( fontheader_sgl_t *font, const char *text,
     qhandle_t shader;
 
     if ( !font || !text || !text[0] ) return;
+
+    GR_RefreshFontHandlesIfNeeded();
 
     shader = font->trhandle;
     charHeight = gr_fontHeightScale * font->height * gr_fontGeneralScale;
@@ -1769,12 +1789,120 @@ static refEntity_t *GR_GetRenderEntity( int entityNumber )
  *  calls return the cached value.  Defaults to 64×64 if load fails.
  * ---------------------------------------------------------------- */
 
-static void GR_CacheShaderDimensions( qhandle_t hShader )
+/* ── Helper: try to read image dimensions from a buffer of known length.
+ *    Returns 1 if dimensions were extracted, 0 otherwise.
+ *    Checks TGA format marker (h[2]==2 or 10) before reading TGA fields,
+ *    and JPEG SOI (FF D8) + SOF0/SOF2 for JPEG.  This prevents mis-reading
+ *    a JPEG file's JFIF header bytes as TGA width/height (which would give
+ *    garbage values like width=1). */
+static int GR_TryParseDimensions( const unsigned char *h, int len,
+                                  int *out_w, int *out_h )
+{
+    if ( len < 18 || !h ) return 0;
+
+    /* TGA: first validate the image type byte */
+    if ( h[2] == 2 || h[2] == 10 ) {
+        int w  = h[12] | (h[13] << 8);
+        int ht = h[14] | (h[15] << 8);
+        if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+            *out_w = w;
+            *out_h = ht;
+            return 1;
+        }
+    }
+
+    /* JPEG: SOI marker (FF D8), then scan for SOF0 (FF C0) or SOF2 (FF C2) */
+    if ( h[0] == 0xFF && h[1] == 0xD8 && len > 10 ) {
+        for ( int i = 2; i < len - 9; i++ ) {
+            if ( h[i] == 0xFF && (h[i+1] == 0xC0 || h[i+1] == 0xC2) ) {
+                int ht = (h[i+5] << 8) | h[i+6];
+                int w  = (h[i+7] << 8) | h[i+8];
+                if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+                    *out_w = w;
+                    *out_h = ht;
+                    return 1;
+                }
+                break;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/* ── Helper: strip file extension if present (.tga, .jpg, .png, etc.)
+ *    Returns 1 if an extension was stripped, 0 otherwise. */
+static int GR_StripImageExtension( const char *in, char *out, int out_size )
+{
+    int len;
+    Q_strncpyz( out, in, out_size );
+    len = (int)strlen( out );
+    if ( len > 4 && out[len-4] == '.' ) {
+        out[len-4] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+/* ── Try to load an image file and extract its dimensions.
+ *    Probes .tga then .jpg (matching engine's R_LoadImage order).
+ *    Returns 1 if dimensions were found, 0 otherwise. */
+static int GR_ProbeImageDimensions( const char *basepath, int *out_w, int *out_h )
 {
     void *buf = NULL;
     int len;
+    char stripped[MAX_QPATH];
+    int had_ext;
+
+    /* Strip any existing extension so we can probe cleanly */
+    had_ext = GR_StripImageExtension( basepath, stripped, sizeof(stripped) );
+
+    /* Probe 1: .tga */
+    len = ri.FS_ReadFile( va( "%s.tga", stripped ), &buf );
+    if ( len > 18 && buf ) {
+        if ( GR_TryParseDimensions( (const unsigned char *)buf, len, out_w, out_h ) ) {
+            ri.FS_FreeFile( buf );
+            return 1;
+        }
+        ri.FS_FreeFile( buf );
+        buf = NULL;
+    }
+    if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
+
+    /* Probe 2: .jpg (matches engine's R_LoadImage fallback order) */
+    len = ri.FS_ReadFile( va( "%s.jpg", stripped ), &buf );
+    if ( len > 18 && buf ) {
+        if ( GR_TryParseDimensions( (const unsigned char *)buf, len, out_w, out_h ) ) {
+            ri.FS_FreeFile( buf );
+            return 1;
+        }
+        ri.FS_FreeFile( buf );
+        buf = NULL;
+    }
+    if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
+
+    /* Probe 3: bare path (may already have correct extension) */
+    if ( had_ext ) {
+        len = ri.FS_ReadFile( basepath, &buf );
+        if ( len > 18 && buf ) {
+            if ( GR_TryParseDimensions( (const unsigned char *)buf, len, out_w, out_h ) ) {
+                ri.FS_FreeFile( buf );
+                return 1;
+            }
+            ri.FS_FreeFile( buf );
+            buf = NULL;
+        }
+        if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
+    }
+
+    return 0;
+}
+
+static void GR_CacheShaderDimensions( qhandle_t hShader )
+{
     const char *name;
     char resolved[MAX_QPATH];
+    int w = 0, h = 0;
 
     if ( hShader < 1 || hShader >= gr_numShaders ) return;
     if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
@@ -1785,108 +1913,26 @@ static void GR_CacheShaderDimensions( qhandle_t hShader )
      * holds the actual texture path, which may differ from the shader name.
      * This mirrors the lookup that get_shader_texture() does in MoHAARunner. */
     extern int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *out_path, int out_size);
-    if ( Godot_ShaderProps_GetTextureMap( name, resolved, sizeof(resolved) ) ) {
-        /* Try the resolved texture path */
-        len = ri.FS_ReadFile( va( "%s.tga", resolved ), &buf );
-        if ( len > 18 && buf ) {
-            const unsigned char *h = (const unsigned char *)buf;
-            int w = h[12] | (h[13] << 8);
-            int ht = h[14] | (h[15] << 8);
-            if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
-                gr_shaderWidths[hShader]  = w;
-                gr_shaderHeights[hShader] = ht;
-            }
-            ri.FS_FreeFile( buf );
-            if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
-            buf = NULL;
-        }
-        if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
-
-        /* Try bare resolved path (may already have extension) */
-        len = ri.FS_ReadFile( resolved, &buf );
-        if ( len > 18 && buf ) {
-            const unsigned char *h = (const unsigned char *)buf;
-            if ( h[2] == 2 || h[2] == 10 ) {
-                int w = h[12] | (h[13] << 8);
-                int ht = h[14] | (h[15] << 8);
-                if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
-                    gr_shaderWidths[hShader]  = w;
-                    gr_shaderHeights[hShader] = ht;
-                }
-            } else if ( h[0] == 0xFF && h[1] == 0xD8 && len > 10 ) {
-                for ( int i = 2; i < len - 9; i++ ) {
-                    if ( h[i] == 0xFF && (h[i+1] == 0xC0 || h[i+1] == 0xC2) ) {
-                        int ht = (h[i+5] << 8) | h[i+6];
-                        int w  = (h[i+7] << 8) | h[i+8];
-                        if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
-                            gr_shaderWidths[hShader]  = w;
-                            gr_shaderHeights[hShader] = ht;
-                        }
-                        break;
-                    }
-                }
-            }
-            ri.FS_FreeFile( buf );
-            if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
-            buf = NULL;
-        }
-        if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
-    }
-
-    /* Step 2: Fall back to shader name directly (implicit shader, no .shader def) */
-
-    /* Try .tga first (header has dimensions), then .jpg */
-    len = ri.FS_ReadFile( va( "%s.tga", name ), &buf );
-    if ( len > 18 && buf ) {
-        const unsigned char *h = (const unsigned char *)buf;
-        int w = h[12] | (h[13] << 8);
-        int ht = h[14] | (h[15] << 8);
-        if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
+    int sp_found = Godot_ShaderProps_GetTextureMap( name, resolved, sizeof(resolved) );
+    if ( sp_found ) {
+        if ( GR_ProbeImageDimensions( resolved, &w, &h ) ) {
             gr_shaderWidths[hShader]  = w;
-            gr_shaderHeights[hShader] = ht;
+            gr_shaderHeights[hShader] = h;
+            return;
         }
-        ri.FS_FreeFile( buf );
-        if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
-        buf = NULL;
     }
-    if ( buf ) { ri.FS_FreeFile( buf ); buf = NULL; }
 
-    /* Try bare name (may already have extension) */
-    len = ri.FS_ReadFile( name, &buf );
-    if ( len > 18 && buf ) {
-        const unsigned char *h = (const unsigned char *)buf;
-        /* Check if TGA */
-        if ( h[2] == 2 || h[2] == 10 ) {
-            int w = h[12] | (h[13] << 8);
-            int ht = h[14] | (h[15] << 8);
-            if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
-                gr_shaderWidths[hShader]  = w;
-                gr_shaderHeights[hShader] = ht;
-            }
-        }
-        /* Check if JPEG (SOI marker 0xFFD8) */
-        else if ( h[0] == 0xFF && h[1] == 0xD8 && len > 10 ) {
-            /* Scan for SOF0/SOF2 marker to get dimensions */
-            for ( int i = 2; i < len - 9; i++ ) {
-                if ( h[i] == 0xFF && (h[i+1] == 0xC0 || h[i+1] == 0xC2) ) {
-                    int ht = (h[i+5] << 8) | h[i+6];
-                    int w  = (h[i+7] << 8) | h[i+8];
-                    if ( w > 0 && w < 8192 && ht > 0 && ht < 8192 ) {
-                        gr_shaderWidths[hShader]  = w;
-                        gr_shaderHeights[hShader] = ht;
-                    }
-                    break;
-                }
-            }
-        }
-        ri.FS_FreeFile( buf );
+    /* Step 2: Fall back to shader name directly (implicit shader, no .shader def).
+     * Probe .tga and .jpg — mirrors engine's R_LoadImage which tries both. */
+    if ( GR_ProbeImageDimensions( name, &w, &h ) ) {
+        gr_shaderWidths[hShader]  = w;
+        gr_shaderHeights[hShader] = h;
+        return;
     }
 
     /* Fallback if nothing loaded */
-    if ( gr_shaderWidths[hShader] == GR_DIM_UNKNOWN ) {
-        gr_shaderWidths[hShader]  = 64;
-        gr_shaderHeights[hShader] = 64;
-    }
+    gr_shaderWidths[hShader]  = 64;
+    gr_shaderHeights[hShader] = 64;
 }
 
 static int GR_GetShaderWidth( qhandle_t hShader )
@@ -2742,6 +2788,19 @@ int Godot_Renderer_GetShaderCount( void )
 int Godot_Renderer_RegisterShader( const char *name )
 {
     return (int)GR_RegisterShader( name );
+}
+
+/* ── Invalidate shader dimension cache ──
+ * Called after Godot_ShaderProps_Load() so that shaders whose dimensions
+ * were cached with a 64×64 fallback (because shader props weren't loaded
+ * yet at first query) get re-resolved on next access. */
+void Godot_Renderer_InvalidateShaderDimCache( void )
+{
+    int i;
+    for ( i = 0; i < GR_MAX_SHADERS; i++ ) {
+        gr_shaderWidths[i]  = GR_DIM_UNKNOWN;
+        gr_shaderHeights[i] = GR_DIM_UNKNOWN;
+    }
 }
 
 void Godot_Renderer_GetVidSize( int *w, int *h )

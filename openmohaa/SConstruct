@@ -4,6 +4,12 @@ import sys
 
 env = SConscript("../godot-cpp/SConstruct")
 
+# Prevent Linux shell argv overflows when archiving very large static libs
+# (notably godot-cpp) from long workspace paths.
+if env.get("platform") == "linux" and env.get("ARCOM"):
+    env["ARCOM_POSIX"] = env["ARCOM"].replace("$TARGET", "$TARGET.posix").replace("$SOURCES", "$SOURCES.posix")
+    env["ARCOM"] = "${TEMPFILE(ARCOM_POSIX)}"
+
 # ──────────────────────────────────────────────
 #  OpenMoHAA GDExtension Build — Full Client + Server
 # ──────────────────────────────────────────────
@@ -128,7 +134,8 @@ env.Append(CPPPATH=[
 sys_sources = ["code/sys/sys_main.c", "code/sys/con_log.c"]
 if env["platform"] == "linux":
     env.Append(CPPDEFINES=["_LINUX", "__linux__"])
-    env.Append(CCFLAGS=["-Wno-discarded-qualifiers", "-Wno-incompatible-pointer-types", "-fexceptions", "-frtti"])
+    env.Append(CFLAGS=["-Wno-discarded-qualifiers", "-Wno-incompatible-pointer-types"])
+    env.Append(CXXFLAGS=["-fexceptions", "-frtti"])
     sys_sources.append("code/sys/sys_unix.c")
     sys_sources.append("code/sys/con_tty.c")
     sys_sources.append("code/sys/sys_curl.c")
@@ -143,7 +150,8 @@ elif env["platform"] == "windows":
     sys_sources.append("code/sys/win_bounds.cpp")
 elif env["platform"] == "macos":
     env.Append(CPPDEFINES=["__APPLE__", "MACOS_X"])
-    env.Append(CCFLAGS=["-Wno-incompatible-pointer-types", "-fexceptions", "-frtti"])
+    env.Append(CFLAGS=["-Wno-incompatible-pointer-types"])
+    env.Append(CXXFLAGS=["-fexceptions", "-frtti"])
     sys_sources.append("code/sys/sys_unix.c")   # macOS uses POSIX sys layer
     sys_sources.append("code/sys/con_tty.c")
     sys_sources.append("code/sys/sys_curl.c")
@@ -302,25 +310,23 @@ if env["platform"] == "linux":
     cgame_env.Append(CPPDEFINES=["_LINUX", "__linux__"])
     cgame_env.Append(CCFLAGS=[
         "-fPIC", "-g", "-O2",
-        "-Wno-discarded-qualifiers", "-Wno-incompatible-pointer-types",
-        "-fexceptions", "-frtti",
         "-fvisibility=hidden",      # Hide all symbols by default —
     ])                               # prevents ELF interposition of
                                      # template instantiations (e.g.
                                      # con_arrayset::DeleteTable) between
                                      # cgame.so and the main .so.
-    cgame_env.Append(CXXFLAGS=["-std=c++17"])
+    cgame_env.Append(CFLAGS=["-Wno-discarded-qualifiers", "-Wno-incompatible-pointer-types"])
+    cgame_env.Append(CXXFLAGS=["-std=c++17", "-fexceptions", "-frtti"])
     cgame_env.Append(LINKFLAGS=["-z", "muldefs"])
     cgame_env.Append(LINKFLAGS=["-Wl,-Bsymbolic-functions"])
 elif env["platform"] == "macos":
     cgame_env.Append(CPPDEFINES=["__APPLE__", "MACOS_X"])
     cgame_env.Append(CCFLAGS=[
         "-fPIC", "-g", "-O2",
-        "-Wno-incompatible-pointer-types",
-        "-fexceptions", "-frtti",
         "-fvisibility=hidden",
     ])
-    cgame_env.Append(CXXFLAGS=["-std=c++17"])
+    cgame_env.Append(CFLAGS=["-Wno-incompatible-pointer-types"])
+    cgame_env.Append(CXXFLAGS=["-std=c++17", "-fexceptions", "-frtti"])
     cgame_env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])
 elif env["platform"] == "windows":
     cgame_env.Append(CPPDEFINES=["_WIN32", "WIN32", "_WINDOWS"])
@@ -371,6 +377,7 @@ cgame_sources_raw += [
 cgame_sources_raw += [
     "code/qcommon/q_math.c",
     "code/qcommon/q_shared.c",
+    "code/godot/godot_surface_effects.cpp",
 ]
 
 cgame_sources = [cgame_path(s) for s in cgame_sources_raw]

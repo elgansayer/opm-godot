@@ -286,13 +286,25 @@ private:
     Control *hud_control = nullptr;                       // Control node for custom draw
     std::unordered_map<int, Ref<ImageTexture>> shader_textures; // shader handle → loaded texture
 
-    // HUD model preview SubViewport (Phase 148)
-    SubViewport *hud_model_viewport = nullptr;            // Renders 3D model for UI preview
-    Camera3D *hud_model_camera = nullptr;                 // Camera in the SubViewport
-    DirectionalLight3D *hud_model_light = nullptr;        // Lighting for model preview
-    MeshInstance3D *hud_model_mesh = nullptr;              // Current model mesh
-    int hud_model_last_hmodel = -1;                        // Track model changes
-    uint64_t hud_model_last_anim_hash = 0;                 // Track animation changes
+    // HUD model preview — separate canvas layer below main HUD overlay
+    // so that 2D elements (dropdown menus) render on top of model previews
+    CanvasLayer *hud_model_canvas_layer = nullptr;
+    Control *hud_model_canvas_control = nullptr;
+
+    // Multiplicative-blend child canvas item for 2D overlay (shadow shader etc.)
+    RID mul_canvas_item;
+
+    // HUD model preview SubViewports (Phase 148)
+    // mpoptions can request multiple previews (allies + axis), so we keep
+    // one slot per HUD render request index.
+    std::vector<SubViewport *> hud_model_viewports;
+    std::vector<Camera3D *> hud_model_cameras;
+    std::vector<WorldEnvironment *> hud_model_world_envs;
+    std::vector<DirectionalLight3D *> hud_model_key_lights;
+    std::vector<OmniLight3D *> hud_model_fill_lights;
+    std::vector<MeshInstance3D *> hud_model_meshes;
+    std::vector<int> hud_model_last_hmodels;
+    std::vector<uint64_t> hud_model_last_anim_hashes;
     
     // Viewport coordinate transformation (for HUD rendering and mouse input)
     // These are calculated once per frame and used for both rendering UI and transforming mouse coords

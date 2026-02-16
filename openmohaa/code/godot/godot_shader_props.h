@@ -103,6 +103,20 @@ enum MohaaStageTcModType {
     TCMOD_TURB,
     TCMOD_STRETCH,
     TCMOD_OFFSET,
+    TCMOD_WAVETRANS,
+    TCMOD_WAVETRANT,
+    TCMOD_BULGE,
+    TCMOD_TRANSFORM,
+    TCMOD_ENTITY_TRANSLATE,
+    TCMOD_PARALLAX,
+    TCMOD_MACRO,
+};
+
+enum MohaaStageTcModFlags {
+    TCMOD_FLAG_FROMENTITY_S         = 1 << 0,
+    TCMOD_FLAG_FROMENTITY_T         = 1 << 1,
+    TCMOD_FLAG_FROMENTITY_ROT_SPEED = 1 << 2,
+    TCMOD_FLAG_FROMENTITY_ROT_START = 1 << 3,
 };
 
 /* Wave function parameters (shared by rgbGen wave, alphaGen wave, tcMod stretch) */
@@ -117,12 +131,14 @@ struct MohaaWaveParams {
 /* Single tcMod directive within a stage */
 struct MohaaStageTcMod {
     MohaaStageTcModType type;
-    float params[6];   /* type-dependent: scroll(s,t), rotate(deg), scale(s,t), turb(base,amp,phase,freq), stretch uses wave */
+    float params[8];   /* type-dependent payload */
+    unsigned int flags; /* MohaaStageTcModFlags */
     MohaaWaveParams wave; /* only for TCMOD_STRETCH */
 };
 
 /* Per-stage shader data — one stage = one { } block inside a shader definition */
 struct MohaaShaderStage {
+    bool active;                    /* false when ifCvar/ifCvarnot disables this stage */
     char map[64];                    /* texture path or "$lightmap" */
     MohaaBlendFactor blendSrc;      /* GL blend source factor */
     MohaaBlendFactor blendDst;      /* GL blend destination factor */

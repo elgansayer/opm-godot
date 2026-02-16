@@ -380,25 +380,17 @@ extern "C" void Godot_Music_Shutdown(void)
 {
     if (!s_initialised) return;
 
-    for (int i = 0; i < 2; i++) {
-        if (s_players[i]) {
-            s_players[i]->stop();
-            if (s_players[i]->get_parent()) {
-                s_players[i]->get_parent()->remove_child(s_players[i]);
-            }
-            memdelete(s_players[i]);
-            s_players[i] = nullptr;
-        }
-    }
-
-    if (s_triggered_player) {
-        s_triggered_player->stop();
-        if (s_triggered_player->get_parent()) {
-            s_triggered_player->get_parent()->remove_child(s_triggered_player);
-        }
-        memdelete(s_triggered_player);
-        s_triggered_player = nullptr;
-    }
+    /*
+     * During engine teardown, MoHAARunner's children may already be in
+     * predelete order by the time this runs.  Dereferencing cached raw
+     * AudioStreamPlayer pointers here can hit freed objects and crash.
+     *
+     * We therefore only clear cached state and let Godot's node lifecycle
+     * own final child destruction.
+     */
+    s_players[0] = nullptr;
+    s_players[1] = nullptr;
+    s_triggered_player = nullptr;
 
     s_parent        = nullptr;
     s_initialised   = false;

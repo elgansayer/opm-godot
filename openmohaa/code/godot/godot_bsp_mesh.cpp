@@ -841,6 +841,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                 // animMap sequence, a $lightmap, or a regular texture.
                 for (int si = 0; si < sp->stage_count; si++) {
                     const MohaaShaderStage *stage = &sp->stages[si];
+                    if (!stage->active) continue;
                     String idx = String::num_int64(si);
 
                     if (stage->animMapFrameCount > 0) {
@@ -873,6 +874,17 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                             tex_bad++;
                         }
                     }
+
+                    /* nextBundle $lightmap: bind lightmap to stage<i>_lm */
+                    if (stage->hasNextBundleLightmap &&
+                        !batch.nolightmap &&
+                        batch.lightmap_num >= 0 &&
+                        batch.lightmap_num < (int)s_lightmaps.size() &&
+                        s_lightmaps[batch.lightmap_num].is_valid()) {
+                        smat->set_shader_parameter(
+                            String("stage") + idx + "_lm",
+                            s_lightmaps[batch.lightmap_num]);
+                    }
                 }
 
                 smat->set_meta("shader_name", String(batch.shader_name));
@@ -884,7 +896,10 @@ static Ref<ArrayMesh> batches_to_array_mesh(
             /* ── StandardMaterial3D fallback ── */
             Ref<StandardMaterial3D> mat;
             mat.instantiate();
-            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+            /* MOHAA default is CT_FRONT_SIDED (cull back faces).
+             * apply_shader_props overrides to CULL_DISABLED only if the
+             * shader definition explicitly says "cull none". */
+            mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
             bool has_texture = false;
             if (batch.shader_name) {
@@ -930,6 +945,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
 
                     // Phase 142: clampMap — disable texture repeat
                     for (int st = 0; st < sp->stage_count; st++) {
+                        if (!sp->stages[st].active) continue;
                         if (sp->stages[st].isLightmap) continue;
                         if (sp->stages[st].isClampMap) {
                             mat->set_flag(BaseMaterial3D::FLAG_USE_TEXTURE_REPEAT, false);

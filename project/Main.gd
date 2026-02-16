@@ -6,6 +6,7 @@ var screenshot_timer = 0.0
 const SCREENSHOT_DELAY = 1.5  # seconds after map load to take screenshot
 var launch_map = "obj/obj_team4"
 var launch_dedicated = false
+var launch_menu = ""
 
 func _ready():
 	print("Main: Script started.")
@@ -20,6 +21,7 @@ func _ready():
 	#   --dedicated       Launch dedicated server mode
 	#   --client          Force client mode
 	#   --map=<mapname>   Startup map (default: obj/obj_team4)
+	#   --menu=<name>     Push a specific UI menu after startup (e.g. multiplayerstart)
 	#   --nodev           Disable developer mode
 	#   --dev             Enable developer mode (console toggle with ~)
 	var user_args = OS.get_cmdline_user_args()
@@ -31,6 +33,8 @@ func _ready():
 			launch_dedicated = false
 		elif arg.begins_with("--map="):
 			launch_map = arg.substr(6)
+		elif arg.begins_with("--menu="):
+			launch_menu = arg.substr(7)
 		elif arg == "--nodev":
 			dev_mode = false
 		elif arg == "--dev":
@@ -44,6 +48,8 @@ func _ready():
 		print("Main: MoHAARunner added to tree (dynamic).")
 		print("Main: Startup args -> ", startup_args)
 		print("Main: Startup map  -> ", launch_map)
+		if launch_menu != "":
+			print("Main: Startup menu -> ", launch_menu)
 		
 		# Connect signals (Task 2.5.4)
 		runner.engine_error.connect(_on_engine_error)
@@ -59,6 +65,13 @@ func _ready():
 func _on_load_timer():
 	if runner and runner.is_engine_initialized():
 		print("Main: Engine is running. Main menu should be visible.")
+		if launch_menu != "":
+			if launch_menu == "mpoptions":
+				runner.execute_command("ui_getplayermodel")
+				print("Main: Executed -> ui_getplayermodel")
+			runner.execute_command("pushmenu " + launch_menu)
+			print("Main: Executed -> pushmenu ", launch_menu)
+			get_tree().create_timer(0.75).timeout.connect(func(): take_screenshot("menu_" + launch_menu))
 		# The engine auto-pushes the main menu on startup via CL_TryStartIntro().
 		# Use runner.execute_command("pushmenu main") if menu needs to be re-opened.
 		# Use runner.load_map("mapname") to load a specific map.
