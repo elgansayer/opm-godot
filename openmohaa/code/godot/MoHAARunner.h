@@ -12,6 +12,9 @@
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
+#include <godot_cpp/classes/canvas_item_material.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/audio_stream_player.hpp>
 #include <godot_cpp/classes/audio_stream_player3d.hpp>
@@ -291,8 +294,12 @@ private:
     CanvasLayer *hud_model_canvas_layer = nullptr;
     Control *hud_model_canvas_control = nullptr;
 
-    // Multiplicative-blend child canvas item for 2D overlay (shadow shader etc.)
-    RID mul_canvas_item;
+    // Multiplicative-blend child canvas items for 2D overlay
+    RID mul_canvas_item;            // blendFunc filter (src*dst)
+    Ref<CanvasItemMaterial> mul_canvas_material;
+    RID mul_inv_canvas_item;        // GL_ZERO GL_ONE_MINUS_SRC_COLOR → dst*(1-src)
+    Ref<ShaderMaterial> mul_inv_material;
+    Ref<Shader> mul_inv_shader;
 
     // HUD model preview SubViewports (Phase 148)
     // mpoptions can request multiple previews (allies + axis), so we keep

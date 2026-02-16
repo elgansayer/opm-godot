@@ -327,6 +327,7 @@ typedef struct {
     float       viewaxis[3][3];
     float       fov_x, fov_y;
     float       rect_x, rect_y, rect_w, rect_h;
+    int         draw_order;  /* 2D command index at time of capture */
 } gr_hud_model_t;
 
 static gr_hud_model_t gr_hudModels[GR_MAX_HUD_MODELS];
@@ -870,6 +871,7 @@ static void GR_RenderScene( const refdef_t *fd )
             hm->rect_y = (float)fd->y;
             hm->rect_w = (float)fd->width;
             hm->rect_h = (float)fd->height;
+            hm->draw_order = gr_num2DCmds;  /* record position in 2D stream */
 
             gr_numHudModels++;
         }
@@ -3037,6 +3039,16 @@ int Godot_Renderer_GetHudModel( int index,
     }
 
     return 1;
+}
+
+/* Return the 2D command index at which a HUD model was submitted.
+ * This tells the Godot side where in the 2D draw stream to inject
+ * the viewport texture so it appears at the correct z-position
+ * (between background fills and foreground widgets like dropdowns). */
+int Godot_Renderer_GetHudModelDrawOrder( int index )
+{
+    if ( index < 0 || index >= gr_numHudModels ) return 0;
+    return gr_hudModels[index].draw_order;
 }
 
 /* Phase 149: Vid_restart state — consumed by MoHAARunner after Com_Frame().

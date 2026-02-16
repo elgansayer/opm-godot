@@ -1843,14 +1843,16 @@ void UI_Update(void)
 #ifdef GODOT_GDEXTENSION
     /* Under Godot the 2D overlay captures every DrawStretchPic /
      * DrawBox call.  Use the HUD-only fast path when the game is
-     * active AND no menus are pushed.  If a menu is on the stack
-     * (player pressed ESC, options, etc.) we fall through to the
-     * full UI_Update rendering so menus paint correctly. */
-    if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu()) {
-        /* Safety net: clear KEYCATCH_UI when in gameplay with no menus.
-         * ActivateControl() may not fire View3D::OnActivate if view3d was
-         * already active, leaving KEYCATCH_UI stuck and routing WASD keys
-         * to UI_KeyEvent instead of game bindings. */
+     * active AND no menus or console are open.  If a menu is on the
+     * stack (player pressed ESC, options, etc.) or the console is
+     * visible, we fall through to the full UI_Update rendering so
+     * menus/console paint correctly. */
+    if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu() && !UI_ConsoleIsVisible()) {
+        /* Safety net: clear KEYCATCH_UI when in gameplay with no menus
+         * and no console.  ActivateControl() may not fire
+         * View3D::OnActivate if view3d was already active, leaving
+         * KEYCATCH_UI stuck and routing WASD keys to UI_KeyEvent
+         * instead of game bindings. */
         if (Key_GetCatcher() & KEYCATCH_UI) {
             Key_SetCatcher(Key_GetCatcher() & ~KEYCATCH_UI);
             IN_MouseOff();
@@ -2355,6 +2357,19 @@ void UI_Update(void)
         //
         str ammo = "hud_ammo_";
         ammo += CL_ConfigString(CS_WEAPONS + cl.snap.ps.activeItems[ITEM_WEAPON]);
+
+#ifdef GODOT_GDEXTENSION
+        {
+            static str last_logged_ammo;
+            if (ammo != last_logged_ammo) {
+                last_logged_ammo = ammo;
+                Menu *found = menuManager.FindMenu(ammo);
+                Com_Printf("[MoHAA][HUD-AMMO] weapon='%s' menu=%s hud_ammo=%s\n",
+                    ammo.c_str(), found ? "FOUND" : "NOT_FOUND",
+                    hud_ammo ? hud_ammo->m_name.c_str() : "NULL");
+            }
+        }
+#endif
 
         if (!hud_ammo || hud_ammo->m_name.icmp(ammo)) {
             Menu *ammoMenu = menuManager.FindMenu(ammo);

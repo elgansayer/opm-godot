@@ -87,6 +87,8 @@ static GodotShaderTransparency classify_blend(const char *src, const char *dst) 
         return SHADER_OPAQUE;
     if (!Q_stricmp(src, "GL_ZERO") && !Q_stricmp(dst, "GL_SRC_COLOR"))
         return SHADER_MULTIPLICATIVE;
+    if (!Q_stricmp(src, "GL_ZERO") && !Q_stricmp(dst, "GL_ONE_MINUS_SRC_COLOR"))
+        return SHADER_MULTIPLICATIVE_INV;
 
     /* Anything with GL_SRC_ALPHA as source is alpha-blended */
     if (!Q_stricmp(src, "GL_SRC_ALPHA"))
@@ -119,6 +121,8 @@ static GodotShaderTransparency classify_blend_factors(MohaaBlendFactor src,
         return SHADER_MULTIPLICATIVE;
     if (src == BLEND_ZERO && dst == BLEND_SRC_COLOR)
         return SHADER_MULTIPLICATIVE;
+    if (src == BLEND_ZERO && dst == BLEND_ONE_MINUS_SRC_COLOR)
+        return SHADER_MULTIPLICATIVE_INV;
     if (src == BLEND_ONE && dst == BLEND_ZERO)
         return SHADER_OPAQUE;
     if (src == BLEND_ZERO && dst == BLEND_ONE)
@@ -1483,6 +1487,7 @@ void Godot_ShaderProps_Load() {
                 case SHADER_ALPHA_BLEND:   n_alpha_blend++; break;
                 case SHADER_ADDITIVE:      n_additive++; break;
                 case SHADER_MULTIPLICATIVE: n_multiplicative++; break;
+                case SHADER_MULTIPLICATIVE_INV: n_multiplicative++; break; /* count with normal mul */
             }
         }
         UtilityFunctions::print(String("[ShaderProps] Transparency: ") +

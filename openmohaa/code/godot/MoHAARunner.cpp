@@ -281,6 +281,7 @@ extern "C" {
                                          void *outFrameInfo, int *outBoneTag,
                                          float *outBoneQuat, float *outActionWeight,
                                          float *outScale);
+    int   Godot_Renderer_GetHudModelDrawOrder(int index);
 
     // Phase 149: Vid_restart detection + settings accessors
     int   Godot_Renderer_ConsumeVidRestart(int *out_fullscreen, int *out_width, int *out_height);
@@ -3441,9 +3442,9 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
 // ──────────────────────────────────────────────
 //  UI Viewport Coordinate Transformation
 // ──────────────────────────────────────────────
-// Calculate the transformation from engine's 640×480 virtual space to actual viewport,
-// including letterbox/pillarbox offsets. Used by both update_2d_overlay() for rendering
-// and _unhandled_input() for mouse coordinate transformation.
+// Calculate the transformation from engine's 640×480 virtual space to actual viewport.
+// Uses non-uniform (stretch-to-fill) scaling to match OPM's SCR_AdjustFrom640() behaviour.
+// Used by both update_2d_overlay() for rendering and _unhandled_input() for mouse mapping.
 void MoHAARunner::update_ui_transform() {
     // Get engine's virtual resolution (always 640×480 in MOHAA)
     Godot_Renderer_GetVidSize(&ui_vid_w, &ui_vid_h);
@@ -3467,23 +3468,14 @@ void MoHAARunner::update_ui_transform() {
         }
     }
     
-    // Calculate aspect-ratio-preserving scale with letterbox/pillarbox
-    float engine_aspect = (float)ui_vid_w / (float)ui_vid_h;
-    float viewport_aspect = viewport_size.x / viewport_size.y;
-    
-    if (viewport_aspect > engine_aspect) {
-        // Viewport wider than engine → pillarbox (bars on sides)
-        ui_scale_y = viewport_size.y / (float)ui_vid_h;
-        ui_scale_x = ui_scale_y;  // uniform scaling
-        ui_offset_x = (viewport_size.x - (float)ui_vid_w * ui_scale_x) * 0.5f;
-        ui_offset_y = 0.0f;
-    } else {
-        // Viewport taller than engine → letterbox (bars top/bottom)
-        ui_scale_x = viewport_size.x / (float)ui_vid_w;
-        ui_scale_y = ui_scale_x;  // uniform scaling
-        ui_offset_x = 0.0f;
-        ui_offset_y = (viewport_size.y - (float)ui_vid_h * ui_scale_y) * 0.5f;
-    }
+    // Non-uniform scaling — stretch 640×480 to fill the entire viewport.
+    // This matches OPM behaviour: SCR_AdjustFrom640() scales X by
+    // vidWidth/640 and Y by vidHeight/480 independently, so the HUD
+    // fills the full screen regardless of aspect ratio.
+    ui_scale_x = viewport_size.x / (float)ui_vid_w;
+    ui_scale_y = viewport_size.y / (float)ui_vid_h;
+    ui_offset_x = 0.0f;
+    ui_offset_y = 0.0f;
 }
 
 void MoHAARunner::update_2d_overlay() {
@@ -3526,6 +3518,48 @@ void MoHAARunner::update_2d_overlay() {
     RID ci = hud_control->get_canvas_item();
     RenderingServer *rs = RenderingServer::get_singleton();
     rs->canvas_item_clear(ci);
+
+    /* Create/clear a child canvas item with multiplicative blend for
+     * shaders like "shadow" that use blendFunc filter (GL_DST_COLOR GL_ZERO).
+     * Must be a child of ci so it shares the same canvas layer. */
+    if (!mul_canvas_item.is_valid()) {
+        mul_canvas_item = rs->canvas_item_create();
+        rs->canvas_item_set_parent(mul_canvas_item, ci);
+
+        mul_canvas_material.instantiate();
+        mul_canvas_material->set_blend_mode(CanvasItemMaterial::BLEND_MODE_MUL);
+        rs->canvas_item_set_material(mul_canvas_item, mul_canvas_material->get_rid());
+    }
+    rs->canvas_item_clear(mul_canvas_item);
+
+    /* Create/clear a child canvas item with INVERSE multiplicative blend for
+     * shaders like "pmshadow" that use blendFunc GL_ZERO GL_ONE_MINUS_SRC_COLOR.
+     * Equation: result = dst * (1 - src).  We use blend_mul (dst * output) and
+     * output (1 - src) from a custom fragment shader. */
+    if (!mul_inv_canvas_item.is_valid()) {
+        mul_inv_canvas_item = rs->canvas_item_create();
+        rs->canvas_item_set_parent(mul_inv_canvas_item, ci);
+
+        mul_inv_shader.instantiate();
+        mul_inv_shader->set_code(
+            "shader_type canvas_item;\n"
+            "render_mode blend_mul;\n"
+            "void fragment() {\n"
+            "    vec4 tex = texture(TEXTURE, UV);\n"
+            "    // The real renderer scales SetColor by identityLight\n"
+            "    // (0.5 with default r_overBrightBits=1) before rgbGen global\n"
+            "    // modulation.  Our stub passes raw values, so apply the\n"
+            "    // factor here to match shadow intensity.\n"
+            "    float id_light = 0.5;\n"
+            "    COLOR = vec4(vec3(1.0) - tex.rgb * COLOR.rgb * id_light, tex.a * COLOR.a);\n"
+            "}\n"
+        );
+
+        mul_inv_material.instantiate();
+        mul_inv_material->set_shader(mul_inv_shader);
+        rs->canvas_item_set_material(mul_inv_canvas_item, mul_inv_material->get_rid());
+    }
+    rs->canvas_item_clear(mul_inv_canvas_item);
 
     // Phase 58: Draw captured background image during loading/screens
     {
@@ -3598,7 +3632,41 @@ void MoHAARunner::update_2d_overlay() {
     static bool logged_late_clear_skip = false;
     Rect2 scissor_rect;
 
+    /* Gather HUD model draw orders so we can inject viewport textures
+     * at the correct position in the 2D command stream. */
+    int hud_model_count = Godot_Renderer_GetHudModelCount();
+    int next_hud_model = 0;  /* index of next HUD model to inject */
+
     for (int i = 0; i < cmd_count; i++) {
+        /* ── Inject HUD model viewport textures at their recorded position ──
+         * The engine called CL_Draw3DModel (→ GR_RenderScene with RDF_NOWORLDMODEL)
+         * at a specific point in the 2D draw stream. We inject the viewport
+         * texture here so it appears between the background fills and the
+         * foreground UI widgets (dropdowns, etc.). */
+        while (next_hud_model < hud_model_count) {
+            int draw_order = Godot_Renderer_GetHudModelDrawOrder(next_hud_model);
+            if (draw_order > i) break;  /* not yet time for this model */
+
+            if (next_hud_model < (int)hud_model_viewports.size() &&
+                hud_model_viewports[next_hud_model]) {
+                SubViewport *vp = hud_model_viewports[next_hud_model];
+                Ref<ViewportTexture> vp_tex = vp->get_texture();
+                if (vp_tex.is_valid()) {
+                    float rect[4];
+                    Godot_Renderer_GetHudModel(next_hud_model,
+                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                        rect, nullptr, nullptr, nullptr);
+                    Rect2 screen_rect(
+                        ui_offset_x + rect[0] * ui_scale_x,
+                        ui_offset_y + rect[1] * ui_scale_y,
+                        rect[2] * ui_scale_x,
+                        rect[3] * ui_scale_y);
+                    rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+                }
+            }
+            next_hud_model++;
+        }
+
         int type, shader;
         float x, y, w, h, s1, t1, s2, t2, color[4];
 
@@ -3688,6 +3756,7 @@ void MoHAARunner::update_2d_overlay() {
                 // set by SetColor.  Our 2D overlay must replicate this.
                 Color draw_col = col;
                 const char *sname = Godot_Renderer_GetShaderName(shader);
+
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp = Godot_ShaderProps_Find(sname);
                     if (sp && sp->stage_count > 0) {
@@ -3780,7 +3849,119 @@ void MoHAARunner::update_2d_overlay() {
                 // Skip fully transparent draws (alphaConst=0 → invisible)
                 if (draw_col.a < 0.001f) continue;
 
-                rs->canvas_item_add_texture_rect_region(ci, draw_rect, tex_rid, src, draw_col);
+                /* Use the multiplicative child canvas item for shaders with
+                 * blendFunc filter (e.g. "shadow") so the texture darkens the
+                 * underlying surface rather than drawing opaquely.
+                 * Use the inverse-mul item for GL_ZERO GL_ONE_MINUS_SRC_COLOR
+                 * (e.g. "pmshadow") which needs dst*(1-src). */
+                bool is_mul = false;
+                bool is_mul_inv = false;
+                if (sname && sname[0]) {
+                    const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
+                    if (sp2 && sp2->transparency == SHADER_MULTIPLICATIVE) {
+                        is_mul = true;
+                    } else if (sp2 && sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
+                        is_mul_inv = true;
+                    }
+                }
+
+                RID target_ci = is_mul ? mul_canvas_item : (is_mul_inv ? mul_inv_canvas_item : ci);
+
+                // Detect tiling: if the source rect extends beyond the
+                // texture dimensions, the engine expects GL_REPEAT wrapping
+                // (e.g. statbar_tileshader for ammo bullet icons).
+                // Godot's canvas_item_add_texture_rect_region clamps source rects
+                // to image bounds, so tiled draws need special handling.
+                bool needs_tiling = (src.position.x + src.size.x > tw + 0.5f) ||
+                                    (src.position.y + src.size.y > th + 0.5f);
+
+                // Debug: log every 2D draw with UVs that suggest tiling
+                {
+                    static int tile_log_count = 0;
+                    if (tile_log_count < 50 && (s2 > 1.01f || t2 > 1.01f || s1 < -0.01f || t1 < -0.01f)) {
+                        tile_log_count++;
+                        UtilityFunctions::print(String("[MoHAA][TILE-DBG] shader=") + String(sname ? sname : "?") +
+                            String(" uv=") + String::num(s1,3) + String(",") + String::num(t1,3) +
+                            String("->") + String::num(s2,3) + String(",") + String::num(t2,3) +
+                            String(" texWH=") + String::num(tw,0) + String("x") + String::num(th,0) +
+                            String(" src=") + String::num(src.position.x,1) + String(",") + String::num(src.position.y,1) +
+                            String(" ") + String::num(src.size.x,1) + String("x") + String::num(src.size.y,1) +
+                            String(" draw=") + String::num(draw_rect.position.x,1) + String(",") + String::num(draw_rect.position.y,1) +
+                            String(" ") + String::num(draw_rect.size.x,1) + String("x") + String::num(draw_rect.size.y,1) +
+                            String(" needs_tiling=") + String(needs_tiling ? "YES" : "NO"));
+                    }
+                }
+
+                if (needs_tiling && tw > 0.0f && th > 0.0f &&
+                    draw_rect.size.x > 0.0f && draw_rect.size.y > 0.0f) {
+                    // Manual tiling: emit one draw per tile copy.
+                    // UV range in normalised [0..N] coordinates
+                    float u0 = s1;
+                    float v0 = t1;
+                    float u1 = s2;
+                    float v1 = t2;
+
+                    float total_u = u1 - u0;
+                    float total_v = v1 - v0;
+                    if (total_u <= 0.0f) total_u = 1.0f;
+                    if (total_v <= 0.0f) total_v = 1.0f;
+
+                    // Output pixels per UV unit
+                    float px_per_u = draw_rect.size.x / total_u;
+                    float px_per_v = draw_rect.size.y / total_v;
+
+                    int max_tiles = 256; // safety guard
+                    int tile_count = 0;
+                    float cur_v = v0;
+                    float out_y = draw_rect.position.y;
+                    while (cur_v < v1 - 0.0001f && tile_count < max_tiles) {
+                        float frac_v = cur_v - floorf(cur_v);
+                        float remain_v = v1 - cur_v;
+                        float span_v = 1.0f - frac_v;
+                        if (span_v > remain_v) span_v = remain_v;
+                        float row_h = span_v * px_per_v;
+
+                        float cur_u = u0;
+                        float out_x = draw_rect.position.x;
+                        while (cur_u < u1 - 0.0001f && tile_count < max_tiles) {
+                            float frac_u = cur_u - floorf(cur_u);
+                            float remain_u = u1 - cur_u;
+                            float span_u = 1.0f - frac_u;
+                            if (span_u > remain_u) span_u = remain_u;
+                            float col_w = span_u * px_per_u;
+
+                            Rect2 tile_dst(out_x, out_y, col_w, row_h);
+                            Rect2 tile_src(frac_u * tw, frac_v * th,
+                                           span_u * tw, span_v * th);
+
+                            if (scissor_enabled) {
+                                Rect2 clipped = tile_dst.intersection(scissor_rect);
+                                if (clipped.size.x > 0.5f && clipped.size.y > 0.5f &&
+                                    tile_dst.size.x > 0.0f && tile_dst.size.y > 0.0f) {
+                                    float cu0 = (clipped.position.x - tile_dst.position.x) / tile_dst.size.x;
+                                    float cv0 = (clipped.position.y - tile_dst.position.y) / tile_dst.size.y;
+                                    float cu1 = cu0 + clipped.size.x / tile_dst.size.x;
+                                    float cv1 = cv0 + clipped.size.y / tile_dst.size.y;
+                                    Rect2 cs(tile_src.position.x + tile_src.size.x * cu0,
+                                             tile_src.position.y + tile_src.size.y * cv0,
+                                             tile_src.size.x * (cu1 - cu0),
+                                             tile_src.size.y * (cv1 - cv0));
+                                    rs->canvas_item_add_texture_rect_region(target_ci, clipped, tex_rid, cs, draw_col);
+                                }
+                            } else {
+                                rs->canvas_item_add_texture_rect_region(target_ci, tile_dst, tex_rid, tile_src, draw_col);
+                            }
+
+                            tile_count++;
+                            cur_u += span_u;
+                            out_x += col_w;
+                        }
+                        cur_v += span_v;
+                        out_y += row_h;
+                    }
+                } else {
+                    rs->canvas_item_add_texture_rect_region(target_ci, draw_rect, tex_rid, src, draw_col);
+                }
                 saw_textured_draw = true;
             }
             // If texture not loaded, skip — don't draw opaque coloured rect fallback
@@ -3791,6 +3972,29 @@ void MoHAARunner::update_2d_overlay() {
                 rs->canvas_item_add_rect(ci, draw_rect, col);
             }
         }
+    }
+
+    /* Flush any remaining HUD model viewport textures whose draw_order
+     * was >= cmd_count (e.g. model draw was the last operation). */
+    while (next_hud_model < hud_model_count) {
+        if (next_hud_model < (int)hud_model_viewports.size() &&
+            hud_model_viewports[next_hud_model]) {
+            SubViewport *vp = hud_model_viewports[next_hud_model];
+            Ref<ViewportTexture> vp_tex = vp->get_texture();
+            if (vp_tex.is_valid()) {
+                float rect[4];
+                Godot_Renderer_GetHudModel(next_hud_model,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                    rect, nullptr, nullptr, nullptr);
+                Rect2 screen_rect(
+                    ui_offset_x + rect[0] * ui_scale_x,
+                    ui_offset_y + rect[1] * ui_scale_y,
+                    rect[2] * ui_scale_x,
+                    rect[3] * ui_scale_y);
+                rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+            }
+        }
+        next_hud_model++;
     }
 
     static bool logged_2d = false;
@@ -4374,43 +4578,9 @@ void MoHAARunner::update_hud_models() {
             hud_model_mesh->set_global_transform(Transform3D(ent_basis, ent_pos));
         }
 
-        /* ── Draw this SubViewport texture into a canvas layer BELOW the main HUD ──
-         * This ensures 2D overlay elements (dropdown menus) render on top of
-         * the 3D model previews, matching the original engine's draw order. */
-        if (hud_model_viewport) {
-            /* Create the HUD model canvas layer on first use (layer 99, below HUD at 100) */
-            if (!hud_model_canvas_layer) {
-                hud_model_canvas_layer = memnew(CanvasLayer);
-                hud_model_canvas_layer->set_layer(99);
-                hud_model_canvas_layer->set_name("HUDModelLayer");
-                add_child(hud_model_canvas_layer);
-
-                hud_model_canvas_control = memnew(Control);
-                hud_model_canvas_control->set_name("HUDModelControl");
-                hud_model_canvas_control->set_anchors_preset(Control::PRESET_FULL_RECT);
-                hud_model_canvas_control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-                hud_model_canvas_layer->add_child(hud_model_canvas_control);
-            }
-
-            Ref<ViewportTexture> vp_tex = hud_model_viewport->get_texture();
-            if (vp_tex.is_valid()) {
-                RID ci = hud_model_canvas_control->get_canvas_item();
-                RenderingServer *rs = RenderingServer::get_singleton();
-
-                /* Clear on first HUD model draw this frame */
-                if (hud_idx == 0) {
-                    rs->canvas_item_clear(ci);
-                }
-
-                Rect2 screen_rect(
-                    ui_offset_x + rect[0] * ui_scale_x,
-                    ui_offset_y + rect[1] * ui_scale_y,
-                    rect[2] * ui_scale_x,
-                    rect[3] * ui_scale_y);
-
-                rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
-            }
-        }
+        /* Viewport texture drawing is handled by update_2d_overlay() which
+         * injects the viewport texture at the correct position in the 2D
+         * command stream (using draw_order from the renderer capture). */
     }
 }
 
