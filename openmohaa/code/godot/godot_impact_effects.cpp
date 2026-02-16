@@ -459,3 +459,35 @@ ImpactSurfaceType Godot_Impact_SurfaceFromFlags(int surfaceFlags) {
     if (surfaceFlags & 0x40000)   return IMPACT_GRILL;    /* SURF_GRILL   */
     return IMPACT_DEFAULT;
 }
+
+/* ───────────────────────────────────────────────────────────────────
+ *  C-linkage wrappers for engine integration
+ * ─────────────────────────────────────────────────────────────────── */
+
+static constexpr float MOHAA_UNIT_SCALE_C = 1.0f / 39.37f;
+
+/* Convert id Tech 3 coordinates (X=Forward, Y=Left, Z=Up) to Godot (X=Right, Y=Up, Z=Back) */
+static inline Vector3 id_to_godot_c(float ix, float iy, float iz) {
+    return Vector3(-iy * MOHAA_UNIT_SCALE_C,
+                    iz * MOHAA_UNIT_SCALE_C,
+                   -ix * MOHAA_UNIT_SCALE_C);
+}
+
+/* Convert id Tech 3 direction vector (no scale) */
+static inline Vector3 id_to_godot_dir_c(float ix, float iy, float iz) {
+    return Vector3(-iy, iz, -ix);
+}
+
+extern "C" {
+
+void Godot_Impact_Spawn_C(int surfaceFlags, float *pos, float *norm) {
+    if (!pos || !norm) return;
+
+    ImpactSurfaceType type = Godot_Impact_SurfaceFromFlags(surfaceFlags);
+    Vector3 g_pos = id_to_godot_c(pos[0], pos[1], pos[2]);
+    Vector3 g_norm = id_to_godot_dir_c(norm[0], norm[1], norm[2]);
+
+    Godot_Impact_Spawn(type, g_pos, g_norm);
+}
+
+}

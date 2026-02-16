@@ -182,6 +182,7 @@ typedef struct {
 #ifdef GODOT_GDEXTENSION
     void (*AddMuzzleFlash)(const vec3_t origin, const vec3_t dir, float intensity);
     void (*AddShellCasing)(const vec3_t origin, const vec3_t velocity, int type);
+    void (*AddImpactEffect)(int surfaceFlags, const vec3_t origin, const vec3_t normal);
 #endif
 
     void (*Set2DInitialShaderTime)(float startTime);
