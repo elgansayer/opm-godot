@@ -815,6 +815,7 @@ void MoHAARunner::check_world_load() {
             bsp_map_node->queue_free();
             bsp_map_node = nullptr;
             static_model_root = nullptr;  // child of bsp_map_node, freed with it
+            flare_root = nullptr;         // child of bsp_map_node, freed with it
             loaded_bsp_name = "";
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
@@ -878,6 +879,9 @@ void MoHAARunner::check_world_load() {
         // Load skybox cubemap from sky shader (Phase 12)
         load_skybox();
         UtilityFunctions::print(String("[MoHAA] Loading load_skybox: ") + new_bsp);
+
+        // Load flare surfaces (Phase 152)
+        load_flares();
 
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
@@ -1376,6 +1380,99 @@ void MoHAARunner::load_skybox() {
         UtilityFunctions::print(
             String("[MoHAA] Skybox loaded: ") + sky_env + " (6 faces).");
     }
+}
+
+// ──────────────────────────────────────────────
+//  Flare loading (Phase 152)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::load_flares() {
+    int count = Godot_BSP_GetFlareCount();
+    if (count <= 0) return;
+
+    if (flare_root) {
+        flare_root->queue_free();
+        flare_root = nullptr;
+    }
+
+    flare_root = memnew(Node3D);
+    flare_root->set_name("Flares");
+    if (bsp_map_node) {
+        bsp_map_node->add_child(flare_root);
+    } else {
+        game_world->add_child(flare_root);
+    }
+
+    // Lazy init shared quad mesh
+    if (flare_quad_mesh.is_null()) {
+        flare_quad_mesh.instantiate();
+        PackedVector3Array pos; pos.resize(4);
+        float hs = 0.5f; // half size, total 1.0m (roughly 40 inches)
+        pos.set(0, Vector3(-hs, -hs, 0));
+        pos.set(1, Vector3( hs, -hs, 0));
+        pos.set(2, Vector3( hs,  hs, 0));
+        pos.set(3, Vector3(-hs,  hs, 0));
+
+        PackedVector2Array uv; uv.resize(4);
+        uv.set(0, Vector2(0, 1));
+        uv.set(1, Vector2(1, 1));
+        uv.set(2, Vector2(1, 0));
+        uv.set(3, Vector2(0, 0));
+
+        PackedInt32Array idx; idx.resize(6);
+        idx.set(0, 0); idx.set(1, 1); idx.set(2, 2);
+        idx.set(3, 0); idx.set(4, 2); idx.set(5, 3);
+
+        Array arrays; arrays.resize(Mesh::ARRAY_MAX);
+        arrays[Mesh::ARRAY_VERTEX] = pos;
+        arrays[Mesh::ARRAY_TEX_UV] = uv;
+        arrays[Mesh::ARRAY_INDEX] = idx;
+
+        flare_quad_mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+    }
+
+    int placed = 0;
+    for (int i = 0; i < count; i++) {
+        const BSPFlare *flare = Godot_BSP_GetFlare(i);
+        if (!flare) continue;
+
+        MeshInstance3D *mi = memnew(MeshInstance3D);
+        mi->set_name(String("Flare_") + String::num_int64(i));
+        mi->set_mesh(flare_quad_mesh);
+
+        Ref<StandardMaterial3D> mat;
+        mat.instantiate();
+        mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+        mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+        // Default to white * flare color
+        mat->set_albedo(Color(flare->color[0], flare->color[1], flare->color[2], 1.0f));
+
+        if (flare->shader[0]) {
+            // Register shader to get handle, then load texture
+            int hShader = Godot_Renderer_RegisterShader(flare->shader);
+            if (hShader > 0) {
+                Ref<ImageTexture> tex = get_shader_texture(hShader);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+            }
+            // Apply shader props (might override blend mode/billboard)
+            apply_shader_props_to_material(mat, flare->shader);
+
+            // Force billboard mode for flares, as they are implicitly billboards
+            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+        }
+
+        mi->set_surface_override_material(0, mat);
+        mi->set_position(Vector3(flare->origin[0], flare->origin[1], flare->origin[2]));
+
+        flare_root->add_child(mi);
+        placed++;
+    }
+    UtilityFunctions::print(String("[MoHAA] Flares loaded: ") + String::num_int64(placed));
 }
 
 // ──────────────────────────────────────────────

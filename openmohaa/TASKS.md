@@ -2410,3 +2410,19 @@ Replaced the non-functional `canvas_item_set_custom_rect()` approach with proper
 - `code/godot/MoHAARunner.h` — Added `scissor_items` vector for scissor canvas item cleanup
 - `code/godot/godot_renderer.c` — `GR_ImageExists()` checks shader table before VFS
 - `project/Main.gd` — `dev_mode = false` default, `--dev` flag, cleaned up timer callback
+
+## Phase 152: Flare Surface Rendering ✅
+Implemented rendering for BSP flare surfaces (`MST_FLARE`), which were previously parsed but ignored by the renderer.
+
+- [x] **Task 152.1:** Added `load_flares()` to `MoHAARunner.cpp`.
+- [x] **Task 152.2:** Added `flare_root` and `flare_quad_mesh` to `MoHAARunner.h`.
+- [x] **Task 152.3:** Integrated flare loading into `check_world_load()` after skybox loading.
+- [x] **Task 152.4:** Configured flares as billboarded, additive, unshaded quads using `StandardMaterial3D`.
+- [x] **Task 152.5:** Applied vertex colour tinting and shader textures.
+
+### Key technical details (Phase 152):
+- **Flare data**: Parsed from BSP `LUMP_SURFACES` (type 4) into `s_flares` vector in `godot_bsp_mesh.cpp` (Phase 74).
+- **Rendering**: Each flare is a `MeshInstance3D` using a shared `QuadMesh` (built as an `ArrayMesh` to avoid dependency on `QuadMesh` header availability).
+- **Material**: `billboard_mode = BILLBOARD_ENABLED`, `blend_mode = BLEND_MODE_ADD` (unless overridden by .shader), `shading_mode = SHADING_MODE_UNSHADED`.
+- **Scaling**: Default size 1.0m (0.5 extents).
+- **Files modified**: `code/godot/MoHAARunner.h`, `code/godot/MoHAARunner.cpp`.

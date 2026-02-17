@@ -212,6 +212,10 @@ private:
     // Static BSP models (Phase 10)
     Node3D *static_model_root = nullptr;     // Container for TIKI static models from BSP
 
+    // Flare rendering (Phase 152)
+    Node3D *flare_root = nullptr;
+    Ref<ArrayMesh> flare_quad_mesh;
+
     // Entity rendering (Phase 7e)
     Node3D *entity_root = nullptr;                        // Container for entity debug meshes
     std::vector<MeshInstance3D *> entity_meshes;           // Pooled debug mesh instances
@@ -375,6 +379,7 @@ private:
     void update_hud_models(); // Render HUD model previews (Phase 148)
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
+    void load_flares();  // Load flare surfaces (Phase 152)
 
 protected:
     static void _bind_methods();
