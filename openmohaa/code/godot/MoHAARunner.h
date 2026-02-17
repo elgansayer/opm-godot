@@ -16,6 +16,7 @@
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/color_rect.hpp>
 #include <godot_cpp/classes/audio_stream_player.hpp>
 #include <godot_cpp/classes/audio_stream_player3d.hpp>
 #include <godot_cpp/classes/audio_stream_wav.hpp>
@@ -322,6 +323,14 @@ private:
     Ref<Shader> mul_inv_shader;
     Ref<ShaderMaterial> opaque_mix_material;
     Ref<Shader> opaque_mix_shader;
+
+    // Full-screen gamma overlay — replicates GLimp_SetGamma hardware gamma ramp.
+    // Applied at CanvasLayer 200 (above HUD at 100) so it affects both 3D and 2D.
+    CanvasLayer *gamma_canvas_layer = nullptr;
+    ColorRect *gamma_color_rect = nullptr;
+    Ref<Shader> gamma_shader;
+    Ref<ShaderMaterial> gamma_material;
+    float gamma_current = 1.0f;
 
     // HUD model preview SubViewports (Phase 148)
     // mpoptions can request multiple previews (allies + axis), so we keep

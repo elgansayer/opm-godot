@@ -965,11 +965,6 @@ void MoHAARunner::update_pvs_visibility() {
     int num_clusters = Godot_BSP_GetPVSNumClusters();
     if (num_clusters <= 0) return;
 
-    // [PVS-DIAG] Temporarily disable PVS culling to test if black areas are caused by
-    // clusters being wrongly hidden.  All clusters stay visible.
-    // TODO: Remove this after confirming PVS is the issue.
-    return;
-
     // Get camera position in id Tech 3 coordinates (already read by update_camera)
     float origin[3];
     Godot_Renderer_GetViewOrigin(origin);
@@ -1727,30 +1722,38 @@ void MoHAARunner::update_entities() {
             smesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
             mi->set_mesh(smesh);
 
-            // Billboard material: faces camera, alpha-blended, unshaded
-            Ref<StandardMaterial3D> smat;
-            smat.instantiate();
-            smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
-            smat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            smat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            smat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            smat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-            smat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                   rgba[2] / 255.0f, rgba[3] / 255.0f));
+            // Cached billboard material per shader handle — avoids creating
+            // a new StandardMaterial3D + shader props lookup every frame.
+            static std::unordered_map<int, Ref<StandardMaterial3D>> sprite_mat_cache;
+            auto sp_it = sprite_mat_cache.find(spriteShader);
+            if (sp_it == sprite_mat_cache.end()) {
+                Ref<StandardMaterial3D> smat;
+                smat.instantiate();
+                smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+                smat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                smat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                smat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                smat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
 
-            if (spriteShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(spriteShader);
-                if (tex.is_valid()) {
-                    smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                if (spriteShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(spriteShader);
+                    if (tex.is_valid()) {
+                        smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
+                    const char *sn = Godot_Renderer_GetShaderName(spriteShader);
+                    if (sn && sn[0]) {
+                        apply_shader_props_to_material(smat, sn);
+                    }
                 }
-                // Apply shader properties (additive blending for muzzle flash, etc.)
-                const char *sn = Godot_Renderer_GetShaderName(spriteShader);
-                if (sn && sn[0]) {
-                    apply_shader_props_to_material(smat, sn);
-                }
+                sprite_mat_cache[spriteShader] = smat;
+                sp_it = sprite_mat_cache.find(spriteShader);
             }
 
-            mi->set_surface_override_material(0, smat);
+            // Duplicate per-instance only for the per-entity RGBA tint
+            Ref<StandardMaterial3D> inst_mat = sp_it->second->duplicate();
+            inst_mat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                       rgba[2] / 255.0f, rgba[3] / 255.0f));
+            mi->set_surface_override_material(0, inst_mat);
 
             // Position sprite at entity origin
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
@@ -1815,32 +1818,41 @@ void MoHAARunner::update_entities() {
             bmesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
             mi->set_mesh(bmesh);
 
-            // Beam material: alpha-blended, unshaded, double-sided
-            Ref<StandardMaterial3D> bmat;
-            bmat.instantiate();
-            bmat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            bmat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            bmat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            bmat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-            bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                   rgba[2] / 255.0f, rgba[3] / 255.0f));
-
-            // Try to apply beam shader texture and properties
+            // Cached beam material per shader handle — avoids creating
+            // a new StandardMaterial3D + texture load + shader props lookup every frame.
             int customShader = 0;
             Godot_Renderer_GetEntitySprite(i, nullptr, nullptr, &customShader);
             int beamShader = (customShader > 0) ? customShader : hModel;
-            if (beamShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(beamShader);
-                if (tex.is_valid()) {
-                    bmat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+
+            static std::unordered_map<int, Ref<StandardMaterial3D>> beam_mat_cache;
+            auto bm_it = beam_mat_cache.find(beamShader);
+            if (bm_it == beam_mat_cache.end()) {
+                Ref<StandardMaterial3D> bmat;
+                bmat.instantiate();
+                bmat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                bmat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                bmat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                bmat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+
+                if (beamShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(beamShader);
+                    if (tex.is_valid()) {
+                        bmat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
+                    const char *sn = Godot_Renderer_GetShaderName(beamShader);
+                    if (sn && sn[0]) {
+                        apply_shader_props_to_material(bmat, sn);
+                    }
                 }
-                const char *sn = Godot_Renderer_GetShaderName(beamShader);
-                if (sn && sn[0]) {
-                    apply_shader_props_to_material(bmat, sn);
-                }
+                beam_mat_cache[beamShader] = bmat;
+                bm_it = beam_mat_cache.find(beamShader);
             }
 
-            mi->set_surface_override_material(0, bmat);
+            // Duplicate per-instance only for the per-entity RGBA tint
+            Ref<StandardMaterial3D> inst_bmat = bm_it->second->duplicate();
+            inst_bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                        rgba[2] / 255.0f, rgba[3] / 255.0f));
+            mi->set_surface_override_material(0, inst_bmat);
             // Beam vertices are already in world space — use identity transform
             mi->set_global_transform(Transform3D());
             mi->set_visible(true);
@@ -3393,6 +3405,17 @@ void MoHAARunner::update_shader_animations(double delta) {
     // Iterate over BSP world mesh surfaces and apply tcMod scroll offset
     if (!bsp_map_node) return;
 
+    // Per-surface cache: avoids per-frame string→C-string conversion,
+    // GodotShaderProps hash lookup, and O(N) linear shader scan.
+    // Built on first access; cleared on map change alongside animmap caches.
+    struct SurfAnimCache {
+        const GodotShaderProps *sp;   // cached shader props pointer (stable for map lifetime)
+        int shader_handle;            // cached shader handle for animMap texture lookup
+        bool needs_animation;         // true if this surface has any runtime animation
+    };
+    // Key = (child_index << 16) | surface_index — unique per BSP surface.
+    static std::unordered_map<uint32_t, SurfAnimCache> surf_anim_cache;
+
     // Walk MeshInstance3D children of bsp_map_node
     for (int c = 0; c < bsp_map_node->get_child_count(); c++) {
         MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(bsp_map_node->get_child(c));
@@ -3402,19 +3425,46 @@ void MoHAARunner::update_shader_animations(double delta) {
         if (!mesh.is_valid()) continue;
 
         for (int s = 0; s < mesh->get_surface_count(); s++) {
+            // Look up or populate per-surface cache
+            uint32_t cache_key = ((uint32_t)c << 16) | (uint32_t)s;
+            auto cache_it = surf_anim_cache.find(cache_key);
+            if (cache_it == surf_anim_cache.end()) {
+                SurfAnimCache entry;
+                entry.sp = nullptr;
+                entry.shader_handle = -1;
+                entry.needs_animation = false;
+
+                Ref<Material> base = mi->get_surface_override_material(s);
+                if (base.is_null()) base = mesh->surface_get_material(s);
+                Ref<StandardMaterial3D> smat_init = base;
+                if (smat_init.is_valid()) {
+                    String shader_name = smat_init->get_meta("shader_name", "");
+                    if (!shader_name.is_empty()) {
+                        CharString cs = shader_name.ascii();
+                        entry.sp = Godot_ShaderProps_Find(cs.get_data());
+                        if (entry.sp) {
+                            // Register shader handle via O(1) hash insert (not linear scan)
+                            entry.shader_handle = Godot_Renderer_RegisterShader(cs.get_data());
+                            entry.needs_animation = entry.sp->has_tcmod
+                                || (entry.sp->has_animmap && entry.sp->animmap_num_frames > 0 && entry.sp->animmap_freq > 0.0f)
+                                || entry.sp->rgbgen_type == 2
+                                || entry.sp->alphagen_type == 2;
+                        }
+                    }
+                }
+                surf_anim_cache[cache_key] = entry;
+                cache_it = surf_anim_cache.find(cache_key);
+            }
+
+            const SurfAnimCache &sc = cache_it->second;
+            if (!sc.needs_animation) continue;  // Early exit: skip static surfaces
+
+            const GodotShaderProps *sp = sc.sp;
+
             Ref<Material> base = mi->get_surface_override_material(s);
             if (base.is_null()) base = mesh->surface_get_material(s);
-
             Ref<StandardMaterial3D> smat = base;
             if (!smat.is_valid()) continue;
-
-            // Check resource metadata for shader name (stored during BSP build)
-            String shader_name = smat->get_meta("shader_name", "");
-            if (shader_name.is_empty()) continue;
-
-            CharString cs = shader_name.ascii();
-            const GodotShaderProps *sp = Godot_ShaderProps_Find(cs.get_data());
-            if (!sp) continue;
 
             // Apply UV tcMod animation: scroll + turb
             if (sp->has_tcmod) {
@@ -3439,17 +3489,9 @@ void MoHAARunner::update_shader_animations(double delta) {
                 }
             }
 
-            // Phase 55: animMap frame swap
+            // Phase 55: animMap frame swap — uses cached shader_handle (O(1))
             if (sp->has_animmap && sp->animmap_num_frames > 0 && sp->animmap_freq > 0.0f) {
-                int shader_handle = -1;
-                int shader_count = Godot_Renderer_GetShaderCount();
-                for (int sh = 1; sh < shader_count; sh++) {
-                    const char *sn = Godot_Renderer_GetShaderName(sh);
-                    if (sn && shader_name == String(sn)) {
-                        shader_handle = sh;
-                        break;
-                    }
-                }
+                int shader_handle = sc.shader_handle;
 
                 if (shader_handle > 0) {
                     auto it_info = animmap_info.find(shader_handle);
@@ -3462,16 +3504,12 @@ void MoHAARunner::update_shader_animations(double delta) {
                         std::vector<Ref<ImageTexture>> frames;
                         for (int fi = 0; fi < sp->animmap_num_frames; fi++) {
                             Ref<ImageTexture> frame_tex;
-                            int frame_handle = -1;
-                            for (int sh = 1; sh < shader_count; sh++) {
-                                const char *sn = Godot_Renderer_GetShaderName(sh);
-                                if (sn && String(sn) == String(sp->animmap_frames[fi])) {
-                                    frame_handle = sh;
-                                    break;
+                            // Use RegisterShader for O(1) lookup instead of linear scan
+                            if (sp->animmap_frames[fi][0]) {
+                                int frame_handle = Godot_Renderer_RegisterShader(sp->animmap_frames[fi]);
+                                if (frame_handle > 0) {
+                                    frame_tex = get_shader_texture(frame_handle);
                                 }
-                            }
-                            if (frame_handle > 0) {
-                                frame_tex = get_shader_texture(frame_handle);
                             }
                             frames.push_back(frame_tex);
                         }
@@ -5530,20 +5568,64 @@ void MoHAARunner::_process(double delta) {
         Godot_Music_SetVolume(music_vol);
     }
 
-    // Gamma: read r_gamma and apply brightness adjustment to 3D environment.
-    // The real GL renderer applies gamma via hardware gamma ramp which only
-    // affects the 3D framebuffer.  We use Environment::adjustment_brightness
-    // which similarly only affects the 3D scene, leaving the 2D HUD/loading
-    // screen at native brightness.
-    if (world_env) {
-        Ref<Environment> env = world_env->get_environment();
-        if (env.is_valid()) {
-            float gamma = Cvar_VariableValue("r_gamma");
-            if (gamma < 0.5f) gamma = 0.5f;
-            if (gamma > 3.0f) gamma = 3.0f;
-            env->set_adjustment_enabled(gamma != 1.0f);
-            if (gamma != 1.0f) {
-                env->set_adjustment_brightness(gamma);
+    // Gamma: replicate GLimp_SetGamma hardware gamma ramp.
+    // The real renderer applies pow(color, 1/gamma) to the entire display via
+    // SDL_SetWindowGammaRamp.  We use a full-screen CanvasLayer with a
+    // SCREEN_TEXTURE shader to achieve the same effect on both 3D and 2D.
+    {
+        float gamma = Cvar_VariableValue("r_gamma");
+        if (gamma < 0.5f) gamma = 0.5f;
+        if (gamma > 3.0f) gamma = 3.0f;
+
+        // Create overlay on first use
+        if (!gamma_canvas_layer && gamma != 1.0f) {
+            gamma_shader.instantiate();
+            gamma_shader->set_code(
+                "shader_type canvas_item;\n"
+                "uniform float gamma_inv : hint_range(0.1, 2.0) = 1.0;\n"
+                "uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap;\n"
+                "void fragment() {\n"
+                "    vec3 col = textureLod(screen_tex, SCREEN_UV, 0.0).rgb;\n"
+                "    COLOR = vec4(pow(col, vec3(gamma_inv)), 1.0);\n"
+                "}\n"
+            );
+            gamma_material.instantiate();
+            gamma_material->set_shader(gamma_shader);
+            gamma_material->set_shader_parameter("gamma_inv", 1.0f / gamma);
+
+            gamma_canvas_layer = memnew(CanvasLayer);
+            gamma_canvas_layer->set_layer(200);
+            gamma_canvas_layer->set_name("GammaOverlay");
+            add_child(gamma_canvas_layer);
+
+            gamma_color_rect = memnew(ColorRect);
+            gamma_color_rect->set_name("GammaRect");
+            gamma_color_rect->set_anchors_preset(Control::PRESET_FULL_RECT);
+            gamma_color_rect->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            gamma_color_rect->set_material(gamma_material);
+            gamma_canvas_layer->add_child(gamma_color_rect);
+
+            gamma_current = gamma;
+        }
+
+        // Update gamma uniform when value changes
+        if (gamma_canvas_layer) {
+            if (gamma == 1.0f) {
+                gamma_canvas_layer->set_visible(false);
+            } else {
+                gamma_canvas_layer->set_visible(true);
+                if (gamma != gamma_current) {
+                    gamma_material->set_shader_parameter("gamma_inv", 1.0f / gamma);
+                    gamma_current = gamma;
+                }
+            }
+        }
+
+        // Disable Environment brightness — gamma overlay handles everything.
+        if (world_env) {
+            Ref<Environment> env = world_env->get_environment();
+            if (env.is_valid()) {
+                env->set_adjustment_enabled(false);
             }
         }
     }
