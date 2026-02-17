@@ -701,15 +701,49 @@ void MoHAARunner::setup_3d_scene() {
     UtilityFunctions::print("[MoHAA] 3D scene created (Camera3D + light + environment).");
 
     // ── Weapon viewport (Phase 62) ──
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
+    // Render first-person weapon entities in a separate SubViewport with
+    // its own depth buffer, then composite on top of the main scene.
+    // This replicates id Tech 3's RF_DEPTHHACK (depth range 0–0.3).
     {
         Vector2i win_size = DisplayServer::get_singleton()->window_get_size();
         if (win_size.x < 1 || win_size.y < 1) {
             win_size = Vector2i(1280, 720);
         }
-        Godot_WeaponViewport::get().create(this, camera, win_size.x, win_size.y);
+
+        // SubViewport with transparent background + own World3D
+        weapon_viewport = memnew(SubViewport);
+        weapon_viewport->set_size(win_size);
+        weapon_viewport->set_transparent_background(true);
+        weapon_viewport->set_world_3d(Ref<World3D>(memnew(World3D)));
+        weapon_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+        // Disable own 3D rendering until we populate it — UPDATE_ALWAYS
+        // ensures the viewport runs each frame.
+        add_child(weapon_viewport);
+
+        // Camera inside weapon viewport — will mirror main camera each frame
+        weapon_camera = memnew(Camera3D);
+        weapon_camera->set_near(0.01);
+        weapon_camera->set_far(100.0);
+        weapon_viewport->add_child(weapon_camera);
+
+        // Root node for FPS entity meshes inside the weapon viewport
+        weapon_root = memnew(Node3D);
+        weapon_viewport->add_child(weapon_root);
+
+        // CanvasLayer to overlay weapon texture on top of main scene
+        weapon_canvas_layer = memnew(CanvasLayer);
+        weapon_canvas_layer->set_layer(10);  // above world, below HUD
+        add_child(weapon_canvas_layer);
+
+        weapon_overlay = memnew(TextureRect);
+        weapon_overlay->set_texture(weapon_viewport->get_texture());
+        weapon_overlay->set_anchors_preset(Control::PRESET_FULL_RECT);
+        weapon_overlay->set_stretch_mode(TextureRect::STRETCH_SCALE);
+        weapon_overlay->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        weapon_canvas_layer->add_child(weapon_overlay);
+
+        UtilityFunctions::print("[MoHAA] Weapon SubViewport created (", win_size.x, "x", win_size.y, ")");
     }
-#endif
 }
 
 // ──────────────────────────────────────────────
@@ -801,6 +835,23 @@ void MoHAARunner::update_camera() {
         Ref<Environment> env = world_env->get_environment();
         if (env.is_valid() && env->is_fog_enabled()) {
             env->set_fog_enabled(false);
+        }
+    }
+
+    // ── Weapon viewport camera sync ──
+    // Mirror the main camera's transform and FOV into the weapon
+    // SubViewport's camera so FPS entities render from the same viewpoint.
+    if (weapon_camera) {
+        weapon_camera->set_global_transform(camera->get_global_transform());
+        weapon_camera->set_fov(camera->get_fov());
+    }
+
+    // ── Weapon viewport resize ──
+    // Keep the weapon SubViewport size in sync with the window.
+    if (weapon_viewport) {
+        Vector2i win_size = DisplayServer::get_singleton()->window_get_size();
+        if (win_size.x > 0 && win_size.y > 0 && weapon_viewport->get_size() != win_size) {
+            weapon_viewport->set_size(win_size);
         }
     }
 }
@@ -990,6 +1041,14 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
             mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
             break;
         case SHADER_MULTIPLICATIVE:
+            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+            break;
+        case SHADER_MULTIPLICATIVE_INV:
+            // dst*(1-src) can't be expressed exactly in StandardMaterial3D.
+            // BLEND_MODE_MUL (dst*src) is the closest approximation — at least
+            // darkens instead of rendering a solid grey quad.  Callers that need
+            // exact inv-mul (polys, terrain marks) use a custom ShaderMaterial.
             mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
             mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
             break;
@@ -2209,26 +2268,15 @@ void MoHAARunner::update_entities() {
         // weapon SubViewport so they render in a separate pass and
         // composite on top of the main scene (correct self-occlusion).
         if (is_first_person || is_depthhack) {
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
-            Node3D *wp_root = Godot_WeaponViewport::get().get_weapon_root();
-            Node *cur_parent = mi->get_parent();
-            if (wp_root && cur_parent && cur_parent != wp_root) {
-                cur_parent->remove_child(mi);
-                wp_root->add_child(mi);
+            // Reparent FPS entities into the weapon SubViewport so they
+            // render with a separate depth buffer and composite on top.
+            if (weapon_root) {
+                Node *cur_parent = mi->get_parent();
+                if (cur_parent && cur_parent != weapon_root) {
+                    cur_parent->remove_child(mi);
+                    weapon_root->add_child(mi);
+                }
             }
-#else
-            // Fallback when weapon viewport is unavailable:
-            // Keep depth test ON so that hands and weapon properly
-            // occlude each other (correct grip appearance).
-            // Use render_priority to draw FPS entities after world
-            // geometry, and no_depth_test is deliberately NOT set.
-            // This means weapons may clip into nearby walls —
-            // the proper fix is the SubViewport module which uses
-            // a compressed depth range (0–0.3).
-            //
-            // (No material patching needed — default depth test is
-            //  already enabled on all materials.)
-#endif
             // Periodic weapon diagnostic (first 30 frames) — now with mesh AABB
             static int fp_diag_count = 0;
             if (fp_diag_count < 30) {
@@ -2274,14 +2322,15 @@ void MoHAARunner::update_entities() {
                     String(" name=") + String(dbg_mod_name ? dbg_mod_name : "null"));
             }
         } else {
-#ifdef HAS_WEAPON_VIEWPORT_MODULE
             // Non-weapon entity — ensure it is parented under entity_root
-            Node *cur_parent = mi->get_parent();
-            if (cur_parent && cur_parent != entity_root) {
-                cur_parent->remove_child(mi);
-                entity_root->add_child(mi);
+            // (it may have been in weapon_root from a previous frame)
+            if (weapon_root) {
+                Node *cur_parent = mi->get_parent();
+                if (cur_parent && cur_parent != entity_root) {
+                    cur_parent->remove_child(mi);
+                    entity_root->add_child(mi);
+                }
             }
-#endif
         }
 
         // ── Phase 21+22+268: Entity colour tinting + alpha + entity lighting ──
@@ -2778,45 +2827,82 @@ void MoHAARunner::update_polys() {
         if (hShader > 0) {
             const char *sn = Godot_Renderer_GetShaderName(hShader);
             Ref<ImageTexture> tex = get_shader_texture(hShader);
-            
-            // Particle effect fallback: if shader name suggests particle/tracer/beam
-            // but texture load failed, use white albedo + additive blending
-            bool is_particle_effect = false;
+
+            // Check shader blend mode for special handling
+            const GodotShaderProps *poly_sp = nullptr;
             if (sn && sn[0]) {
-                // Check for common particle shader names
-                const char* particle_keywords[] = {
-                    "tracer", "beam", "flare", "glow", "particle",
-                    "flash", "spark", "trail", nullptr
-                };
-                for (int kw = 0; particle_keywords[kw]; kw++) {
-                    if (strstr(sn, particle_keywords[kw])) {
-                        is_particle_effect = true;
-                        break;
+                poly_sp = Godot_ShaderProps_Find(sn);
+            }
+
+            if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE_INV) {
+                // Inverse-multiplicative: result = dst * (1 - src*vertex_color)
+                // Used by markShadow — cannot be expressed with StandardMaterial3D.
+                static Ref<Shader> inv_mul_poly_shader;
+                if (inv_mul_poly_shader.is_null()) {
+                    inv_mul_poly_shader.instantiate();
+                    inv_mul_poly_shader->set_code(
+                        "shader_type spatial;\n"
+                        "render_mode blend_mul, unshaded, cull_disabled, "
+                        "depth_draw_never, depth_test_disabled;\n"
+                        "uniform sampler2D albedo_texture : source_color, "
+                        "filter_linear;\n"
+                        "void fragment() {\n"
+                        "    vec4 tex = texture(albedo_texture, UV);\n"
+                        "    ALBEDO = vec3(1.0) - tex.rgb * COLOR.rgb;\n"
+                        "    ALPHA = 1.0;\n"
+                        "}\n"
+                    );
+                }
+                Ref<ShaderMaterial> smat;
+                smat.instantiate();
+                smat->set_shader(inv_mul_poly_shader);
+                if (tex.is_valid()) {
+                    smat->set_shader_parameter("albedo_texture", tex);
+                }
+                mi->set_surface_override_material(0, smat);
+            } else if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE) {
+                // Standard multiplicative: result = dst * src (filter)
+                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+                mi->set_surface_override_material(0, mat);
+            } else {
+                // Normal path: texture + shader properties + particle fallback
+                bool is_particle_effect = false;
+                if (sn && sn[0]) {
+                    const char* particle_keywords[] = {
+                        "tracer", "beam", "flare", "glow", "particle",
+                        "flash", "spark", "trail", nullptr
+                    };
+                    for (int kw = 0; particle_keywords[kw]; kw++) {
+                        if (strstr(sn, particle_keywords[kw])) {
+                            is_particle_effect = true;
+                            break;
+                        }
                     }
                 }
-            }
-            
-            if (tex.is_valid()) {
-                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-            } else if (is_particle_effect) {
-                // Fallback for particle effects: use vertex colour only, additive blend
-                mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
-                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
-                // Log fallback once per shader
-                static std::unordered_set<std::string> logged_fallbacks;
-                if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
-                    UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
-                    logged_fallbacks.insert(sn);
-                }
-            }
-            
-            // Apply shader properties (additive blending, alpha, etc.)
-            if (sn && sn[0]) {
-                apply_shader_props_to_material(mat, sn);
-            }
-        }
 
-        mi->set_surface_override_material(0, mat);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                } else if (is_particle_effect) {
+                    mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
+                    mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                    static std::unordered_set<std::string> logged_fallbacks;
+                    if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
+                        UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
+                        logged_fallbacks.insert(sn);
+                    }
+                }
+
+                if (sn && sn[0]) {
+                    apply_shader_props_to_material(mat, sn);
+                }
+                mi->set_surface_override_material(0, mat);
+            }
+        } else {
+            mi->set_surface_override_material(0, mat);
+        }
         mi->set_visible(true);
     }
 
@@ -3869,6 +3955,18 @@ void MoHAARunner::update_2d_overlay() {
         mul_inv_material.instantiate();
         mul_inv_material->set_shader(mul_inv_shader);
     }
+    if (opaque_mix_material.is_null()) {
+        opaque_mix_shader.instantiate();
+        opaque_mix_shader->set_code(
+            "shader_type canvas_item;\n"
+            "void fragment() {\n"
+            "    vec4 tex = texture(TEXTURE, UV);\n"
+            "    COLOR = vec4(tex.rgb * COLOR.rgb, 1.0);\n"
+            "}\n"
+        );
+        opaque_mix_material.instantiate();
+        opaque_mix_material->set_shader(opaque_mix_shader);
+    }
 
     // Clear all existing segments
     for (int si = 0; si < (int)overlay_segments.size(); si++) {
@@ -3901,8 +3999,10 @@ void MoHAARunner::update_2d_overlay() {
                 rs->canvas_item_set_material(seg.item, RID());
             } else if (blend == BLEND_MUL) {
                 rs->canvas_item_set_material(seg.item, mul_canvas_material->get_rid());
-            } else { // BLEND_MUL_INV
+            } else if (blend == BLEND_MUL_INV) {
                 rs->canvas_item_set_material(seg.item, mul_inv_material->get_rid());
+            } else if (blend == BLEND_OPAQUE) {
+                rs->canvas_item_set_material(seg.item, opaque_mix_material->get_rid());
             }
             seg.blend_mode = blend;
         }
@@ -4025,7 +4125,8 @@ void MoHAARunner::update_2d_overlay() {
                         ui_offset_y + rect[1] * ui_scale_y,
                         rect[2] * ui_scale_x,
                         rect[3] * ui_scale_y);
-                    rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+                    RID hm_ci = get_segment_ci(BLEND_MIX);
+                    rs->canvas_item_add_texture_rect(hm_ci, screen_rect, vp_tex->get_rid());
                 }
             }
             next_hud_model++;
@@ -4243,25 +4344,25 @@ void MoHAARunner::update_2d_overlay() {
                 // Skip fully transparent draws (alphaConst=0 → invisible)
                 if (draw_col.a < 0.001f) continue;
 
-                /* Use the multiplicative child canvas item for shaders with
-                 * blendFunc filter (e.g. "shadow") so the texture darkens the
-                 * underlying surface rather than drawing opaquely.
-                 * Use the inverse-mul item for GL_ZERO GL_ONE_MINUS_SRC_COLOR
-                 * (e.g. "pmshadow") which needs dst*(1-src). */
-                bool is_mul = false;
-                bool is_mul_inv = false;
+                /* Choose blend mode based on shader transparency.
+                 * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src) — e.g. "shadow"
+                 * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
+                 * - SHADER_OPAQUE: no blendFunc — force alpha=1 so texture alpha
+                 *   doesn't cause background bleed-through (matches GL behaviour
+                 *   where alpha blending is disabled for opaque shaders). */
+                int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
-                    if (sp2 && sp2->transparency == SHADER_MULTIPLICATIVE) {
-                        is_mul = true;
-                    } else if (sp2 && sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
-                        is_mul_inv = true;
+                    if (sp2) {
+                        if (sp2->transparency == SHADER_MULTIPLICATIVE) {
+                            draw_blend = BLEND_MUL;
+                        } else if (sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
+                            draw_blend = BLEND_MUL_INV;
+                        } else if (sp2->transparency == SHADER_OPAQUE) {
+                            draw_blend = BLEND_OPAQUE;
+                        }
                     }
                 }
-
-                int draw_blend = BLEND_MIX;
-                if (is_mul) draw_blend = BLEND_MUL;
-                else if (is_mul_inv) draw_blend = BLEND_MUL_INV;
                 RID target_ci = get_segment_ci(draw_blend);
 
                 // Detect tiling: if the source rect extends beyond the
@@ -4366,7 +4467,8 @@ void MoHAARunner::update_2d_overlay() {
             // StretchPic with no shader — draw unless it's a large opaque fill
             // that would cover the 3D view when in-game with no overlay.
             if (allow_fullscreen_fills || w * h < vid_area * 0.5f || color[3] < 0.9f) {
-                rs->canvas_item_add_rect(ci, draw_rect, col);
+                RID noshader_ci = get_segment_ci(BLEND_MIX);
+                rs->canvas_item_add_rect(noshader_ci, draw_rect, col);
             }
         }
     }
@@ -4388,7 +4490,8 @@ void MoHAARunner::update_2d_overlay() {
                     ui_offset_y + rect[1] * ui_scale_y,
                     rect[2] * ui_scale_x,
                     rect[3] * ui_scale_y);
-                rs->canvas_item_add_texture_rect(ci, screen_rect, vp_tex->get_rid());
+                RID hm_ci2 = get_segment_ci(BLEND_MIX);
+                rs->canvas_item_add_texture_rect(hm_ci2, screen_rect, vp_tex->get_rid());
             }
         }
         next_hud_model++;

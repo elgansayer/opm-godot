@@ -31,6 +31,7 @@
 #include <godot_cpp/classes/sub_viewport.hpp>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/world3d.hpp>
 
 #include <vector>
 #include <unordered_map>
@@ -212,6 +213,14 @@ private:
     // Static BSP models (Phase 10)
     Node3D *static_model_root = nullptr;     // Container for TIKI static models from BSP
 
+    // Weapon SubViewport (Phase 62) — renders FPS weapon in a separate
+    // depth buffer so they never clip into world geometry.
+    SubViewport *weapon_viewport = nullptr;    // Separate pass for FPS entities
+    Camera3D *weapon_camera = nullptr;         // Mirrors main camera each frame
+    Node3D *weapon_root = nullptr;             // Parent for FPS entity meshes
+    CanvasLayer *weapon_canvas_layer = nullptr; // Overlay canvas for weapon texture
+    TextureRect *weapon_overlay = nullptr;     // Displays weapon SubViewport on top
+
     // Entity rendering (Phase 7e)
     Node3D *entity_root = nullptr;                        // Container for entity debug meshes
     std::vector<MeshInstance3D *> entity_meshes;           // Pooled debug mesh instances
@@ -300,6 +309,7 @@ private:
     static const int BLEND_MIX = 0;
     static const int BLEND_MUL = 1;
     static const int BLEND_MUL_INV = 2;
+    static const int BLEND_OPAQUE = 3;
     struct CanvasSegment {
         RID item;
         int blend_mode;
@@ -310,6 +320,8 @@ private:
     Ref<CanvasItemMaterial> mul_canvas_material;
     Ref<ShaderMaterial> mul_inv_material;
     Ref<Shader> mul_inv_shader;
+    Ref<ShaderMaterial> opaque_mix_material;
+    Ref<Shader> opaque_mix_shader;
 
     // HUD model preview SubViewports (Phase 148)
     // mpoptions can request multiple previews (allies + axis), so we keep
