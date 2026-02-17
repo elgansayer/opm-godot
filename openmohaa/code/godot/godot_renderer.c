@@ -201,6 +201,14 @@ static int   gr_cin_active  = 0;   /* 1 while a cinematic is playing */
 
 /* A scratch refEntity_t returned by GetRenderEntity */
 static refEntity_t scratch_entity;
+static int   scratch_bone_tag[5];
+static float scratch_bone_quat[5][4];
+
+/* Per-entity skeleton pose tracking — mirrors tr.skel_index[] / tr.frame_skel_index
+ * in the real renderer.  Prevents redundant SetPose calls within a single frame
+ * while ensuring TIKI_Orientation always has a current pose to query. */
+static int gr_frame_skel_index = 0;
+static int gr_skel_index[MAX_GENTITIES];
 
 /* Scratch glconfig filled during BeginRegistration */
 static glconfig_t stored_glconfig;
@@ -729,6 +737,10 @@ static void GR_ClearScene( void )
     gr_numTerrainMarkVerts = 0;
     gr_bgActive     = 0;
     gr_mainSceneRendered = 0;
+
+    /* Advance per-frame skeleton pose index so GR_UpdatePoseInternal
+     * re-poses each entity's skeleton exactly once per frame. */
+    gr_frame_skel_index++;
 }
 
 static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumber )
@@ -780,6 +792,24 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
     } else {
         memset( ge->bone_tag, -1, sizeof(ge->bone_tag) );
         memset( ge->bone_quat, 0, sizeof(ge->bone_quat) );
+    }
+
+    /* Diagnostic: log child entities (those submitted with a parent) */
+    {
+        static int add_diag_count = 0;
+        if ( add_diag_count < 80 && parentEntityNumber != ENTITYNUM_NONE ) {
+            add_diag_count++;
+            ri.Printf( PRINT_ALL,
+                "[ADDENT-DIAG] entNum=%d parent=%d rfx=0x%x "
+                "origin=(%.1f, %.1f, %.1f) "
+                "axis[0]=(%.2f,%.2f,%.2f) "
+                "scale=%.3f tiki=%p hModel=%d reType=%d\n",
+                re->entityNumber, parentEntityNumber, re->renderfx,
+                re->origin[0], re->origin[1], re->origin[2],
+                re->axis[0][0], re->axis[0][1], re->axis[0][2],
+                re->scale, (void *)re->tiki, (int)re->hModel,
+                (int)re->reType );
+        }
     }
 }
 
@@ -1787,6 +1817,37 @@ static refEntity_t *GR_GetRenderEntity( int entityNumber )
             scratch_entity.tiki     = (dtiki_t *)gr_entities[i].tiki;
             memcpy( scratch_entity.frameInfo, gr_entities[i].frameInfo, sizeof(scratch_entity.frameInfo) );
             scratch_entity.actionWeight = gr_entities[i].actionWeight;
+
+            /* Copy bone controller data into static buffers so ForceUpdatePose
+             * and TIKI_Orientation can use them for skeleton posing. */
+            memcpy( scratch_bone_tag, gr_entities[i].bone_tag, sizeof(scratch_bone_tag) );
+            memcpy( scratch_bone_quat, gr_entities[i].bone_quat, sizeof(scratch_bone_quat) );
+            scratch_entity.bone_tag  = scratch_bone_tag;
+            scratch_entity.bone_quat = (vec4_t *)scratch_bone_quat;
+
+            {
+                static int gre_diag_count = 0;
+                if ( gre_diag_count < 40 ) {
+                    gre_diag_count++;
+                    ri.Printf( PRINT_ALL,
+                        "[GETENT-DIAG] lookup entNum=%d found at idx=%d "
+                        "origin=(%.1f,%.1f,%.1f) "
+                        "axis[0]=(%.2f,%.2f,%.2f) "
+                        "scale=%.3f tiki=%p hModel=%d rfx=0x%x "
+                        "boneTag[0]=%d\n",
+                        entityNumber, i,
+                        scratch_entity.origin[0], scratch_entity.origin[1],
+                        scratch_entity.origin[2],
+                        scratch_entity.axis[0][0], scratch_entity.axis[0][1],
+                        scratch_entity.axis[0][2],
+                        scratch_entity.scale,
+                        (void *)scratch_entity.tiki,
+                        (int)scratch_entity.hModel,
+                        scratch_entity.renderfx,
+                        scratch_bone_tag[0] );
+                }
+            }
+
             break;
         }
     }
@@ -2071,29 +2132,90 @@ static const char *GR_GetGraphicsInfo( void )
     return "Godot Renderer Backend (stub)";
 }
 
-static void GR_ForceUpdatePose( refEntity_t *model )
+/* Pose the skeleton from the entity's animation channels, with
+ * per-frame deduplication matching the real renderer's R_UpdatePoseInternal.
+ * ENTITYNUM_NONE entities always re-pose (no tracking). */
+static void GR_UpdatePoseInternal( refEntity_t *model )
 {
-    /* Set the skeleton pose from the entity's animation channels
-     * so that subsequent GetFrame calls return correct bone matrices. */
-    if ( model && model->tiki ) {
-        void *skeletor = ri.TIKI_GetSkeletor( model->tiki, model->entityNumber );
-        if ( skeletor ) {
-            ri.TIKI_SetPoseInternal(
-                skeletor,
-                model->frameInfo,
-                model->bone_tag,
-                model->bone_quat,
-                model->actionWeight
-            );
+    void *skeletor;
+
+    if ( !model || !model->tiki ) return;
+
+    if ( model->entityNumber != ENTITYNUM_NONE ) {
+        if ( model->entityNumber >= 0 && model->entityNumber < MAX_GENTITIES ) {
+            if ( gr_skel_index[model->entityNumber] == gr_frame_skel_index ) {
+                return; /* Already posed this frame */
+            }
+            gr_skel_index[model->entityNumber] = gr_frame_skel_index;
         }
     }
+
+    skeletor = ri.TIKI_GetSkeletor( model->tiki, model->entityNumber );
+    if ( skeletor ) {
+        ri.TIKI_SetPoseInternal(
+            skeletor,
+            model->frameInfo,
+            model->bone_tag,
+            model->bone_quat,
+            model->actionWeight
+        );
+    }
 }
+
+static void GR_ForceUpdatePose( refEntity_t *model )
+{
+    void *skeletor;
+
+    /* ForceUpdatePose ALWAYS re-poses (no frame-skip early return),
+     * but marks the entity as posed so subsequent UpdatePoseInternal
+     * calls within the same frame can skip. */
+    if ( !model || !model->tiki ) return;
+
+    if ( model->entityNumber != ENTITYNUM_NONE
+         && model->entityNumber >= 0
+         && model->entityNumber < MAX_GENTITIES ) {
+        gr_skel_index[model->entityNumber] = gr_frame_skel_index;
+    }
+
+    skeletor = ri.TIKI_GetSkeletor( model->tiki, model->entityNumber );
+    if ( skeletor ) {
+        ri.TIKI_SetPoseInternal(
+            skeletor,
+            model->frameInfo,
+            model->bone_tag,
+            model->bone_quat,
+            model->actionWeight
+        );
+    }
+}
+
+static int gr_orient_diag_count = 0;
 
 static orientation_t GR_TIKI_Orientation( refEntity_t *model, int tagNum )
 {
     orientation_t o;
     if ( model && model->tiki ) {
-        return ri.TIKI_OrientationInternal( model->tiki, model->entityNumber, tagNum, model->scale );
+        /* Match the real renderer's RE_TIKI_Orientation: always ensure
+         * the skeleton is in the current pose before querying a bone tag. */
+        GR_UpdatePoseInternal( model );
+        o = ri.TIKI_OrientationInternal( model->tiki, model->entityNumber, tagNum, model->scale );
+
+        if ( gr_orient_diag_count < 60 ) {
+            gr_orient_diag_count++;
+            ri.Printf( PRINT_ALL,
+                "[ORIENT-DIAG] entNum=%d tagNum=%d scale=%.3f "
+                "or.origin=(%.1f, %.1f, %.1f) "
+                "model.origin=(%.1f, %.1f, %.1f) "
+                "model.axis[0]=(%.2f,%.2f,%.2f) "
+                "tiki=%p frameIdx=%d\n",
+                model->entityNumber, tagNum, model->scale,
+                o.origin[0], o.origin[1], o.origin[2],
+                model->origin[0], model->origin[1], model->origin[2],
+                model->axis[0][0], model->axis[0][1], model->axis[0][2],
+                (void *)model->tiki, gr_frame_skel_index );
+        }
+
+        return o;
     }
     memset( &o, 0, sizeof( o ) );
     o.axis[0][0] = o.axis[1][1] = o.axis[2][2] = 1.0f;

@@ -12,6 +12,7 @@
  */
 
 #include "godot_vfx.h"
+#include "godot_shader_props.h"
 
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/image.hpp>
@@ -71,7 +72,54 @@ static inline uint64_t vfx_mat_key(int shaderHandle, const unsigned char rgba[4]
     return ((uint64_t)(unsigned)shaderHandle << 32) | c;
 }
 
-/* ── Texture loading (mirrors MoHAARunner::get_shader_texture pattern) ── */
+/* ── Texture loading (mirrors MoHAARunner::get_shader_texture — resolves shader stage maps) ── */
+
+static Ref<ImageTexture> vfx_load_from_qpath(const char *qpath)
+{
+    if (!qpath || !qpath[0]) return Ref<ImageTexture>();
+
+    const char *extensions[] = { "", ".tga", ".jpg", ".png", nullptr };
+    for (int ext_i = 0; extensions[ext_i]; ext_i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s%s", qpath, extensions[ext_i]);
+
+        void *buf = nullptr;
+        long len = Godot_VFS_ReadFile(path, &buf);
+        if (len <= 0 || !buf) {
+            if (buf) Godot_VFS_FreeFile(buf);
+            continue;
+        }
+
+        PackedByteArray pba;
+        pba.resize(len);
+        memcpy(pba.ptrw(), buf, len);
+        Godot_VFS_FreeFile(buf);
+
+        Ref<Image> img;
+        img.instantiate();
+        Error err;
+
+        const uint8_t *data = pba.ptr();
+        if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
+            err = img->load_jpg_from_buffer(pba);
+        } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
+            err = img->load_png_from_buffer(pba);
+        } else {
+            err = img->load_tga_from_buffer(pba);
+            if (err != OK) {
+                err = img->load_jpg_from_buffer(pba);
+            }
+        }
+
+        if (err == OK && !img->is_empty()) {
+            img->generate_mipmaps();
+            return ImageTexture::create_from_image(img);
+        }
+    }
+
+    return Ref<ImageTexture>();
+}
+
 static Ref<ImageTexture> vfx_load_texture(int shader_handle)
 {
     /* Check cache */
@@ -89,44 +137,36 @@ static Ref<ImageTexture> vfx_load_texture(int shader_handle)
         return Ref<ImageTexture>();
     }
 
-    /* Try loading with different extensions */
-    const char *extensions[] = { "", ".tga", ".jpg", ".png", nullptr };
+    /* Look up shader definition to find the actual texture path from stages.
+     * This mirrors R_FindShader: the shader name is an abstract identifier,
+     * the real texture path comes from the first non-lightmap stage's map. */
+    const GodotShaderProps *sp = Godot_ShaderProps_Find(name);
     Ref<ImageTexture> tex;
 
-    for (int ext_i = 0; extensions[ext_i]; ext_i++) {
-        char path[128];
-        snprintf(path, sizeof(path), "%s%s", name, extensions[ext_i]);
+    if (sp && sp->stage_count > 0) {
+        for (int st = 0; st < sp->stage_count && tex.is_null(); st++) {
+            if (sp->stages[st].isLightmap) continue;
 
-        void *buf = nullptr;
-        long len = Godot_VFS_ReadFile(path, &buf);
-        if (len <= 0 || !buf) continue;
-
-        PackedByteArray pba;
-        pba.resize(len);
-        memcpy(pba.ptrw(), buf, len);
-        Godot_VFS_FreeFile(buf);
-
-        Ref<Image> img;
-        img.instantiate();
-        Error err;
-
-        /* Detect format by magic bytes */
-        const uint8_t *data = pba.ptr();
-        if (len > 2 && data[0] == 0xFF && data[1] == 0xD8) {
-            err = img->load_jpg_from_buffer(pba);
-        } else if (len > 3 && data[0] == 0x89 && data[1] == 'P') {
-            err = img->load_png_from_buffer(pba);
-        } else {
-            err = img->load_tga_from_buffer(pba);
-            if (err != OK) {
-                err = img->load_jpg_from_buffer(pba);
+            const char *stage_map = nullptr;
+            if (sp->stages[st].map[0]) {
+                stage_map = sp->stages[st].map;
+            } else if (sp->stages[st].animMapFrameCount > 0
+                       && sp->stages[st].animMapFrames[0][0]) {
+                stage_map = sp->stages[st].animMapFrames[0];
             }
-        }
+            if (!stage_map) continue;
+            if (strcmp(stage_map, "$lightmap") == 0) continue;
+            if (strcmp(stage_map, "$whiteimage") == 0) continue;
+            if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
 
-        if (err == OK && !img->is_empty()) {
-            tex = ImageTexture::create_from_image(img);
-            break;
+            tex = vfx_load_from_qpath(stage_map);
         }
+    }
+
+    /* Fallback: try using the shader name itself as a texture path
+     * (works for implicit shaders without .shader definitions) */
+    if (tex.is_null()) {
+        tex = vfx_load_from_qpath(name);
     }
 
     vfx_tex_cache[shader_handle] = tex;
@@ -249,6 +289,52 @@ void Godot_VFX_Update(float delta)
                 Ref<ImageTexture> tex = vfx_load_texture(shaderHandle);
                 if (tex.is_valid()) {
                     mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+
+                /* Apply shader properties: blendFunc, alphaFunc, cull, deform */
+                const char *sn = Godot_Renderer_GetShaderName(shaderHandle);
+                const char *remap = Godot_Renderer_GetShaderRemap(sn);
+                const char *lookup = (remap && remap[0]) ? remap : sn;
+                if (lookup && lookup[0]) {
+                    const GodotShaderProps *sp = Godot_ShaderProps_Find(lookup);
+                    if (sp) {
+                        switch (sp->transparency) {
+                            case SHADER_ALPHA_TEST:
+                                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+                                mat->set_alpha_scissor_threshold(sp->alpha_threshold);
+                                break;
+                            case SHADER_ALPHA_BLEND:
+                                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                                break;
+                            case SHADER_ADDITIVE:
+                                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                                break;
+                            case SHADER_MULTIPLICATIVE:
+                            case SHADER_MULTIPLICATIVE_INV:
+                                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                                break;
+                            default:
+                                break;
+                        }
+                        switch (sp->cull) {
+                            case SHADER_CULL_BACK:
+                                mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
+                                break;
+                            case SHADER_CULL_FRONT:
+                                mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
+                                break;
+                            case SHADER_CULL_NONE:
+                                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                                break;
+                        }
+                        /* autosprite/autosprite2 deform — already billboard, but
+                         * autosprite2 should use fixed-Y billboard mode */
+                        if (sp->has_deform && sp->deform_type == 4) {
+                            mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_FIXED_Y);
+                        }
+                    }
                 }
             }
             vfx_mat_cache[mkey] = mat;

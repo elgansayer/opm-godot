@@ -1430,10 +1430,11 @@ static float eval_wave(MohaaWaveFunc func, float base, float amp,
 //  Entity rendering (Phase 7e)
 // ──────────────────────────────────────────────
 
-// Entity type constants matching refEntityType_t
+// Entity type constants matching refEntityType_t (tr_types.h)
+// RT_MODEL=0, RT_POLY=1, RT_SPRITE=2, RT_BEAM=3
 static constexpr int RT_MODEL   = 0;
-static constexpr int RT_SPRITE  = 3;
-static constexpr int RT_BEAM    = 4;
+static constexpr int RT_SPRITE  = 2;
+static constexpr int RT_BEAM    = 3;
 
 void MoHAARunner::update_entities() {
     if (!game_world) return;
@@ -1553,7 +1554,12 @@ void MoHAARunner::update_entities() {
         MeshInstance3D *mi = entity_meshes[i];
 
         // Skip non-renderable entities (portals, etc.)
+        // RT_SPRITE is handled by the VFX module (Godot_VFX_Update) when available
+#ifdef HAS_VFX_MODULE
+        if (reType != RT_MODEL && reType != RT_BEAM) {
+#else
         if (reType != RT_MODEL && reType != RT_SPRITE && reType != RT_BEAM) {
+#endif
             mi->set_visible(false);
             continue;
         }
