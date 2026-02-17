@@ -2228,14 +2228,27 @@ void MoHAARunner::update_entities() {
                 }
             }
 #endif
-            // One-time diagnostic
-            static bool logged_fp = false;
-            if (!logged_fp) {
+            // Periodic weapon diagnostic (first 30 frames)
+            static int fp_diag_count = 0;
+            if (fp_diag_count < 30) {
+                fp_diag_count++;
+                Ref<Mesh> dbg_mesh = mi->get_mesh();
+                int dbg_sc = dbg_mesh.is_valid() ? dbg_mesh->get_surface_count() : -1;
+                const char *dbg_mod_name = Godot_Model_GetName(hModel);
+                void *dbg_tiki = Godot_Model_GetTikiPtr(hModel);
                 UtilityFunctions::print(
-                    String("[MoHAA] First-person entity rendered: hModel=") +
-                    String::num_int64(hModel) +
-                    String(" renderfx=0x") + String::num_int64(renderfx, 16));
-                logged_fp = true;
+                    String("[WEAPON-DIAG] ent#") + String::num_int64(i) +
+                    String(" entNum=") + String::num_int64(entityNumber) +
+                    String(" hModel=") + String::num_int64(hModel) +
+                    String(" modType=") + String::num_int64(modType) +
+                    String(" rfx=0x") + String::num_int64(renderfx, 16) +
+                    String(" hasTiki=") + String::num_int64(dbg_tiki ? 1 : 0) +
+                    String(" surfaces=") + String::num_int64(dbg_sc) +
+                    String(" vis=") + String::num_int64(mi->is_visible() ? 1 : 0) +
+                    String(" pos=(") + String::num(origin[0], 1) + "," +
+                    String::num(origin[1], 1) + "," + String::num(origin[2], 1) + ")" +
+                    String(" scale=") + String::num(scale, 3) +
+                    String(" name=") + String(dbg_mod_name ? dbg_mod_name : "null"));
             }
         } else {
 #ifdef HAS_WEAPON_VIEWPORT_MODULE
@@ -2508,6 +2521,35 @@ void MoHAARunner::update_entities() {
                     String::num_int64(n_beam) + " beam, " +
                     String::num_int64(n_other) + " other");
             }
+        }
+    }
+
+    // ── Renderfx diagnostic: log weapon entities once per session ──
+    {
+        static int rfx_diag_frames = 0;
+        static bool rfx_logged_summary = false;
+        rfx_diag_frames++;
+        // Log a summary after 60 frames (about 1 second)
+        if (!rfx_logged_summary && rfx_diag_frames > 60) {
+            rfx_logged_summary = true;
+            int n_fp = 0, n_dh = 0, n_tp = 0, n_shad = 0;
+            for (int i = 0; i < ent_count; i++) {
+                int rfx = 0;
+                Godot_Renderer_GetEntity(i, nullptr, nullptr, nullptr,
+                                         nullptr, nullptr, nullptr, &rfx);
+                if (rfx & 0x02) n_fp++;
+                if (rfx & 0x04) n_dh++;
+                if (rfx & 0x01) n_tp++;
+                if (rfx & 0x800) n_shad++;
+            }
+            UtilityFunctions::print(
+                String("[MoHAA-RFX] Entity renderfx summary after ") +
+                String::num_int64(rfx_diag_frames) + " frames: " +
+                String::num_int64(ent_count) + " total, " +
+                String::num_int64(n_fp) + " RF_FIRST_PERSON, " +
+                String::num_int64(n_dh) + " RF_DEPTHHACK, " +
+                String::num_int64(n_tp) + " RF_THIRD_PERSON, " +
+                String::num_int64(n_shad) + " RF_SHADOW");
         }
     }
 

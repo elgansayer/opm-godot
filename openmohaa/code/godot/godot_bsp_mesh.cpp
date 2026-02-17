@@ -408,6 +408,10 @@ static const bsp_lump_t *get_lump(const bsp_header_t *hdr, int lump_id) {
 
 /* ===================================================================
  *  Per-shader vertex/index accumulator
+ *
+ *  Batches are keyed by (shaderNum, lightmapNum) so that surfaces
+ *  sharing the same shader but referencing different lightmap tiles
+ *  get separate materials with the correct lightmap bound.
  * ================================================================ */
 
 struct ShaderBatch {
@@ -419,10 +423,15 @@ struct ShaderBatch {
     std::vector<int32_t> indices;
     int32_t              vertex_offset = 0;
     const char          *shader_name   = nullptr;
-    int                  lightmap_num  = -1;  // first surface's lightmap (for batch)
-    bool                 nolightmap    = false; // Phase 65: surface has SURF_NOLIGHTMAP
-    int32_t              surface_flags = 0;    // BSP surface flags for this batch
+    int                  lightmap_num  = -1;
+    bool                 nolightmap    = false;
+    int32_t              surface_flags = 0;
 };
+
+/// Encode (shaderNum, lightmapNum) into a single int64_t batch key.
+static inline int64_t make_batch_key(int shader_num, int lightmap_num) {
+    return ((int64_t)shader_num << 32) | ((int64_t)(uint32_t)lightmap_num);
+}
 
 /* ===================================================================
  *  Linear interpolation helper
@@ -704,6 +713,10 @@ static constexpr int LIGHTMAP_BYTES = LIGHTMAP_SIZE * LIGHTMAP_SIZE * 3;
 
 static std::vector<Ref<ImageTexture>> s_lightmaps;
 
+/* DEBUG: set to true to replace all lightmaps with white — helps diagnose
+ * whether "black marks" are caused by lightmap data.  Remove after testing. */
+static bool s_debug_white_lightmaps = false;
+
 /// Parse the LUMP_LIGHTMAPS data and create Godot ImageTexture objects.
 static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
     s_lightmaps.clear();
@@ -721,14 +734,22 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
         uint8_t *dst = rgba.ptrw();
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
-            // Light-shift: mimic R_ColorShiftLightingBytes with overbrightBits=1
+            // R_ColorShiftLightingBytes: shift by overbrightShift (1 for
+            // default r_mapOverBrightBits=1, r_overBrightBits=0).
+            // Use hue-preserving normalisation instead of per-channel
+            // clamping — this matches the original renderer exactly.
             int r = src[p * 3 + 0] << 1;
             int g = src[p * 3 + 1] << 1;
             int b = src[p * 3 + 2] << 1;
-            // Clamp and normalise
-            if (r > 255) r = 255;
-            if (g > 255) g = 255;
-            if (b > 255) b = 255;
+
+            if ((r | g | b) > 255) {
+                int mx = r;
+                if (g > mx) mx = g;
+                if (b > mx) mx = b;
+                r = r * 255 / mx;
+                g = g * 255 / mx;
+                b = b * 255 / mx;
+            }
 
             dst[p * 4 + 0] = (uint8_t)r;
             dst[p * 4 + 1] = (uint8_t)g;
@@ -791,7 +812,7 @@ static bool is_tool_shader(const char *name) {
  * ================================================================ */
 
 static Ref<ArrayMesh> batches_to_array_mesh(
-    std::unordered_map<int, ShaderBatch> &batches,
+    std::unordered_map<int64_t, ShaderBatch> &batches,
     int *out_tex_loaded = nullptr,
     int *out_tex_failed = nullptr)
 {
@@ -873,7 +894,11 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                         // $lightmap stage — bind the batch's lightmap texture,
                         // or a white fallback if the surface has no lightmap
                         // (mirrors the real renderer's tr.whiteImage).
-                        if (!batch.nolightmap &&
+                        if (s_debug_white_lightmaps) {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_tex",
+                                get_white_texture());
+                        } else if (!batch.nolightmap &&
                             batch.lightmap_num >= 0 &&
                             batch.lightmap_num < (int)s_lightmaps.size() &&
                             s_lightmaps[batch.lightmap_num].is_valid()) {
@@ -900,7 +925,11 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                     /* nextBundle $lightmap: bind lightmap to stage<i>_lm,
                      * or white fallback for nolightmap surfaces. */
                     if (stage->hasNextBundleLightmap) {
-                        if (!batch.nolightmap &&
+                        if (s_debug_white_lightmaps) {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_lm",
+                                get_white_texture());
+                        } else if (!batch.nolightmap &&
                             batch.lightmap_num >= 0 &&
                             batch.lightmap_num < (int)s_lightmaps.size() &&
                             s_lightmaps[batch.lightmap_num].is_valid()) {
@@ -995,7 +1024,8 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                 mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
             }
 
-            if (!batch.nolightmap &&
+            if (!s_debug_white_lightmaps &&
+                !batch.nolightmap &&
                 batch.lightmap_num >= 0 &&
                 batch.lightmap_num < (int)s_lightmaps.size() &&
                 s_lightmaps[batch.lightmap_num].is_valid()) {
@@ -1032,7 +1062,7 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
                              const bsp_drawvert_t *verts, int num_verts,
                              const int32_t *indices, int num_indices,
                              const bsp_shader_t *shaders, int num_shaders,
-                             std::unordered_map<int, ShaderBatch> &batches,
+                             std::unordered_map<int64_t, ShaderBatch> &batches,
                              int &skipped_nodraw, int &skipped_sky)
 {
     // Skip unsupported surface types
@@ -1059,19 +1089,19 @@ static bool process_surface(const bsp_surface_t *surf, int surf_idx,
         if (surf->numIndexes <= 0) return false;
     }
 
-    // Get or create batch
-    ShaderBatch &batch = batches[surf->shaderNum];
+    // Get or create batch — keyed by (shaderNum, lightmapNum) so that
+    // surfaces sharing the same shader but referencing different lightmap
+    // tiles get separate materials with the correct lightmap bound.
+    int64_t bkey = make_batch_key(surf->shaderNum, surf->lightmapNum);
+    ShaderBatch &batch = batches[bkey];
     if (!batch.shader_name && surf->shaderNum >= 0 && surf->shaderNum < num_shaders) {
         batch.shader_name = shaders[surf->shaderNum].shader;
         batch.surface_flags = shaders[surf->shaderNum].surfaceFlags;
-        /* Phase 65: detect nolightmap surfaces */
         if (shaders[surf->shaderNum].surfaceFlags & SURF_NOLIGHTMAP) {
             batch.nolightmap = true;
         }
     }
-    if (batch.lightmap_num < 0 && surf->lightmapNum >= 0) {
-        batch.lightmap_num = surf->lightmapNum;
-    }
+    batch.lightmap_num = surf->lightmapNum;
 
     // Handle Bézier patches
     if (surf->surfaceType == MST_PATCH) {
@@ -1494,9 +1524,9 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
     }
 
     // ── 5b. Accumulate world surfaces into per-cluster, per-shader batches ──
-    // Key: cluster → {shaderNum → ShaderBatch}
+    // Key: cluster → {(shaderNum,lightmapNum) → ShaderBatch}
     // Cluster -1 is the "always visible" fallback group.
-    std::unordered_map<int, std::unordered_map<int, ShaderBatch>> cluster_batches;
+    std::unordered_map<int, std::unordered_map<int64_t, ShaderBatch>> cluster_batches;
 
     int skipped_nodraw = 0;
     int skipped_type   = 0;
@@ -1638,14 +1668,15 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
                 }
             }
 
-            // Get or create shader batch for this cluster
-            ShaderBatch &batch = cluster_batches[terrain_cluster][patch->iShader];
+            // Get or create shader batch for this cluster — keyed by
+            // (shaderNum, lightmapNum) to avoid lightmap tile mismatches.
+            int terrain_lm = (int)patch->iLightMap;
+            int64_t tkey = make_batch_key(patch->iShader, terrain_lm);
+            ShaderBatch &batch = cluster_batches[terrain_cluster][tkey];
             if (!batch.shader_name) {
                 batch.shader_name = sh->shader;
             }
-            if (batch.lightmap_num < 0 && patch->iLightMap > 0) {
-                batch.lightmap_num = (int)patch->iLightMap;
-            }
+            batch.lightmap_num = terrain_lm;
             // Corner diffuse texture coordinates
             //   [0][0] = SW (col=0,row=0)
             //   [0][1] = NW (col=0,row=8)
@@ -1777,7 +1808,7 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             int first = bsp_models[m].firstSurface;
             int count = bsp_models[m].numSurfaces;
 
-            std::unordered_map<int, ShaderBatch> bm_batches;
+            std::unordered_map<int64_t, ShaderBatch> bm_batches;
             int bm_skip_nd = 0, bm_skip_sky = 0;
 
             for (int si = first; si < first + count && si < num_surfaces; si++) {
