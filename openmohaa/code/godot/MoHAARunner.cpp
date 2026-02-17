@@ -1788,6 +1788,17 @@ void MoHAARunner::update_entities() {
         EntityCacheKey key { hModel, reType, 0, renderfx };
         bool same_key = (i < (int)entity_cache_keys.size() && entity_cache_keys[i] == key);
 
+        // When this entity slot changes model/type, clear stale surface
+        // override materials.  Otherwise a TIKI model's overrides persist
+        // when the slot is reused for a brush entity (or vice versa),
+        // causing wrong textures / flickering.
+        if (!same_key && mi->get_mesh().is_valid()) {
+            int prev_sc = mi->get_mesh()->get_surface_count();
+            for (int s = 0; s < prev_sc; s++) {
+                mi->set_surface_override_material(s, Ref<Material>());
+            }
+        }
+
         // Try to get the actual skeletal model mesh from cache
         int modType = Godot_Model_GetType(hModel);
         dbg_reached_modtype++;
@@ -2055,11 +2066,11 @@ void MoHAARunner::update_entities() {
                                         texcoords[v*2+1]));
                                 }
 
-                                // Reverse winding (id CW → Godot CCW)
+                                // Indices as-is — det(id_to_godot_point) = +1, winding preserved
                                 for (int t = 0; t < numTris; t++) {
                                     gIdx.set(t*3+0, indices[t*3+0]);
-                                    gIdx.set(t*3+1, indices[t*3+2]);
-                                    gIdx.set(t*3+2, indices[t*3+1]);
+                                    gIdx.set(t*3+1, indices[t*3+1]);
+                                    gIdx.set(t*3+2, indices[t*3+2]);
                                 }
 
                                 Array arrays;
@@ -2133,6 +2144,7 @@ void MoHAARunner::update_entities() {
                 auto &mats = mat_cache[hModel];
                 int sc = mi->get_mesh().is_valid()
                        ? mi->get_mesh()->get_surface_count() : 0;
+
                 for (int s = 0; s < (int)mats.size() && s < sc; s++) {
                     mi->set_surface_override_material(s, mats[s]);
                 }
@@ -2195,6 +2207,8 @@ void MoHAARunner::update_entities() {
 #else
             // Fallback when weapon viewport is unavailable: disable depth
             // test so weapons render on top of world geometry.
+            // Only modify materials that haven't already been patched, to
+            // avoid creating duplicate material objects every frame.
             Ref<Mesh> mesh = mi->get_mesh();
             if (mesh.is_valid()) {
                 int sc = mesh->get_surface_count();
@@ -2204,7 +2218,8 @@ void MoHAARunner::update_entities() {
                         base_mat = mesh->surface_get_material(s);
 
                     Ref<StandardMaterial3D> smat = base_mat;
-                    if (smat.is_valid()) {
+                    if (smat.is_valid() &&
+                        !smat->get_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST)) {
                         Ref<StandardMaterial3D> dup = smat->duplicate();
                         dup->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
                         dup->set_render_priority(127);
@@ -4657,11 +4672,11 @@ void MoHAARunner::update_hud_models() {
                             gUVs.set(v, Vector2(texcoords[v*2+0], texcoords[v*2+1]));
                         }
 
-                        /* Reverse winding (id CW → Godot CCW) */
+                        /* Indices as-is — det(id_to_godot_point) = +1, winding preserved */
                         for (int t = 0; t < numTris; t++) {
                             gIdx.set(t*3+0, indices[t*3+0]);
-                            gIdx.set(t*3+1, indices[t*3+2]);
-                            gIdx.set(t*3+2, indices[t*3+1]);
+                            gIdx.set(t*3+1, indices[t*3+1]);
+                            gIdx.set(t*3+2, indices[t*3+2]);
                         }
 
                         Array arrays;
