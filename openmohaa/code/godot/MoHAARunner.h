@@ -294,10 +294,20 @@ private:
     CanvasLayer *hud_model_canvas_layer = nullptr;
     Control *hud_model_canvas_control = nullptr;
 
-    // Multiplicative-blend child canvas items for 2D overlay
-    RID mul_canvas_item;            // blendFunc filter (src*dst)
+    // Blend-mode segment pool for 2D overlay draw order
+    // Commands are routed to segment canvas items that preserve the engine's
+    // interleaved draw order between mix/mul/mul_inv blend modes.
+    static const int BLEND_MIX = 0;
+    static const int BLEND_MUL = 1;
+    static const int BLEND_MUL_INV = 2;
+    struct CanvasSegment {
+        RID item;
+        int blend_mode;
+    };
+    std::vector<CanvasSegment> overlay_segments;
+    int overlay_segment_count = 0;   // active segments this frame
+    int overlay_current_blend = -1;  // blend mode of current segment
     Ref<CanvasItemMaterial> mul_canvas_material;
-    RID mul_inv_canvas_item;        // GL_ZERO GL_ONE_MINUS_SRC_COLOR → dst*(1-src)
     Ref<ShaderMaterial> mul_inv_material;
     Ref<Shader> mul_inv_shader;
 

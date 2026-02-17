@@ -2217,28 +2217,17 @@ void MoHAARunner::update_entities() {
                 wp_root->add_child(mi);
             }
 #else
-            // Fallback when weapon viewport is unavailable: disable depth
-            // test so weapons render on top of world geometry.
-            // Only modify materials that haven't already been patched, to
-            // avoid creating duplicate material objects every frame.
-            Ref<Mesh> mesh = mi->get_mesh();
-            if (mesh.is_valid()) {
-                int sc = mesh->get_surface_count();
-                for (int s = 0; s < sc; s++) {
-                    Ref<Material> base_mat = mi->get_surface_override_material(s);
-                    if (base_mat.is_null())
-                        base_mat = mesh->surface_get_material(s);
-
-                    Ref<StandardMaterial3D> smat = base_mat;
-                    if (smat.is_valid() &&
-                        !smat->get_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST)) {
-                        Ref<StandardMaterial3D> dup = smat->duplicate();
-                        dup->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, true);
-                        dup->set_render_priority(127);
-                        mi->set_surface_override_material(s, dup);
-                    }
-                }
-            }
+            // Fallback when weapon viewport is unavailable:
+            // Keep depth test ON so that hands and weapon properly
+            // occlude each other (correct grip appearance).
+            // Use render_priority to draw FPS entities after world
+            // geometry, and no_depth_test is deliberately NOT set.
+            // This means weapons may clip into nearby walls —
+            // the proper fix is the SubViewport module which uses
+            // a compressed depth range (0–0.3).
+            //
+            // (No material patching needed — default depth test is
+            //  already enabled on all materials.)
 #endif
             // Periodic weapon diagnostic (first 30 frames) — now with mesh AABB
             static int fp_diag_count = 0;
@@ -3850,47 +3839,78 @@ void MoHAARunner::update_2d_overlay() {
     RenderingServer *rs = RenderingServer::get_singleton();
     rs->canvas_item_clear(ci);
 
-    /* Create/clear a child canvas item with multiplicative blend for
-     * shaders like "shadow" that use blendFunc filter (GL_DST_COLOR GL_ZERO).
-     * Must be a child of ci so it shares the same canvas layer. */
-    if (!mul_canvas_item.is_valid()) {
-        mul_canvas_item = rs->canvas_item_create();
-        rs->canvas_item_set_parent(mul_canvas_item, ci);
+    /* ── Blend-mode segment pool ──
+     * The engine's 2D command stream interleaves normal (mix), multiplicative
+     * (filter/dst*src), and inverse-multiplicative (dst*(1-src)) blend modes.
+     * In OpenGL these happen sequentially on a single framebuffer.  In Godot,
+     * each blend mode needs a separate canvas item with the right material.
+     * We create child canvas items in command-stream order — each "segment"
+     * covers a contiguous run of commands with the same blend mode.  This
+     * preserves the correct z-ordering across blend mode switches.
+     *
+     * Segments are pooled: we reuse RIDs across frames to avoid alloc churn. */
 
+    // Lazily create shared materials (once)
+    if (mul_canvas_material.is_null()) {
         mul_canvas_material.instantiate();
         mul_canvas_material->set_blend_mode(CanvasItemMaterial::BLEND_MODE_MUL);
-        rs->canvas_item_set_material(mul_canvas_item, mul_canvas_material->get_rid());
     }
-    rs->canvas_item_clear(mul_canvas_item);
-
-    /* Create/clear a child canvas item with INVERSE multiplicative blend for
-     * shaders like "pmshadow" that use blendFunc GL_ZERO GL_ONE_MINUS_SRC_COLOR.
-     * Equation: result = dst * (1 - src).  We use blend_mul (dst * output) and
-     * output (1 - src) from a custom fragment shader. */
-    if (!mul_inv_canvas_item.is_valid()) {
-        mul_inv_canvas_item = rs->canvas_item_create();
-        rs->canvas_item_set_parent(mul_inv_canvas_item, ci);
-
+    if (mul_inv_material.is_null()) {
         mul_inv_shader.instantiate();
         mul_inv_shader->set_code(
             "shader_type canvas_item;\n"
             "render_mode blend_mul;\n"
             "void fragment() {\n"
             "    vec4 tex = texture(TEXTURE, UV);\n"
-            "    // The real renderer scales SetColor by identityLight\n"
-            "    // (0.5 with default r_overBrightBits=1) before rgbGen global\n"
-            "    // modulation.  Our stub passes raw values, so apply the\n"
-            "    // factor here to match shadow intensity.\n"
             "    float id_light = 0.5;\n"
             "    COLOR = vec4(vec3(1.0) - tex.rgb * COLOR.rgb * id_light, tex.a * COLOR.a);\n"
             "}\n"
         );
-
         mul_inv_material.instantiate();
         mul_inv_material->set_shader(mul_inv_shader);
-        rs->canvas_item_set_material(mul_inv_canvas_item, mul_inv_material->get_rid());
     }
-    rs->canvas_item_clear(mul_inv_canvas_item);
+
+    // Clear all existing segments
+    for (int si = 0; si < (int)overlay_segments.size(); si++) {
+        rs->canvas_item_clear(overlay_segments[si].item);
+        // Hide unused segments from previous frame
+        rs->canvas_item_set_visible(overlay_segments[si].item, false);
+    }
+    overlay_segment_count = 0;
+    overlay_current_blend = -1;
+
+    // Helper lambda: get or create the current segment canvas item for a blend mode
+    auto get_segment_ci = [&](int blend) -> RID {
+        if (overlay_segment_count > 0 && overlay_current_blend == blend) {
+            return overlay_segments[overlay_segment_count - 1].item;
+        }
+        // Need a new segment
+        if (overlay_segment_count >= (int)overlay_segments.size()) {
+            CanvasSegment seg;
+            seg.item = rs->canvas_item_create();
+            rs->canvas_item_set_parent(seg.item, ci);
+            seg.blend_mode = -1;
+            overlay_segments.push_back(seg);
+        }
+        auto &seg = overlay_segments[overlay_segment_count];
+        rs->canvas_item_set_visible(seg.item, true);
+
+        // Set material for this segment's blend mode
+        if (seg.blend_mode != blend) {
+            if (blend == BLEND_MIX) {
+                rs->canvas_item_set_material(seg.item, RID());
+            } else if (blend == BLEND_MUL) {
+                rs->canvas_item_set_material(seg.item, mul_canvas_material->get_rid());
+            } else { // BLEND_MUL_INV
+                rs->canvas_item_set_material(seg.item, mul_inv_material->get_rid());
+            }
+            seg.blend_mode = blend;
+        }
+
+        overlay_segment_count++;
+        overlay_current_blend = blend;
+        return seg.item;
+    };
 
     // Phase 58: Draw captured background image during loading/screens
     {
@@ -3962,6 +3982,18 @@ void MoHAARunner::update_2d_overlay() {
     bool saw_textured_draw = false;
     static bool logged_late_clear_skip = false;
 
+    // DIAG: log loading screen 2D commands once to trace draw order
+    static int loading_diag_count = 0;
+    bool diag_loading = (!in_active_game && cmd_count > 5 && loading_diag_count < 2);
+    if (diag_loading) {
+        loading_diag_count++;
+        UtilityFunctions::print(String("[LOAD-DIAG] frame ") + String::num_int64(loading_diag_count) +
+            String(" cmds=") + String::num_int64(cmd_count) +
+            String(" overlay=") + String(overlay_on ? "Y" : "N") +
+            String(" allowFills=") + String(allow_fullscreen_fills ? "Y" : "N") +
+            String(" worldLoaded=") + String(world_loaded ? "Y" : "N"));
+    }
+
     Rect2 scissor_rect;
 
     /* Gather HUD model draw orders so we can inject viewport textures
@@ -4017,6 +4049,10 @@ void MoHAARunner::update_2d_overlay() {
                 logged_late_clear_skip = true;
                 UtilityFunctions::print("[MoHAA][2D] Skipping late fullscreen black clear after textured UI draws");
             }
+            if (diag_loading) {
+                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
+                    String("] SKIP late-clear type=1 saw_tex=Y"));
+            }
             continue;
         }
 
@@ -4024,6 +4060,10 @@ void MoHAARunner::update_2d_overlay() {
         // These screen clears would cover the 3D view.  But when UI menus
         // are active, we need them for menu backgrounds.
         if (!allow_fullscreen_fills && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
+            if (diag_loading) {
+                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
+                    String("] SKIP no-fill type=1"));
+            }
             continue;
         }
 
@@ -4054,11 +4094,33 @@ void MoHAARunner::update_2d_overlay() {
         }
 
         if (type == 1) {
-            // GR_2D_BOX — solid colour rectangle
-            rs->canvas_item_add_rect(ci, draw_rect, col);
+            // GR_2D_BOX — solid colour rectangle (always mix blend)
+            if (diag_loading) {
+                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
+                    String("] BOX rect=") + String::num(x, 0) + "," + String::num(y, 0) +
+                    " " + String::num(w, 0) + "x" + String::num(h, 0) +
+                    String(" rgba=") + String::num(col.r, 2) + "," + String::num(col.g, 2) +
+                    "," + String::num(col.b, 2) + "," + String::num(col.a, 2));
+            }
+            RID box_ci = get_segment_ci(BLEND_MIX);
+            rs->canvas_item_add_rect(box_ci, draw_rect, col);
         } else if (type == 0 && shader > 0) {
             // GR_2D_STRETCHPIC — textured quad
             Ref<ImageTexture> tex = get_shader_texture(shader);
+
+            if (diag_loading) {
+                const char *dn = Godot_Renderer_GetShaderName(shader);
+                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
+                    String("] TEX shader=#") + String::num_int64(shader) +
+                    String(" '") + String(dn ? dn : "?") + String("' valid=") +
+                    String(tex.is_valid() ? "Y" : "N") +
+                    (tex.is_valid() ? (String(" ") + String::num_int64(tex->get_width()) +
+                        "x" + String::num_int64(tex->get_height())) : String("")) +
+                    String(" rect=") + String::num(x, 0) + "," + String::num(y, 0) +
+                    " " + String::num(w, 0) + "x" + String::num(h, 0) +
+                    String(" rgba=") + String::num(col.r, 2) + "," + String::num(col.g, 2) +
+                    "," + String::num(col.b, 2) + "," + String::num(col.a, 2));
+            }
 
             if (tex.is_valid()) {
                 RID tex_rid = tex->get_rid();
@@ -4197,7 +4259,10 @@ void MoHAARunner::update_2d_overlay() {
                     }
                 }
 
-                RID target_ci = is_mul ? mul_canvas_item : (is_mul_inv ? mul_inv_canvas_item : ci);
+                int draw_blend = BLEND_MIX;
+                if (is_mul) draw_blend = BLEND_MUL;
+                else if (is_mul_inv) draw_blend = BLEND_MUL_INV;
+                RID target_ci = get_segment_ci(draw_blend);
 
                 // Detect tiling: if the source rect extends beyond the
                 // texture dimensions, the engine expects GL_REPEAT wrapping
