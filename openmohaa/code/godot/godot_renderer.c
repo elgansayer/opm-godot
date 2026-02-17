@@ -538,6 +538,10 @@ static void GR_BeginRegistration( glconfig_t *config )
         cvar_t *r_customw_cv    = ri.Cvar_Get( "r_customwidth",  "1280", 0 );
         cvar_t *r_customh_cv    = ri.Cvar_Get( "r_customheight", "720",  0 );
 
+        /* Register r_gamma so the config value is loaded and accessible
+         * from the Godot side for full-screen gamma correction. */
+        ri.Cvar_Get( "r_gamma", "1", CVAR_ARCHIVE );
+
         int mode = r_mode_cv ? r_mode_cv->integer : -2;
         int fs   = r_fullscreen_cv ? r_fullscreen_cv->integer : 0;
         int w = 0, h = 0;

@@ -4082,18 +4082,6 @@ void MoHAARunner::update_2d_overlay() {
     bool saw_textured_draw = false;
     static bool logged_late_clear_skip = false;
 
-    // DIAG: log loading screen 2D commands once to trace draw order
-    static int loading_diag_count = 0;
-    bool diag_loading = (!in_active_game && cmd_count > 5 && loading_diag_count < 2);
-    if (diag_loading) {
-        loading_diag_count++;
-        UtilityFunctions::print(String("[LOAD-DIAG] frame ") + String::num_int64(loading_diag_count) +
-            String(" cmds=") + String::num_int64(cmd_count) +
-            String(" overlay=") + String(overlay_on ? "Y" : "N") +
-            String(" allowFills=") + String(allow_fullscreen_fills ? "Y" : "N") +
-            String(" worldLoaded=") + String(world_loaded ? "Y" : "N"));
-    }
-
     Rect2 scissor_rect;
 
     /* Gather HUD model draw orders so we can inject viewport textures
@@ -4150,10 +4138,6 @@ void MoHAARunner::update_2d_overlay() {
                 logged_late_clear_skip = true;
                 UtilityFunctions::print("[MoHAA][2D] Skipping late fullscreen black clear after textured UI draws");
             }
-            if (diag_loading) {
-                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
-                    String("] SKIP late-clear type=1 saw_tex=Y"));
-            }
             continue;
         }
 
@@ -4161,10 +4145,6 @@ void MoHAARunner::update_2d_overlay() {
         // These screen clears would cover the 3D view.  But when UI menus
         // are active, we need them for menu backgrounds.
         if (!allow_fullscreen_fills && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
-            if (diag_loading) {
-                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
-                    String("] SKIP no-fill type=1"));
-            }
             continue;
         }
 
@@ -4196,32 +4176,11 @@ void MoHAARunner::update_2d_overlay() {
 
         if (type == 1) {
             // GR_2D_BOX — solid colour rectangle (always mix blend)
-            if (diag_loading) {
-                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
-                    String("] BOX rect=") + String::num(x, 0) + "," + String::num(y, 0) +
-                    " " + String::num(w, 0) + "x" + String::num(h, 0) +
-                    String(" rgba=") + String::num(col.r, 2) + "," + String::num(col.g, 2) +
-                    "," + String::num(col.b, 2) + "," + String::num(col.a, 2));
-            }
             RID box_ci = get_segment_ci(BLEND_MIX);
             rs->canvas_item_add_rect(box_ci, draw_rect, col);
         } else if (type == 0 && shader > 0) {
             // GR_2D_STRETCHPIC — textured quad
             Ref<ImageTexture> tex = get_shader_texture(shader);
-
-            if (diag_loading) {
-                const char *dn = Godot_Renderer_GetShaderName(shader);
-                UtilityFunctions::print(String("[LOAD-DIAG]  cmd[") + String::num_int64(i) +
-                    String("] TEX shader=#") + String::num_int64(shader) +
-                    String(" '") + String(dn ? dn : "?") + String("' valid=") +
-                    String(tex.is_valid() ? "Y" : "N") +
-                    (tex.is_valid() ? (String(" ") + String::num_int64(tex->get_width()) +
-                        "x" + String::num_int64(tex->get_height())) : String("")) +
-                    String(" rect=") + String::num(x, 0) + "," + String::num(y, 0) +
-                    " " + String::num(w, 0) + "x" + String::num(h, 0) +
-                    String(" rgba=") + String::num(col.r, 2) + "," + String::num(col.g, 2) +
-                    "," + String::num(col.b, 2) + "," + String::num(col.a, 2));
-            }
 
             if (tex.is_valid()) {
                 RID tex_rid = tex->get_rid();
@@ -5571,14 +5530,17 @@ void MoHAARunner::_process(double delta) {
         Godot_Music_SetVolume(music_vol);
     }
 
-    // Gamma: read r_gamma and apply brightness adjustment to environment
+    // Gamma: read r_gamma and apply brightness adjustment to 3D environment.
+    // The real GL renderer applies gamma via hardware gamma ramp which only
+    // affects the 3D framebuffer.  We use Environment::adjustment_brightness
+    // which similarly only affects the 3D scene, leaving the 2D HUD/loading
+    // screen at native brightness.
     if (world_env) {
         Ref<Environment> env = world_env->get_environment();
         if (env.is_valid()) {
             float gamma = Cvar_VariableValue("r_gamma");
             if (gamma < 0.5f) gamma = 0.5f;
             if (gamma > 3.0f) gamma = 3.0f;
-            // Map gamma to brightness: gamma 1.0 = no change, higher = brighter
             env->set_adjustment_enabled(gamma != 1.0f);
             if (gamma != 1.0f) {
                 env->set_adjustment_brightness(gamma);
