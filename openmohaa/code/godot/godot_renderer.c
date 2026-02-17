@@ -1722,10 +1722,16 @@ static int GR_LerpTag( orientation_t *tag, qhandle_t model,
 
 static void GR_ModelBounds( qhandle_t model, vec3_t mins, vec3_t maxs )
 {
-    if ( model >= 1 && model < gr_numModels &&
-         gr_models[model].type == GR_MOD_TIKI && gr_models[model].tiki ) {
-        ri.TIKI_CalculateBounds( gr_models[model].tiki, 1.0f, mins, maxs );
-        return;
+    if ( model >= 1 && model < gr_numModels ) {
+        if ( gr_models[model].type == GR_MOD_TIKI && gr_models[model].tiki ) {
+            ri.TIKI_CalculateBounds( gr_models[model].tiki, 1.0f, mins, maxs );
+            return;
+        }
+        if ( gr_models[model].type == GR_MOD_BRUSH && gr_models[model].name[0] == '*' ) {
+            int subIdx = atoi( gr_models[model].name + 1 );
+            Godot_BSP_GetInlineModelBounds( subIdx, mins, maxs );
+            return;
+        }
     }
     if ( mins ) VectorSet( mins, -16, -16, -16 );
     if ( maxs ) VectorSet( maxs, 16, 16, 16 );

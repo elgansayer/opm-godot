@@ -232,6 +232,11 @@ def should_exclude(filepath):
     if "code/godot/tests" in fp:
         return True
 
+    # Exclude test_*.cpp stubs from code/godot/ — they contain mock
+    # implementations that shadow real functions via -z muldefs.
+    if "code/godot/" in fp and os.path.basename(fp).startswith("test_"):
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)

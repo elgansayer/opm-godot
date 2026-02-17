@@ -4,7 +4,7 @@ var runner = null
 var screenshot_pending = false
 var screenshot_timer = 0.0
 const SCREENSHOT_DELAY = 1.5  # seconds after map load to take screenshot
-var launch_map = "obj/obj_team4"
+var launch_map = "dm/mohdm1"
 var launch_dedicated = false
 var launch_menu = ""
 
@@ -57,6 +57,8 @@ func _ready():
 		runner.map_unloaded.connect(_on_map_unloaded)
 		runner.engine_shutdown_requested.connect(_on_engine_shutdown)
 		
+		runner.execute_command("exec server.cfg")
+		
 		# Try loading a map after a short delay to let the engine settle
 		get_tree().create_timer(0.5).timeout.connect(_on_load_timer)
 	else:
@@ -64,7 +66,7 @@ func _ready():
 
 func _on_load_timer():
 	if runner and runner.is_engine_initialized():
-		print("Main: Engine is running. Main menu should be visible.")
+		print("Main: Engine is running.")
 		if launch_menu != "":
 			if launch_menu == "mpoptions":
 				runner.execute_command("ui_getplayermodel")
@@ -72,9 +74,9 @@ func _on_load_timer():
 			runner.execute_command("pushmenu " + launch_menu)
 			print("Main: Executed -> pushmenu ", launch_menu)
 			get_tree().create_timer(0.75).timeout.connect(func(): take_screenshot("menu_" + launch_menu))
-		# The engine auto-pushes the main menu on startup via CL_TryStartIntro().
-		# Use runner.execute_command("pushmenu main") if menu needs to be re-opened.
-		# Use runner.load_map("mapname") to load a specific map.
+		elif launch_map != "":
+			print("Main: Loading map -> ", launch_map)
+			runner.load_map(launch_map)
 
 func _on_status_check():
 	if runner and runner.is_engine_initialized():

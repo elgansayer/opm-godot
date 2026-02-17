@@ -558,6 +558,7 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
             render_mode += "blend_add";
             break;
         case SHADER_MULTIPLICATIVE:
+        case SHADER_MULTIPLICATIVE_INV:
             if (!render_mode.empty()) render_mode += ", ";
             render_mode += "blend_mul";
             break;

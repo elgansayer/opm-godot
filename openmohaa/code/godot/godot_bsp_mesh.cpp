@@ -609,6 +609,23 @@ static void tessellate_patch(const bsp_surface_t *surf,
 
 static std::unordered_map<std::string, Ref<ImageTexture>> s_texture_cache;
 
+/// Return a cached 1x1 white texture — used as lightmap fallback for
+/// nolightmap surfaces so that GLSL lightmap samplers produce white
+/// (identity modulation) instead of black (unbound sampler default).
+/// This mirrors the real renderer's tr.whiteImage substitution.
+static Ref<ImageTexture> get_white_texture() {
+    static Ref<ImageTexture> s_white;
+    if (s_white.is_null()) {
+        PackedByteArray wdata;
+        wdata.resize(4);
+        wdata.ptrw()[0] = 255; wdata.ptrw()[1] = 255;
+        wdata.ptrw()[2] = 255; wdata.ptrw()[3] = 255;
+        Ref<Image> wimg = Image::create_from_data(1, 1, false, Image::FORMAT_RGBA8, wdata);
+        s_white = ImageTexture::create_from_image(wimg);
+    }
+    return s_white;
+}
+
 /// Load an image from the VFS and return a Godot ImageTexture.
 /// @param shader_name  e.g. "textures/mohmain/brick01" (no extension)
 /// @return  ImageTexture or empty Ref on failure.
@@ -784,7 +801,6 @@ static Ref<ArrayMesh> batches_to_array_mesh(
     int surface_idx = 0;
     int tex_ok  = 0;
     int tex_bad = 0;
-
     for (auto &pair : batches) {
         ShaderBatch &batch = pair.second;
         if (batch.positions.empty() || batch.indices.empty()) continue;
@@ -854,7 +870,9 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                             }
                         }
                     } else if (stage->isLightmap) {
-                        // $lightmap stage — bind the batch's lightmap texture
+                        // $lightmap stage — bind the batch's lightmap texture,
+                        // or a white fallback if the surface has no lightmap
+                        // (mirrors the real renderer's tr.whiteImage).
                         if (!batch.nolightmap &&
                             batch.lightmap_num >= 0 &&
                             batch.lightmap_num < (int)s_lightmaps.size() &&
@@ -862,6 +880,10 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                             smat->set_shader_parameter(
                                 String("stage") + idx + "_tex",
                                 s_lightmaps[batch.lightmap_num]);
+                        } else {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_tex",
+                                get_white_texture());
                         }
                     } else if (stage->map[0] != '\0') {
                         // Regular texture stage
@@ -875,21 +897,28 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                         }
                     }
 
-                    /* nextBundle $lightmap: bind lightmap to stage<i>_lm */
-                    if (stage->hasNextBundleLightmap &&
-                        !batch.nolightmap &&
-                        batch.lightmap_num >= 0 &&
-                        batch.lightmap_num < (int)s_lightmaps.size() &&
-                        s_lightmaps[batch.lightmap_num].is_valid()) {
-                        smat->set_shader_parameter(
-                            String("stage") + idx + "_lm",
-                            s_lightmaps[batch.lightmap_num]);
+                    /* nextBundle $lightmap: bind lightmap to stage<i>_lm,
+                     * or white fallback for nolightmap surfaces. */
+                    if (stage->hasNextBundleLightmap) {
+                        if (!batch.nolightmap &&
+                            batch.lightmap_num >= 0 &&
+                            batch.lightmap_num < (int)s_lightmaps.size() &&
+                            s_lightmaps[batch.lightmap_num].is_valid()) {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_lm",
+                                s_lightmaps[batch.lightmap_num]);
+                        } else {
+                            smat->set_shader_parameter(
+                                String("stage") + idx + "_lm",
+                                get_white_texture());
+                        }
                     }
                 }
 
                 smat->set_meta("shader_name", String(batch.shader_name));
                 surface_mat = smat;
             }
+        } else if (!sp) {
         }
 
         if (surface_mat.is_null()) {
@@ -910,6 +939,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                     tex_ok++;
                 } else {
                     tex_bad++;
+
                 }
 
                 if (sp) {

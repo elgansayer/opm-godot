@@ -147,6 +147,23 @@ void Godot_FrustumCull_UpdateCamera(Camera3D *camera)
     #undef M
 
     s_valid = true;
+
+    /* Sanity: a point slightly in front of the camera MUST be inside the
+     * frustum.  If it fails, the frustum planes are degenerate (zero-size
+     * viewport, headless mode, etc.) — mark invalid so callers default to
+     * "visible".
+     */
+    {
+        Vector3 cam_pos = camera->get_global_position();
+        Vector3 cam_fwd = -camera->get_global_transform().basis.get_column(2);
+        Vector3 test_pt = cam_pos + cam_fwd * 1.0f;
+        for (int i = 0; i < 6; i++) {
+            if (s_planes[i].distance_to(test_pt) < -0.5f) {
+                s_valid = false;
+                break;
+            }
+        }
+    }
 }
 
 /* ===================================================================

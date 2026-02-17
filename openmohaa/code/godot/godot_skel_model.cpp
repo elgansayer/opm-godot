@@ -203,14 +203,15 @@ GodotSkelModelCache::CachedModel *GodotSkelModelCache::build_model(int hModel)
                 godotUVs.set(v, Vector2(u, vt));
             }
 
-            /* Copy indices as-is.  The id_to_godot_point conversion
-             * has det = +1 (proper rotation), so winding is preserved.
-             * Q3/MOHAA model triangles are already CCW from the visible
-             * side, matching Godot's default front-face convention. */
+            /* Reverse winding: id_to_godot_point is a proper rotation
+             * (det = +1), so CW winding from id Tech is preserved.
+             * Godot uses CCW front face, so we must swap indices 1 and 2
+             * to convert CW → CCW.  This matches the BSP mesh loader
+             * and MoHAARunner's animated entity path. */
             for (int t = 0; t < numTris; t++) {
                 godotIndices.set(t * 3 + 0, indices[t * 3 + 0]);
-                godotIndices.set(t * 3 + 1, indices[t * 3 + 1]);
-                godotIndices.set(t * 3 + 2, indices[t * 3 + 2]);
+                godotIndices.set(t * 3 + 1, indices[t * 3 + 2]);
+                godotIndices.set(t * 3 + 2, indices[t * 3 + 1]);
             }
 
             /* Build ArrayMesh surface */
