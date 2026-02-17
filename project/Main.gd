@@ -59,8 +59,11 @@ func _ready():
 		
 		runner.execute_command("exec server.cfg")
 		
-		# Try loading a map after a short delay to let the engine settle
+		# server.cfg already contains a map command, so skip the
+		# duplicate load_map that _on_load_timer would issue.
+		# Only use the timer for non-map tasks (menu push, etc.).
 		get_tree().create_timer(0.5).timeout.connect(_on_load_timer)
+		launch_map = ""  # prevent _on_load_timer from issuing duplicate map command
 	else:
 		print("Main: Failed to instantiate MoHAARunner.")
 

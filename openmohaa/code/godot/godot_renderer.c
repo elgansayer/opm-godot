@@ -494,6 +494,14 @@ static void GR_BeginRegistration( glconfig_t *config )
         gr_shaderHeights[i] = GR_DIM_UNKNOWN;
     }
 
+    /* Mark world as unloaded so check_world_load() invalidates Godot-side
+     * caches (BSP mesh, textures, skel models) even if the same map name
+     * is reloaded.  TIKI data and shader/model handles are all reset by
+     * BeginRegistration, so stale Godot-side references must be dropped. */
+    gr_worldMapLoaded  = qfalse;
+    gr_worldMapName[0] = '\0';
+    gr_numEntities     = 0;
+
      /* Fonts persist across map loads; shader handles must be rebound into
          the rebuilt gr_shaders table.  Mark dirty and refresh lazily when
          text is drawn (after font tables/functions are in scope). */

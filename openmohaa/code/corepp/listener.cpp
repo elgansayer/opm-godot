@@ -571,8 +571,18 @@ void L_InitEvents(void)
     g_watch      = LISTENER_Cvar_Get("g_watch", "0", 0);
     g_eventstats = LISTENER_Cvar_Get("g_eventstats", "0", 0);
 
+#ifdef GODOT_GDEXTENSION
+    // Monolithic build: event definitions persist across map reloads
+    // because DataNodeList is consumed once by LoadEvents() and static
+    // constructors do not re-run.  Only load on the first call.
+    if (Event::NumEventCommands() <= 1) {
+        Event::LoadEvents();
+        ClassDef::BuildEventResponses();
+    }
+#else
     Event::LoadEvents();
     ClassDef::BuildEventResponses();
+#endif
 
     LL_Reset(&Event::EventQueue, next, prev);
 
@@ -623,6 +633,12 @@ void L_ShutdownEvents(void)
 
     L_ClearEventList();
 
+#ifdef GODOT_GDEXTENSION
+    // Monolithic build: DataNodeList is consumed once by LoadEvents()
+    // and cannot be rebuilt (static constructors only run at library load).
+    // Preserve commandList/eventDefList so subsequent L_InitEvents() calls
+    // (triggered by map reloads) have valid event data.
+#else
     Event::commandList.clear();
     Event::eventDefList.clear();
 #ifdef WITH_SCRIPT_ENGINE
@@ -630,6 +646,7 @@ void L_ShutdownEvents(void)
     Event::returnCommandList.clear();
     Event::getterCommandList.clear();
     Event::setterCommandList.clear();
+#endif
 #endif
 
     Listener::EventSystemStarted = false;

@@ -90,6 +90,13 @@ extern game_export_t *GetGameAPI(game_import_t *import);
 // cgame is compiled as a separate .so because it shares corepp/ with fgame
 // but needs CGAME_DLL.  We load it via the engine's Sys_LoadDll (dlopen).
 static void *cgame_library = NULL;
+// When true, final shutdown is in progress — do NOT dlclose cgame.so
+// because atexit/static-destructor handlers may reference its code pages.
+static qboolean cgame_shutting_down = qfalse;
+
+void Sys_CGameFinalShutdown(void) {
+    cgame_shutting_down = qtrue;
+}
 
 void *Sys_GetGameAPI(void *parms) {
     return (void *)GetGameAPI((game_import_t *)parms);
@@ -155,14 +162,20 @@ void *Sys_GetCGameAPI(void *parms) {
 
 void Sys_UnloadCGame(void) {
     if (cgame_library) {
-        // Do NOT dlclose cgame.so.  Template instantiations in corepp/
-        // (e.g. con_arrayset<command_t>::DeleteTable) may have been
-        // resolved via ELF symbol interposition to cgame.so's copies.
-        // If we dlclose, those code pages become unmapped, and the main
-        // .so's global C++ destructors SIGSEGV when they run at exit().
-        // Leaving the handle open is harmless — the OS reclaims
-        // everything at process exit (or Godot editor reload).
-        Com_Printf("GDExtension: Sys_UnloadCGame — keeping cgame.so mapped (safe teardown)\n");
+        if (cgame_shutting_down) {
+            // Final shutdown — do NOT dlclose cgame.so.  C++ static
+            // destructors inside cgame.so may have registered atexit
+            // handlers; closing the library would unmap those code pages
+            // and crash when the handlers run at process exit.
+            Com_Printf("GDExtension: Sys_UnloadCGame — keeping cgame.so mapped (final shutdown)\n");
+        } else {
+            // Map reload — dlclose so that the next Sys_GetCGameAPI
+            // re-opens a fresh copy with all static data reinitialised.
+            // This is safe because cgame.so uses -fvisibility=hidden,
+            // so no ELF symbol interposition from the main .so occurs.
+            Com_Printf("GDExtension: Sys_UnloadCGame — closing cgame.so (map reload)\n");
+            Sys_UnloadLibrary(cgame_library);
+        }
         cgame_library = NULL;
     }
 }

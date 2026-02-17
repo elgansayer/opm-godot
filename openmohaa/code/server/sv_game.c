@@ -1746,6 +1746,8 @@ void SV_InitGameProgs( void ) {
 	const char *err;
 	int i;
 
+	memset( &import, 0, sizeof( import ) );
+
 	import.Printf						= Com_Printf;
 	import.DPrintf						= Com_DPrintf;
 	import.DPrintf2						= Com_DPrintf2;

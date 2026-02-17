@@ -9,6 +9,7 @@ using namespace godot;
 // Track whether the engine was ever initialised (set by MoHAARunner)
 extern "C" void Com_Shutdown(void);
 extern "C" void Z_MarkShutdown(void);
+extern "C" void Sys_CGameFinalShutdown(void);
 static bool g_engine_was_initialized = false;
 
 void Godot_SetEngineInitialized(bool v) { g_engine_was_initialized = v; }
@@ -32,6 +33,9 @@ void uninitialize_openmohaa_module(ModuleInitializationLevel p_level) {
     // MEM_Alloc after the allocator function pointers are gone.
     if (g_engine_was_initialized) {
         printf("OpenMoHAA: uninitialize — calling Com_Shutdown.\n");
+        // Tell cgame loader to skip dlclose during final shutdown to
+        // avoid unmapping atexit/static-destructor code pages.
+        Sys_CGameFinalShutdown();
         Com_Shutdown();
         /* Mark zone allocator as shut down BEFORE global C++ destructors run.
            This prevents SIGSEGV from dtors like ~con_arrayset trying to

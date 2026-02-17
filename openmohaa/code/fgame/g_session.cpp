@@ -61,7 +61,7 @@ Called on a reconnect
 void G_ReadClientSessionData( gclient_t *client )
 {
 	cvar_t *session;
-    int teamnum;
+    int teamnum = 0;
 
 	if( g_bNewSession ) {
 		return;
