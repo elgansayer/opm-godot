@@ -348,6 +348,10 @@ static bool    godot_has_fatal_error = false;
 static char    godot_error_message[1024] = {0};
 static bool    godot_quit_requested = false;
 
+// Tracks which effective shader name was used for each cached texture entry.
+// Keyed by shader handle.  Cleared alongside shader_textures on map/vid_restart.
+static std::unordered_map<int, std::string> s_shader_texture_loaded_names;
+
 // Called from patched Sys_Error in sys_main.c
 extern "C" void Godot_SysError(const char *error) {
     strncpy(godot_error_message, error, sizeof(godot_error_message) - 1);
@@ -820,6 +824,7 @@ void MoHAARunner::check_world_load() {
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
             tinted_mat_cache.clear();             // Phase 61: Clear tinted material cache
             shader_textures.clear();              // Shader handles are re-registered on next map
+            s_shader_texture_loaded_names.clear();  // Clear name tracking alongside texture cache
             animmap_info.clear();
             animmap_frames.clear();
 #ifdef HAS_MESH_CACHE_MODULE
@@ -866,6 +871,7 @@ void MoHAARunner::check_world_load() {
     // handles in godot_renderer.c, so stale entries from menu/previous map
     // at the same handle numbers would return wrong textures.
     shader_textures.clear();
+    s_shader_texture_loaded_names.clear();
     animmap_info.clear();
     animmap_frames.clear();
     tinted_mat_cache.clear();
@@ -2234,7 +2240,7 @@ void MoHAARunner::update_entities() {
                 }
             }
 #endif
-            // Periodic weapon diagnostic (first 30 frames)
+            // Periodic weapon diagnostic (first 30 frames) — now with mesh AABB
             static int fp_diag_count = 0;
             if (fp_diag_count < 30) {
                 fp_diag_count++;
@@ -2242,6 +2248,22 @@ void MoHAARunner::update_entities() {
                 int dbg_sc = dbg_mesh.is_valid() ? dbg_mesh->get_surface_count() : -1;
                 const char *dbg_mod_name = Godot_Model_GetName(hModel);
                 void *dbg_tiki = Godot_Model_GetTikiPtr(hModel);
+
+                String aabb_str = "no_mesh";
+                if (dbg_mesh.is_valid()) {
+                    AABB aabb = dbg_mesh->get_aabb();
+                    aabb_str = String("AABB=(") +
+                        String::num(aabb.position.x, 2) + "," +
+                        String::num(aabb.position.y, 2) + "," +
+                        String::num(aabb.position.z, 2) + ")+(" +
+                        String::num(aabb.size.x, 2) + "," +
+                        String::num(aabb.size.y, 2) + "," +
+                        String::num(aabb.size.z, 2) + ")";
+                }
+
+                Vector3 gpos = id_to_godot_position(origin[0], origin[1], origin[2]);
+                Transform3D gt = mi->get_global_transform();
+
                 UtilityFunctions::print(
                     String("[WEAPON-DIAG] ent#") + String::num_int64(i) +
                     String(" entNum=") + String::num_int64(entityNumber) +
@@ -2251,8 +2273,14 @@ void MoHAARunner::update_entities() {
                     String(" hasTiki=") + String::num_int64(dbg_tiki ? 1 : 0) +
                     String(" surfaces=") + String::num_int64(dbg_sc) +
                     String(" vis=") + String::num_int64(mi->is_visible() ? 1 : 0) +
-                    String(" pos=(") + String::num(origin[0], 1) + "," +
+                    String(" id_pos=(") + String::num(origin[0], 1) + "," +
                     String::num(origin[1], 1) + "," + String::num(origin[2], 1) + ")" +
+                    String(" godot_pos=(") + String::num(gpos.x, 2) + "," +
+                    String::num(gpos.y, 2) + "," + String::num(gpos.z, 2) + ")" +
+                    String(" gt_pos=(") + String::num(gt.origin.x, 2) + "," +
+                    String::num(gt.origin.y, 2) + "," + String::num(gt.origin.z, 2) + ")" +
+                    String(" ") + aabb_str +
+                    String(" skinned=") + (mi->get_mesh().is_valid() ? String("Y") : String("N")) +
                     String(" scale=") + String::num(scale, 3) +
                     String(" name=") + String(dbg_mod_name ? dbg_mod_name : "null"));
             }
@@ -2568,42 +2596,16 @@ void MoHAARunner::update_entities() {
 
     active_entity_count = ent_count;
 
-    // ── Phase 35: Entity parenting — apply parent transforms ──
-    // After all entities are positioned, composite children's transforms
-    // with their parent entity's world transform.
-    for (int i = 0; i < ent_count; i++) {
-        int parentIdx = Godot_Renderer_GetEntityParent(i);
-        if (parentIdx < 0 || parentIdx >= ent_count) continue;
-        // parentIdx is by entity number — find the matching entity in the list
-        // by searching for the entity whose entityNumber matches parentIdx
-        MeshInstance3D *child = entity_meshes[i];
-        if (!child->is_visible()) continue;
-
-        // The parentIdx from the renderer is the entity number, not the
-        // array index. Search for matching entity in the scene list.
-        MeshInstance3D *parent = nullptr;
-        for (int j = 0; j < ent_count; j++) {
-            if (j == i) continue;
-            float pOrig[3], pAxis[9], pScale;
-            int pModel, pEntNum, pRfx;
-            unsigned char pRgba[4];
-            Godot_Renderer_GetEntity(j, pOrig, pAxis, &pScale,
-                                     &pModel, &pEntNum, pRgba, &pRfx);
-            if (pEntNum == parentIdx) {
-                parent = entity_meshes[j];
-                break;
-            }
-        }
-
-        if (parent && parent->is_visible()) {
-            // Apply parent's world transform to child
-            Transform3D parent_xform = parent->get_global_transform();
-            Transform3D child_xform  = child->get_global_transform();
-            // Child's position is already in world space — make it relative
-            // to parent by compositing the transforms
-            child->set_global_transform(parent_xform * child_xform);
-        }
-    }
+    // ── Phase 35: Entity parenting — DISABLED ──
+    // CG_AttachEntity (in cgame) already computes world-space positions
+    // for child entities before submitting them via R_AddRefEntityToScene.
+    // The parentEntity field is metadata for lighting origin inheritance,
+    // NOT a rendering hierarchy directive.  Applying the parent transform
+    // here would double-offset child entities (weapons, attachments),
+    // causing them to appear at wildly wrong positions.
+    // See: cg_modelanim.c CG_AttachEntity → VectorMA for origin,
+    //      then cgi.R_AddRefEntityToScene(&model, parent) submits
+    //      the entity at its final world position.
 }
 
 void MoHAARunner::update_dlights() {
@@ -3029,20 +3031,83 @@ void MoHAARunner::update_terrain_marks() {
         tmesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
         mi->set_mesh(tmesh);
 
-        // Material
-        Ref<StandardMaterial3D> mat;
-        mat.instantiate();
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-        mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+        // Determine shader blend mode to pick the correct material type.
+        // markShadow uses GL_ZERO GL_ONE_MINUS_SRC_COLOR (SHADER_MULTIPLICATIVE_INV)
+        // which requires a custom spatial shader — StandardMaterial3D cannot
+        // express dst*(1-src).
+        const char *mark_shader_name = nullptr;
+        const GodotShaderProps *mark_sp = nullptr;
         if (hShader > 0) {
-            Ref<ImageTexture> tex = get_shader_texture(hShader);
-            if (tex.is_valid()) {
-                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            mark_shader_name = Godot_Renderer_GetShaderName(hShader);
+            if (mark_shader_name && mark_shader_name[0]) {
+                mark_sp = Godot_ShaderProps_Find(mark_shader_name);
             }
         }
-        mi->set_surface_override_material(0, mat);
+
+        if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE_INV) {
+            // Inverse-multiplicative blend: result = dst * (1 - texture*vertex_color)
+            // Used by markShadow and similar darkening decal shaders.
+            static Ref<Shader> inv_mul_3d_shader;
+            if (inv_mul_3d_shader.is_null()) {
+                inv_mul_3d_shader.instantiate();
+                inv_mul_3d_shader->set_code(
+                    "shader_type spatial;\n"
+                    "render_mode blend_mul, unshaded, cull_disabled, "
+                    "depth_draw_never, depth_test_disabled;\n"
+                    "uniform sampler2D albedo_texture : source_color, "
+                    "filter_linear;\n"
+                    "void fragment() {\n"
+                    "    vec4 tex = texture(albedo_texture, UV);\n"
+                    "    ALBEDO = vec3(1.0) - tex.rgb * COLOR.rgb;\n"
+                    "    ALPHA = 1.0;\n"
+                    "}\n"
+                );
+            }
+            Ref<ShaderMaterial> smat;
+            smat.instantiate();
+            smat->set_shader(inv_mul_3d_shader);
+            if (hShader > 0) {
+                Ref<ImageTexture> tex = get_shader_texture(hShader);
+                if (tex.is_valid()) {
+                    smat->set_shader_parameter("albedo_texture", tex);
+                }
+            }
+            mi->set_surface_override_material(0, smat);
+        } else if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE) {
+            // Standard multiplicative blend: result = dst * src (filter)
+            Ref<StandardMaterial3D> mat;
+            mat.instantiate();
+            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+            if (hShader > 0) {
+                Ref<ImageTexture> tex = get_shader_texture(hShader);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+            }
+            mi->set_surface_override_material(0, mat);
+        } else {
+            // Default: alpha blend with shader props applied
+            Ref<StandardMaterial3D> mat;
+            mat.instantiate();
+            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+            if (hShader > 0) {
+                Ref<ImageTexture> tex = get_shader_texture(hShader);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                }
+            }
+            if (mark_shader_name && mark_shader_name[0]) {
+                apply_shader_props_to_material(mat, mark_shader_name);
+            }
+            mi->set_surface_override_material(0, mat);
+        }
         mi->set_global_transform(Transform3D());
         mi->set_visible(true);
     }
@@ -3095,8 +3160,10 @@ void MoHAARunner::update_shadow_blobs() {
         shadow_blob_material.instantiate();
         shadow_blob_material->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
         shadow_blob_material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        shadow_blob_material->set_blend_mode(BaseMaterial3D::BLEND_MODE_MIX);
         shadow_blob_material->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
         shadow_blob_material->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+        shadow_blob_material->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
         // Render above ground to avoid z-fighting
         shadow_blob_material->set_render_priority(1);
     }
@@ -3534,9 +3601,17 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     }
 
     // Non-animated shaders use static texture caching.
+    // Track which effective name was used to load each cached texture so that
+    // shader remapping (RemapShader) correctly invalidates stale entries.
     auto it = shader_textures.find(shader_handle);
     if (it != shader_textures.end()) {
-        return it->second;
+        auto it_name = s_shader_texture_loaded_names.find(shader_handle);
+        if (it_name != s_shader_texture_loaded_names.end() && it_name->second == name) {
+            return it->second;  // Cache valid — same effective name
+        }
+        // Name changed (shader remap active or handle reused) — invalidate
+        shader_textures.erase(it);
+        s_shader_texture_loaded_names.erase(shader_handle);
     }
 
     // ── Determine the actual texture image path(s) to try ──
@@ -3545,6 +3620,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // stage's "map" directive gives the real texture path.  If no definition
     // is found, try using the shader name itself as a texture file path
     // (the fallback R_FindShader uses for implicit shaders).
+
     const char *texture_paths[4] = { NULL, NULL, NULL, NULL };
     int num_texture_paths = 0;
 
@@ -3631,6 +3707,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
                 *white_tex = ImageTexture::create_from_image(wimg);
             }
             shader_textures[shader_handle] = *white_tex;
+            s_shader_texture_loaded_names[shader_handle] = name ? name : "";
             return *white_tex;
         }
     }
@@ -3639,6 +3716,36 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     Ref<ImageTexture> tex;
     for (int tp = 0; tp < num_texture_paths && tex.is_null(); tp++) {
         tex = load_texture_from_qpath(texture_paths[tp]);
+    }
+
+    // ── Fallback: engine-internal white texture ──
+    // The shader "white" references textures/sprites/white.tga which may
+    // not exist in the pk3s.  In the real renderer, R_FindShader("white")
+    // falls back to tr.whiteImage (a programmatic 8x8 white texture).
+    // Replicate that behaviour: if the texture file can't be found and
+    // the shader name is "white" or any candidate path references the
+    // sprites/white texture, return a 1x1 white pixel.
+    if (tex.is_null() && name) {
+        bool is_white_shader = (strcmp(name, "white") == 0 ||
+                                strcmp(name, "*white") == 0);
+        if (!is_white_shader) {
+            for (int i = 0; i < num_texture_paths && !is_white_shader; i++) {
+                if (texture_paths[i] && strstr(texture_paths[i], "sprites/white"))
+                    is_white_shader = true;
+            }
+        }
+        if (is_white_shader) {
+            static Ref<ImageTexture> *white_fallback = new Ref<ImageTexture>();
+            if (white_fallback->is_null()) {
+                PackedByteArray wdata;
+                wdata.resize(4);
+                wdata.ptrw()[0] = 255; wdata.ptrw()[1] = 255;
+                wdata.ptrw()[2] = 255; wdata.ptrw()[3] = 255;
+                Ref<Image> wimg = Image::create_from_data(1, 1, false, Image::FORMAT_RGBA8, wdata);
+                *white_fallback = ImageTexture::create_from_image(wimg);
+            }
+            tex = *white_fallback;
+        }
     }
 
     if (tex.is_null()) {
@@ -3658,6 +3765,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
 
     if (!tex.is_null()) {
         shader_textures[shader_handle] = tex;
+        s_shader_texture_loaded_names[shader_handle] = name ? name : "";
     }
     return tex;
 }
@@ -3853,6 +3961,7 @@ void MoHAARunner::update_2d_overlay() {
     bool scissor_enabled = false;
     bool saw_textured_draw = false;
     static bool logged_late_clear_skip = false;
+
     Rect2 scissor_rect;
 
     /* Gather HUD model draw orders so we can inject viewport textures
@@ -5330,6 +5439,7 @@ void MoHAARunner::_process(double delta) {
             /* Renderer shader/model tables are rebuilt on vid_restart.
                Drop handle-keyed caches so 2D/UI textures are re-resolved. */
             shader_textures.clear();
+            s_shader_texture_loaded_names.clear();
             animmap_info.clear();
             animmap_frames.clear();
 
