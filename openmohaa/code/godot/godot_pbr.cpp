@@ -1,0 +1,442 @@
+/* godot_pbr.cpp — PBR texture discovery and material enhancement
+ *
+ * Scans a configurable PBR asset directory for HD texture variants
+ * (albedo, normal, roughness) that match engine texture paths.
+ * Applies them to StandardMaterial3D instances to enable physically
+ * based rendering with normal mapping and roughness.
+ *
+ * The PBR asset directory defaults to:
+ *   {fs_homedatapath}/{gamedir}/zgodot_pbr_project/mohaa-hd-assets/
+ *
+ * Texture naming convention (from the convert.sh upscaler pipeline):
+ *   {basename}_albedo.png     — AI-upscaled diffuse texture
+ *   {basename}_normal-0.png   — Generated normal map (variant 0)
+ *   {basename}_roughness.png  — Generated roughness map
+ *
+ * The base name is derived from the original texture filename without
+ * extension.  Directory structure mirrors the engine VFS layout:
+ *   textures/french/dyer.tga  →  textures/french/dyer_albedo.png
+ */
+
+#include "godot_pbr.h"
+
+#include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+
+#include <cstring>
+#include <string>
+#include <unordered_map>
+
+using namespace godot;
+
+/* ── Engine accessor declarations (cannot include engine headers) ── */
+extern "C" {
+    const char *Godot_VFS_GetBasepath(void);
+    const char *Godot_VFS_GetHomedatapath(void);
+    const char *Godot_VFS_GetHomepath(void);
+    const char *Godot_VFS_GetGamedir(void);
+    int Godot_VFS_FileExists(const char *qpath);
+}
+
+/* ── Internal state ── */
+
+/* PBR enabled flag — controlled by runtime toggle */
+static bool s_pbr_enabled = true;
+
+/* Root directory for PBR assets on the real filesystem */
+static std::string s_pbr_root;
+
+/* Map from normalised engine texture base path (no extension, lowercase)
+ * to the filesystem paths of the PBR texture variants. */
+struct PBRFilePaths {
+    std::string albedo_path;
+    std::string normal_path;
+    std::string roughness_path;
+    std::string emission_path;
+};
+
+static std::unordered_map<std::string, PBRFilePaths> s_pbr_paths;
+
+/* Cached loaded PBR textures — lazily populated on first lookup */
+static std::unordered_map<std::string, PBRTextureSet> s_pbr_cache;
+
+/* Total discovered PBR sets */
+static int s_pbr_count = 0;
+
+/* Application counters for diagnostics */
+static int s_pbr_applied = 0;
+static int s_pbr_missed = 0;
+static bool s_pbr_summary_printed = false;
+
+/* ── Helpers ── */
+
+/* Normalise a path: lowercase, strip extension, forward slashes */
+static std::string normalise_key(const char *path) {
+    if (!path || !path[0]) return "";
+
+    std::string s(path);
+
+    /* Forward slashes */
+    for (auto &c : s) {
+        if (c == '\\') c = '/';
+    }
+
+    /* Strip file extension */
+    size_t dot = s.rfind('.');
+    size_t slash = s.rfind('/');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        s = s.substr(0, dot);
+    }
+
+    /* Lowercase */
+    for (auto &c : s) {
+        if (c >= 'A' && c <= 'Z') c += 32;
+    }
+
+    return s;
+}
+
+/* Load a PNG image from an absolute filesystem path.
+ * Returns a valid ImageTexture or null ref on failure. */
+static Ref<ImageTexture> load_png_from_disk(const String &abs_path) {
+    Ref<FileAccess> f = FileAccess::open(abs_path, FileAccess::READ);
+    if (!f.is_valid()) return Ref<ImageTexture>();
+
+    int64_t len = f->get_length();
+    if (len <= 0) return Ref<ImageTexture>();
+
+    PackedByteArray buf = f->get_buffer(len);
+    f->close();
+
+    /* Validate it's actually a PNG (not a Git LFS pointer) */
+    if (buf.size() < 8) return Ref<ImageTexture>();
+    const uint8_t *data = buf.ptr();
+    /* PNG magic: 89 50 4E 47 0D 0A 1A 0A */
+    if (data[0] != 0x89 || data[1] != 0x50 || data[2] != 0x4E || data[3] != 0x47) {
+        /* Not a real PNG — likely a Git LFS pointer file */
+        return Ref<ImageTexture>();
+    }
+
+    Ref<Image> img;
+    img.instantiate();
+    Error err = img->load_png_from_buffer(buf);
+    if (err != OK || img->is_empty()) return Ref<ImageTexture>();
+
+    img->generate_mipmaps();
+    return ImageTexture::create_from_image(img);
+}
+
+/* Recursively scan a directory for PBR texture sets */
+static void scan_directory(const String &dir_path, const std::string &rel_prefix) {
+    Ref<DirAccess> dir = DirAccess::open(dir_path);
+    if (!dir.is_valid()) return;
+
+    dir->list_dir_begin();
+    String entry = dir->get_next();
+    while (!entry.is_empty()) {
+        if (dir->current_is_dir()) {
+            if (entry != "." && entry != "..") {
+                String sub = dir_path + String("/") + entry;
+                std::string sub_rel = rel_prefix.empty()
+                    ? std::string(entry.utf8().get_data())
+                    : rel_prefix + "/" + std::string(entry.utf8().get_data());
+                scan_directory(sub, sub_rel);
+            }
+        } else {
+            /* Check for _albedo.png files — these define a PBR set */
+            std::string fname(entry.utf8().get_data());
+            const char *suffix = "_albedo.png";
+            size_t slen = strlen(suffix);
+            if (fname.size() > slen &&
+                fname.compare(fname.size() - slen, slen, suffix) == 0) {
+
+                /* Extract base name (without _albedo.png) */
+                std::string base = fname.substr(0, fname.size() - slen);
+                std::string full_rel = rel_prefix.empty()
+                    ? base : rel_prefix + "/" + base;
+
+                /* Normalise key to match engine texture paths */
+                std::string key = normalise_key(full_rel.c_str());
+
+                std::string dir_str(dir_path.utf8().get_data());
+
+                PBRFilePaths paths;
+                paths.albedo_path = dir_str + "/" + base + "_albedo.png";
+                paths.normal_path = dir_str + "/" + base + "_normal-0.png";
+                paths.roughness_path = dir_str + "/" + base + "_roughness.png";
+                paths.emission_path = dir_str + "/" + base + "_emission.png";
+
+                s_pbr_paths[key] = paths;
+                s_pbr_count++;
+            }
+        }
+        entry = dir->get_next();
+    }
+    dir->list_dir_end();
+}
+
+/* ── Public API ── */
+
+void Godot_PBR_Init() {
+    s_pbr_paths.clear();
+    s_pbr_cache.clear();
+    s_pbr_count = 0;
+    s_pbr_applied = 0;
+    s_pbr_missed = 0;
+    s_pbr_summary_printed = false;
+
+    /* Determine PBR asset root directory.
+     * Search multiple engine paths in priority order (same as cgame loading):
+     *   1. fs_homedatapath/{gamedir}/zgodot_pbr_project/mohaa-hd-assets/
+     *   2. fs_basepath/{gamedir}/zgodot_pbr_project/mohaa-hd-assets/
+     *   3. fs_homepath/{gamedir}/zgodot_pbr_project/mohaa-hd-assets/
+     * The homedatapath is typically ~/.local/share/openmohaa
+     * The gamedir is typically "main" */
+    const char *gdir = Godot_VFS_GetGamedir();
+    if (!gdir || !gdir[0]) {
+        UtilityFunctions::print("[PBR] Cannot determine game directory — PBR disabled.");
+        s_pbr_enabled = false;
+        return;
+    }
+
+    const char *search_paths[] = {
+        Godot_VFS_GetHomedatapath(),
+        Godot_VFS_GetBasepath(),
+        Godot_VFS_GetHomepath(),
+    };
+    const char *search_names[] = {
+        "fs_homedatapath",
+        "fs_basepath",
+        "fs_homepath",
+    };
+
+    String root_str;
+    bool found = false;
+    for (int i = 0; i < 3; i++) {
+        if (!search_paths[i] || !search_paths[i][0]) continue;
+        std::string candidate = std::string(search_paths[i]) + "/" +
+                                std::string(gdir) +
+                                "/zgodot_pbr_project/mohaa-hd-assets";
+        String candidate_str = String(candidate.c_str());
+        Ref<DirAccess> test_dir = DirAccess::open(candidate_str);
+        if (test_dir.is_valid()) {
+            s_pbr_root = candidate;
+            root_str = candidate_str;
+            found = true;
+            UtilityFunctions::print(String("[PBR] Found PBR assets via ") +
+                                   String(search_names[i]) + String(": ") +
+                                   candidate_str);
+            break;
+        }
+    }
+
+    if (!found) {
+        /* Show the first valid path as the suggested location */
+        std::string suggested;
+        for (int i = 0; i < 3; i++) {
+            if (search_paths[i] && search_paths[i][0]) {
+                suggested = std::string(search_paths[i]) + "/" +
+                            std::string(gdir) +
+                            "/zgodot_pbr_project/mohaa-hd-assets";
+                break;
+            }
+        }
+        UtilityFunctions::print(String("[PBR] PBR asset directory not found."));
+        UtilityFunctions::print(String("[PBR] Place HD assets in: ") +
+                               String(suggested.c_str()));
+        s_pbr_enabled = false;
+        return;
+    }
+
+    /* Scan for PBR texture sets.
+     * The directory structure mirrors the engine's VFS layout:
+     *   textures/ → world textures
+     *   models/   → model textures
+     *   gfx/      → UI textures
+     *   env/      → environment/skybox */
+    scan_directory(root_str, "");
+
+    UtilityFunctions::print(String("[PBR] Discovered ") +
+                            String::num_int64(s_pbr_count) +
+                            String(" PBR texture sets in ") + root_str);
+
+    if (s_pbr_count > 0) {
+        s_pbr_enabled = true;
+    } else {
+        UtilityFunctions::print("[PBR] No PBR textures found — PBR rendering disabled.");
+        s_pbr_enabled = false;
+    }
+}
+
+void Godot_PBR_Shutdown() {
+    s_pbr_cache.clear();
+    s_pbr_paths.clear();
+    s_pbr_count = 0;
+}
+
+bool Godot_PBR_IsEnabled() {
+    return s_pbr_enabled && s_pbr_count > 0;
+}
+
+const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
+    if (!s_pbr_enabled || !engine_texture_path || !engine_texture_path[0]) {
+        return nullptr;
+    }
+
+    std::string key = normalise_key(engine_texture_path);
+    if (key.empty()) return nullptr;
+
+    /* Check loaded cache first */
+    auto cache_it = s_pbr_cache.find(key);
+    if (cache_it != s_pbr_cache.end()) {
+        return cache_it->second.loaded ? &cache_it->second : nullptr;
+    }
+
+    /* Check if we have paths for this texture */
+    auto path_it = s_pbr_paths.find(key);
+    if (path_it == s_pbr_paths.end()) {
+        /* Cache negative result */
+        PBRTextureSet empty;
+        empty.loaded = false;
+        s_pbr_cache[key] = empty;
+        return nullptr;
+    }
+
+    /* Load the PBR textures from disk */
+    const PBRFilePaths &paths = path_it->second;
+    PBRTextureSet set;
+    set.loaded = false;
+
+    set.is_metallic = false;
+    set.is_emissive = false;
+
+    set.albedo = load_png_from_disk(String(paths.albedo_path.c_str()));
+    if (set.albedo.is_valid()) {
+        set.loaded = true;
+    }
+
+    set.normal = load_png_from_disk(String(paths.normal_path.c_str()));
+    set.roughness = load_png_from_disk(String(paths.roughness_path.c_str()));
+    set.emission = load_png_from_disk(String(paths.emission_path.c_str()));
+
+    /* ── Material heuristics from texture path keywords ── */
+
+    /* Metal detection: textures whose names suggest metallic surfaces. */
+    static const char *metal_keywords[] = {
+        "metal", "steel", "iron", "brass", "copper", "chrome",
+        "alumin", "grill", "pipe", "vent", "railing", "hatch",
+        "rivet", "girder", "tank", "hull", "barrel", "gun",
+        nullptr
+    };
+    for (const char **kw = metal_keywords; *kw; kw++) {
+        if (key.find(*kw) != std::string::npos) {
+            set.is_metallic = true;
+            break;
+        }
+    }
+
+    /* Emission detection: textures that represent light sources. */
+    static const char *emissive_keywords[] = {
+        "light", "lamp", "bulb", "glow", "neon", "fire",
+        "flame", "lava", "screen", "monitor", "electric",
+        "spark", "corona", "flare", "lantern", "candle",
+        nullptr
+    };
+    for (const char **kw = emissive_keywords; *kw; kw++) {
+        if (key.find(*kw) != std::string::npos) {
+            set.is_emissive = true;
+            break;
+        }
+    }
+
+    s_pbr_cache[key] = set;
+
+    if (set.loaded) {
+        return &s_pbr_cache[key];
+    }
+
+    return nullptr;
+}
+
+bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
+                               const char *engine_texture_path)
+{
+    if (!mat.is_valid() || !Godot_PBR_IsEnabled()) return false;
+
+    const PBRTextureSet *pbr = Godot_PBR_Find(engine_texture_path);
+    if (!pbr || !pbr->loaded) {
+        s_pbr_missed++;
+        return false;
+    }
+
+    s_pbr_applied++;
+
+    /* Print a summary after the first batch of applications */
+    if (!s_pbr_summary_printed && (s_pbr_applied + s_pbr_missed) >= 10) {
+        UtilityFunctions::print(String("[PBR] Application summary: ") +
+                               String::num_int64(s_pbr_applied) + String(" applied, ") +
+                               String::num_int64(s_pbr_missed) + String(" missed, of ") +
+                               String::num_int64(s_pbr_count) + String(" available sets."));
+        s_pbr_summary_printed = true;
+    }
+
+    /* Apply HD albedo (replaces the original low-res diffuse) */
+    if (pbr->albedo.is_valid()) {
+        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, pbr->albedo);
+    }
+
+    /* Apply normal map */
+    if (pbr->normal.is_valid()) {
+        mat->set_feature(BaseMaterial3D::FEATURE_NORMAL_MAPPING, true);
+        mat->set_texture(BaseMaterial3D::TEXTURE_NORMAL, pbr->normal);
+        mat->set_normal_scale(1.0f);
+    }
+
+    /* Apply roughness map */
+    if (pbr->roughness.is_valid()) {
+        mat->set_texture(BaseMaterial3D::TEXTURE_ROUGHNESS, pbr->roughness);
+        /* The roughness texture channel — greyscale stored in R */
+        mat->set_roughness_texture_channel(BaseMaterial3D::TEXTURE_CHANNEL_GRAYSCALE);
+    } else {
+        /* No roughness texture — use a reasonable default */
+        mat->set_roughness(0.8f);
+    }
+
+    /* ── Metallic / specular heuristics ── */
+    if (pbr->is_metallic) {
+        mat->set_metallic(0.7f);
+        mat->set_specular(0.8f);
+        if (!pbr->roughness.is_valid()) {
+            mat->set_roughness(0.35f);  /* Metals are smoother */
+        }
+    } else {
+        mat->set_metallic(0.0f);
+        mat->set_specular(0.5f);
+    }
+
+    /* ── Emission (self-illumination for lights, screens, fire) ── */
+    if (pbr->is_emissive) {
+        mat->set_feature(BaseMaterial3D::FEATURE_EMISSION, true);
+        if (pbr->emission.is_valid()) {
+            mat->set_texture(BaseMaterial3D::TEXTURE_EMISSION, pbr->emission);
+        } else {
+            /* Use albedo as emission source — the whole texture glows */
+            mat->set_texture(BaseMaterial3D::TEXTURE_EMISSION, pbr->albedo);
+        }
+        mat->set_emission(Color(1.0, 0.95, 0.85));  /* Warm white */
+        mat->set_emission_energy_multiplier(2.0);
+    }
+
+    /* Switch from UNSHADED to per-pixel lit rendering.
+     * This is the key change that enables PBR — surfaces will now
+     * respond to scene lights (directional, omni, spot). */
+    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+
+    return true;
+}
+
+int Godot_PBR_GetCount() {
+    return s_pbr_count;
+}

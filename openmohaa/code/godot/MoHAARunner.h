@@ -145,6 +145,11 @@
 #define HAS_DRAW_DISTANCE_MODULE 1
 #endif
 
+#if __has_include("godot_pbr.h")
+#include "godot_pbr.h"
+#define HAS_PBR_MODULE 1
+#endif
+
 using namespace godot;
 
 // ── Game flow state machine (Phase 261) ──

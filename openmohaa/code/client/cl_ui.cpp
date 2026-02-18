@@ -1865,11 +1865,13 @@ void UI_Update(void)
 #ifdef GODOT_GDEXTENSION
     /* Under Godot the 2D overlay captures every DrawStretchPic /
      * DrawBox call.  Use the HUD-only fast path when the game is
-     * active AND no menus or console are open.  If a menu is on the
-     * stack (player pressed ESC, options, etc.) or the console is
-     * visible, we fall through to the full UI_Update rendering so
-     * menus/console paint correctly. */
-    if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu() && !UI_ConsoleIsVisible()) {
+     * active AND no menus, console, or scoreboard are open.  If a
+     * menu is on the stack (player pressed ESC, options, etc.), the
+     * console is visible, or the scoreboard is showing, we fall
+     * through to the full UI_Update rendering so those widgets paint
+     * correctly. */
+    if (clc.state == CA_ACTIVE && !menuManager.CurrentMenu() && !UI_ConsoleIsVisible()
+        && !(scoreboardlist && scoreboardlist->IsVisible())) {
         /* Safety net: clear KEYCATCH_UI when in gameplay with no menus
          * and no console.  ActivateControl() may not fire
          * View3D::OnActivate if view3d was already active, leaving

@@ -1446,6 +1446,13 @@ void Godot_ShaderProps_Load() {
             for (int s = 0; s < props.stage_count; s++) {
                 if (!props.stages[s].active) continue;
                 if (props.stages[s].isLightmap) continue;
+                /* Skip $whiteimage stages — these are background fill
+                 * stages (e.g. scoreboard map preview shaders) that get
+                 * overwritten by a subsequent opaque texture stage.
+                 * Using their blendFunc for transparency classification
+                 * would incorrectly mark the shader as alpha_inv when
+                 * the final result is opaque. */
+                if (!Q_stricmp(props.stages[s].map, "$whiteimage")) continue;
                 if (!props.stages[s].hasBlendFunc) {
                     /* First non-lightmap stage with no blendFunc: if it's
                      * not an environment stage, the shader is opaque

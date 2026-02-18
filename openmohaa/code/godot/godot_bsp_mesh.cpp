@@ -20,6 +20,11 @@
 #include "godot_shader_material.h"
 #include "godot_terrain_normal.h"
 
+#if __has_include("godot_pbr.h")
+#include "godot_pbr.h"
+#define HAS_PBR_MODULE 1
+#endif
+
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
@@ -1033,6 +1038,14 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                                  s_lightmaps[batch.lightmap_num]);
                 mat->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
             }
+
+#ifdef HAS_PBR_MODULE
+            // PBR enhancement: if HD PBR textures exist for this surface's shader,
+            // apply normal map, roughness, and switch to lit rendering.
+            if (Godot_PBR_IsEnabled() && batch.shader_name) {
+                Godot_PBR_ApplyToMaterial(mat, batch.shader_name);
+            }
+#endif
 
             surface_mat = mat;
         }

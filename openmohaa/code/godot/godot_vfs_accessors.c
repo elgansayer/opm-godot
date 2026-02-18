@@ -113,6 +113,23 @@ const char *Godot_VFS_GetBasepath(void) {
 }
 
 /*
+ * Godot_VFS_GetHomedatapath — return the current fs_homedatapath value.
+ * This is typically ~/.local/share/openmohaa on Linux.
+ */
+const char *Godot_VFS_GetHomedatapath(void) {
+    cvar_t *hp = Cvar_Get("fs_homedatapath", "", 0);
+    return hp ? hp->string : "";
+}
+
+/*
+ * Godot_VFS_GetHomepath — return the current fs_homepath value.
+ */
+const char *Godot_VFS_GetHomepath(void) {
+    cvar_t *hp = Cvar_Get("fs_homepath", "", 0);
+    return hp ? hp->string : "";
+}
+
+/*
  * Godot_VFS_GetGamedir — return the current game directory name (e.g. "main").
  */
 const char *Godot_VFS_GetGamedir(void) {
