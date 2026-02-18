@@ -953,12 +953,14 @@ static Ref<ArrayMesh> batches_to_array_mesh(
              * shader definition explicitly says "cull none". */
             mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
-            /* BSP world surfaces are lit exclusively by their lightmap
-             * (or vertex colours for nolightmap surfaces).  The real
-             * renderer never applies dynamic scene lights to BSP geometry.
-             * Unshaded prevents Godot's DirectionalLight / ambient from
-             * adding extra illumination (which caused double-lighting). */
-            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            /* BSP world surfaces use their baked lightmap (detail MUL)
+             * as the primary lighting source.  PER_PIXEL shading allows
+             * the directional light to cast dynamic shadows onto the world
+             * without double-lighting, provided ambient ≈ 1.0 (pass-through)
+             * and the sun energy is kept low (shadow-contrast only). */
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+            mat->set_specular(0.0f);  /* BSP surfaces don't need specular highlights */
+            mat->set_roughness(1.0f); /* Fully rough — no reflections on base surfaces */
 
             bool has_texture = false;
             if (batch.shader_name) {
@@ -1023,6 +1025,10 @@ static Ref<ArrayMesh> batches_to_array_mesh(
 
             if (batch.nolightmap) {
                 mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                /* Nolightmap surfaces are fullbright (sky, lava, special FX).
+                 * Revert to UNSHADED so they don't receive dynamic shadows
+                 * or respond to the directional light. */
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
             }
 
             if (!s_debug_white_lightmaps &&

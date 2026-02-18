@@ -726,13 +726,16 @@ void MoHAARunner::setup_3d_scene() {
     camera->set_current(true);
     game_world->add_child(camera);
 
-    // Basic directional light so geometry is visible once we have meshes
+    // Directional light — low energy so it only adds shadow contrast
+    // on top of the baked lightmap.  The lightmap × ambient provides
+    // the primary illumination; the sun's role is dynamic shadows.
     sun_light = memnew(DirectionalLight3D);
     sun_light->set_name("SunLight");
-    // Aim roughly downward at 45° — a temporary placeholder
     sun_light->set_rotation(Vector3(Math::deg_to_rad(-45.0), Math::deg_to_rad(30.0), 0.0));
+    sun_light->set_shadow(true);
     sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
-    sun_light->set_param(Light3D::PARAM_ENERGY, 1.0);
+    sun_light->set_param(Light3D::PARAM_ENERGY, 0.3);
+    sun_light->set_color(Color(1.0, 0.95, 0.9));  // warm sunlight tint
     game_world->add_child(sun_light);
 
     // WorldEnvironment with basic ambient light
@@ -743,8 +746,11 @@ void MoHAARunner::setup_3d_scene() {
     env->set_background(Environment::BG_COLOR);
     env->set_bg_color(Color(0.4, 0.5, 0.6));   // light grey-blue sky
     env->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
-    env->set_ambient_light_color(Color(0.3, 0.3, 0.3));
-    env->set_ambient_light_energy(0.5);
+    /* Ambient = white at energy 1.0 so the lightmap detail-MUL texture
+     * passes through faithfully as the primary lighting.  The directional
+     * light only adds a small fill + shadow contrast on top. */
+    env->set_ambient_light_color(Color(1.0, 1.0, 1.0));
+    env->set_ambient_light_energy(1.0);
 
     // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
     // MOHAA uses 2x overbright on lightmaps. Linear tonemap with 1.0
@@ -1044,14 +1050,15 @@ void MoHAARunner::check_world_load() {
                 Ref<Environment> env = world_env->get_environment();
 
                 // ── Tonemapping ──
-                // ACES filmic gives cinematic HDR range and colour response
+                // ACES filmic with neutral exposure — the baked lightmaps
+                // already contain correct lighting levels so we don't boost.
                 env->set_tonemapper(Environment::TONE_MAPPER_ACES);
-                env->set_tonemap_exposure(1.4);
-                env->set_tonemap_white(6.0);
+                env->set_tonemap_exposure(1.0);
+                env->set_tonemap_white(4.0);
 
-                // ── Ambient light ──
-                env->set_ambient_light_energy(0.8);
-                env->set_ambient_light_color(Color(0.35, 0.35, 0.40));
+                // ── Ambient light ── (lightmap pass-through, set in setup)
+                // Keep ambient at 1.0 white — the lightmap detail-MUL texture
+                // IS the lighting.  Don't override to a lower value here.
 
                 // ── SSAO (Screen-Space Ambient Occlusion) ──
                 env->set_ssao_enabled(true);
@@ -1111,10 +1118,10 @@ void MoHAARunner::check_world_load() {
                 env->set_fog_sky_affect(0.3);
 
                 // ── Colour grading ──
-                // Slight warmth and contrast boost for WW2 cinematic feel
+                // Subtle: contrast for depth, slight desaturation for WW2 feel
                 env->set_adjustment_enabled(true);
-                env->set_adjustment_brightness(1.05);
-                env->set_adjustment_contrast(1.1);
+                env->set_adjustment_brightness(1.0);
+                env->set_adjustment_contrast(1.05);
                 env->set_adjustment_saturation(0.9);
 
                 UtilityFunctions::print("[PBR] Next-gen environment: ACES, SSR, bloom, volumetric fog, SSAO, colour grading.");
@@ -1122,8 +1129,8 @@ void MoHAARunner::check_world_load() {
 
             // ── Sun / directional light quality ──
             if (sun_light) {
-                sun_light->set_param(Light3D::PARAM_ENERGY, 1.6);
-                sun_light->set_shadow(true);
+                sun_light->set_param(Light3D::PARAM_ENERGY, 0.3);
+                // Shadow already enabled in setup; reinforce cascade mode
                 sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
                 // Soft shadow penumbra via angular size
                 sun_light->set_param(Light3D::PARAM_SIZE, 0.5);
@@ -1474,10 +1481,13 @@ void MoHAARunner::load_static_models() {
             // only if the shader says "cull none".
             mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
-            /* Static models use lightgrid (CGEN_LIGHTING_GRID) in the
-             * real renderer, not dynamic lights.  Set UNSHADED to prevent
-             * Godot's sun + ambient from double-lighting them. */
-            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+            /* Static models: PER_PIXEL so they cast and receive dynamic
+             * shadows from the directional light.  The sun's low energy
+             * prevents double-lighting while ambient=1.0 preserves the
+             * original brightness. */
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+            mat->set_specular(0.2f);
+            mat->set_roughness(0.9f);
 
             const String &shader_name = cached->surfaces[s].shader_name;
             bool found_tex = false;
@@ -2261,7 +2271,10 @@ void MoHAARunner::update_entities() {
                     Ref<StandardMaterial3D> mat;
                     mat.instantiate();
                     mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-                    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                    /* PER_PIXEL so skeletal entities cast + receive shadows */
+                    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+                    mat->set_specular(0.2f);
+                    mat->set_roughness(0.85f);
 
                     const String &shader_name = surf_shader_names[s];
                     bool found_tex = false;

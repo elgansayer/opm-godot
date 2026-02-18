@@ -429,10 +429,9 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
         mat->set_emission_energy_multiplier(2.0);
     }
 
-    /* Switch from UNSHADED to per-pixel lit rendering.
-     * This is the key change that enables PBR — surfaces will now
-     * respond to scene lights (directional, omni, spot). */
-    mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
+    /* Shading mode is already PER_PIXEL from the BSP/entity material
+     * creation — no need to change it here.  PBR enhancements (normal
+     * maps, roughness, metallic) work on top of the lit material. */
 
     return true;
 }
