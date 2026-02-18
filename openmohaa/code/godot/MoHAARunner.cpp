@@ -4451,16 +4451,14 @@ void MoHAARunner::update_2d_overlay() {
                 /* Choose blend mode based on shader transparency.
                  * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src) — e.g. "shadow"
                  * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
-                 * - SHADER_OPAQUE: no blendFunc — force alpha=1 so texture alpha
-                 *   doesn't cause background bleed-through (matches GL behaviour
-                 *   where alpha blending is disabled for opaque shaders).
+                 * - SHADER_ADDITIVE: blendFunc add (src+dst) — e.g. glow effects
                  *
-                 * Exception: in 2D mode, RB_SetGL2D() sets the default GL state
-                 * to GL_SRC_ALPHA/GL_ONE_MINUS_SRC_ALPHA with GL_BLEND enabled.
-                 * When SetColor passes vertex alpha < 1 the engine intends a
-                 * semi-transparent draw regardless of shader blendFunc, so we
-                 * must NOT force BLEND_OPAQUE or the draw becomes a solid stamp
-                 * (e.g. hover highlight becomes a dark opaque rectangle). */
+                 * SHADER_OPAQUE uses BLEND_MIX (alpha blend) intentionally:
+                 * many 2D textures rely on their alpha channel for transparency
+                 * (e.g. hover overlays like multistart_h whose .shader has no
+                 * blendFunc but whose .tga has alpha=0 in non-highlight areas).
+                 * Alpha blending is always correct for 2D: opaque textures
+                 * (alpha=1 everywhere) produce identical results either way. */
                 int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
@@ -4471,8 +4469,6 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL_INV;
                         } else if (sp2->transparency == SHADER_ADDITIVE) {
                             draw_blend = BLEND_ADD;
-                        } else if (sp2->transparency == SHADER_OPAQUE && draw_col.a >= 0.999f) {
-                            draw_blend = BLEND_OPAQUE;
                         }
                     }
                 }
