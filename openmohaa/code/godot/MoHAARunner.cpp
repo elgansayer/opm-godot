@@ -4106,6 +4106,10 @@ void MoHAARunner::update_2d_overlay() {
         opaque_mix_material.instantiate();
         opaque_mix_material->set_shader(opaque_mix_shader);
     }
+    if (add_canvas_material.is_null()) {
+        add_canvas_material.instantiate();
+        add_canvas_material->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+    }
 
     // Clear all existing segments
     for (int si = 0; si < (int)overlay_segments.size(); si++) {
@@ -4142,6 +4146,8 @@ void MoHAARunner::update_2d_overlay() {
                 rs->canvas_item_set_material(seg.item, mul_inv_material->get_rid());
             } else if (blend == BLEND_OPAQUE) {
                 rs->canvas_item_set_material(seg.item, opaque_mix_material->get_rid());
+            } else if (blend == BLEND_ADD) {
+                rs->canvas_item_set_material(seg.item, add_canvas_material->get_rid());
             }
             seg.blend_mode = blend;
         }
@@ -4463,6 +4469,8 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL;
                         } else if (sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
                             draw_blend = BLEND_MUL_INV;
+                        } else if (sp2->transparency == SHADER_ADDITIVE) {
+                            draw_blend = BLEND_ADD;
                         } else if (sp2->transparency == SHADER_OPAQUE && draw_col.a >= 0.999f) {
                             draw_blend = BLEND_OPAQUE;
                         }

@@ -311,6 +311,7 @@ private:
     static const int BLEND_MUL = 1;
     static const int BLEND_MUL_INV = 2;
     static const int BLEND_OPAQUE = 3;
+    static const int BLEND_ADD = 4;
     struct CanvasSegment {
         RID item;
         int blend_mode;
@@ -323,6 +324,7 @@ private:
     Ref<Shader> mul_inv_shader;
     Ref<ShaderMaterial> opaque_mix_material;
     Ref<Shader> opaque_mix_shader;
+    Ref<CanvasItemMaterial> add_canvas_material;
 
     // Full-screen gamma overlay — replicates GLimp_SetGamma hardware gamma ramp.
     // Applied at CanvasLayer 200 (above HUD at 100) so it affects both 3D and 2D.

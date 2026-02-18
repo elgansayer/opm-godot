@@ -479,10 +479,20 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 if (first_stage) props->rgbgen_type = 0;
                 if (stg) stg->rgbGen = STAGE_RGBGEN_IDENTITY_LIGHTING;
             }
-            else if (!Q_stricmp(token, "vertex") || !Q_stricmp(token, "exactVertex"))
+            else if (!Q_stricmp(token, "vertex") || !Q_stricmp(token, "exactVertex")
+                     || !Q_stricmp(token, "fromclient"))
             {
                 if (first_stage) props->rgbgen_type = 1;
-                if (stg) stg->rgbGen = STAGE_RGBGEN_VERTEX;
+                if (stg) {
+                    stg->rgbGen = STAGE_RGBGEN_VERTEX;
+                    /* Match real renderer (tr_shader.c:1206): when rgbGen is
+                       vertex and alphaGen hasn't been explicitly set yet,
+                       default alphaGen to vertex so that vertex alpha (e.g.
+                       bgcolor alpha from UI buttons) passes through. */
+                    if (stg->alphaGen == STAGE_ALPHAGEN_IDENTITY) {
+                        stg->alphaGen = STAGE_ALPHAGEN_VERTEX;
+                    }
+                }
             }
             else if (!Q_stricmp(token, "lightingDiffuse"))
             {
