@@ -183,6 +183,11 @@ private:
     bool debug_notex = false;       // F8 toggles textures off for debugging
     bool last_ui_cursor_shown = false; // Phase 59: track cursor state for mode transitions
 
+    // Scoreboard overlay (TAB key)
+    bool scoreboard_visible = false;       // True while TAB is held
+    CanvasLayer *scoreboard_layer = nullptr;
+    Control *scoreboard_control = nullptr;
+
     // Render quality state — cached for getters (0=low, 1=medium, 2=high, 3=ultra)
     int texture_quality = 2;    // default high
     int shadow_quality = 2;
@@ -298,6 +303,7 @@ private:
     CanvasLayer *hud_layer = nullptr;                     // Overlay layer for 2D elements
     Control *hud_control = nullptr;                       // Control node for custom draw
     std::unordered_map<int, Ref<ImageTexture>> shader_textures; // shader handle → loaded texture
+    std::unordered_map<int, bool> shader_texture_has_alpha;    // shader handle → texture has alpha
 
     // HUD model preview — separate canvas layer below main HUD overlay
     // so that 2D elements (dropdown menus) render on top of model previews
@@ -406,6 +412,7 @@ private:
     void update_shader_animations(double delta); // Animate tcMod scrolling (Phase 36)
     void update_2d_overlay(); // Read 2D draw commands and queue redraw
     void update_hud_models(); // Render HUD model previews (Phase 148)
+    void update_scoreboard(); // Draw scoreboard overlay when TAB is held
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
 

@@ -18,6 +18,7 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
@@ -79,6 +80,11 @@ extern "C" {
     int  Godot_GetServerState(void);
     const char *Godot_GetMapName(void);
     int  Godot_GetPlayerCount(void);
+    int  Godot_GetMaxClients(void);
+    int  Godot_GetScoreboardPlayer(int i,
+                                   char *out_name, int out_name_len,
+                                   int *out_kills, int *out_deaths,
+                                   int *out_ping);
 
     // VFS accessors (Task 4.1) — from godot_vfs_accessors.c
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
@@ -3701,10 +3707,11 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         }
     }
 
-    auto load_texture_from_qpath = [&](const char *qpath) -> Ref<ImageTexture> {
+    auto load_texture_from_qpath = [&](const char *qpath, bool *out_has_alpha) -> Ref<ImageTexture> {
         if (!qpath || !qpath[0]) {
             return Ref<ImageTexture>();
         }
+        if (out_has_alpha) *out_has_alpha = false;
 
         const char *extensions[] = { "", ".tga", ".jpg", ".png", NULL };
         for (int ext_i = 0; extensions[ext_i]; ext_i++) {
@@ -3744,6 +3751,9 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
             }
 
             if (err == OK && !img->is_empty()) {
+                if (out_has_alpha) {
+                    *out_has_alpha = (img->detect_alpha() != Image::ALPHA_NONE);
+                }
                 img->generate_mipmaps();
                 Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
                 if (is_serverback && logged_serverback_ok.find(shader_handle) == logged_serverback_ok.end()) {
@@ -3773,6 +3783,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // frozen cached texture for these (e.g. fan_anim1 in the main menu).
     if (sp && sp->has_animmap && sp->animmap_num_frames > 0 && sp->animmap_freq > 0.0f) {
         shader_textures.erase(shader_handle);
+        shader_texture_has_alpha.erase(shader_handle);
 
         auto it_anim = animmap_info.find(shader_handle);
         auto it_frames = animmap_frames.find(shader_handle);
@@ -3793,7 +3804,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
                 if (!sp->animmap_frames[fi][0]) {
                     continue;
                 }
-                frames[fi] = load_texture_from_qpath(sp->animmap_frames[fi]);
+                frames[fi] = load_texture_from_qpath(sp->animmap_frames[fi], nullptr);
             }
             animmap_frames[shader_handle] = frames;
 
@@ -3825,6 +3836,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         }
         // Name changed (shader remap active or handle reused) — invalidate
         shader_textures.erase(it);
+        shader_texture_has_alpha.erase(shader_handle);
         s_shader_texture_loaded_names.erase(shader_handle);
     }
 
@@ -3921,6 +3933,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
                 *white_tex = ImageTexture::create_from_image(wimg);
             }
             shader_textures[shader_handle] = *white_tex;
+            shader_texture_has_alpha[shader_handle] = false; // $whiteimage is fully opaque
             s_shader_texture_loaded_names[shader_handle] = name ? name : "";
             return *white_tex;
         }
@@ -3928,8 +3941,13 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
 
     // ── Try loading each candidate path via VFS ──
     Ref<ImageTexture> tex;
+    bool loaded_has_alpha = false;
     for (int tp = 0; tp < num_texture_paths && tex.is_null(); tp++) {
-        tex = load_texture_from_qpath(texture_paths[tp]);
+        bool tex_alpha = false;
+        tex = load_texture_from_qpath(texture_paths[tp], &tex_alpha);
+        if (!tex.is_null()) {
+            loaded_has_alpha = tex_alpha;
+        }
     }
 
     // ── Fallback: engine-internal white texture ──
@@ -3979,6 +3997,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
 
     if (!tex.is_null()) {
         shader_textures[shader_handle] = tex;
+        shader_texture_has_alpha[shader_handle] = loaded_has_alpha;
         s_shader_texture_loaded_names[shader_handle] = name ? name : "";
     }
     return tex;
@@ -4452,13 +4471,13 @@ void MoHAARunner::update_2d_overlay() {
                  * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src) — e.g. "shadow"
                  * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
                  * - SHADER_ADDITIVE: blendFunc add (src+dst) — e.g. glow effects
-                 *
-                 * SHADER_OPAQUE uses BLEND_MIX (alpha blend) intentionally:
-                 * many 2D textures rely on their alpha channel for transparency
-                 * (e.g. hover overlays like multistart_h whose .shader has no
-                 * blendFunc but whose .tga has alpha=0 in non-highlight areas).
-                 * Alpha blending is always correct for 2D: opaque textures
-                 * (alpha=1 everywhere) produce identical results either way. */
+                 * - SHADER_OPAQUE: no blendFunc in .shader definition.
+                 *   The real GL renderer disables blending for these (stateBits = 0).
+                 *   However, some textures (e.g. hover overlays like multistart_h)
+                 *   have alpha channels for transparency despite being SHADER_OPAQUE.
+                 *   We check the loaded texture: if it has no alpha channel, use
+                 *   BLEND_OPAQUE (force alpha=1, matching GL behaviour). If it does
+                 *   have alpha, use BLEND_MIX so the alpha is respected. */
                 int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
@@ -4469,6 +4488,13 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL_INV;
                         } else if (sp2->transparency == SHADER_ADDITIVE) {
                             draw_blend = BLEND_ADD;
+                        } else if (sp2->transparency == SHADER_OPAQUE) {
+                            // Check if the texture actually has alpha pixels
+                            auto alpha_it = shader_texture_has_alpha.find(shader);
+                            if (alpha_it != shader_texture_has_alpha.end() && !alpha_it->second) {
+                                draw_blend = BLEND_OPAQUE;
+                            }
+                            // else: texture has alpha → BLEND_MIX for hover etc.
                         }
                     }
                 }
@@ -4860,6 +4886,156 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
     sfx_cache[sfxHandle] = wav;
 
     return wav;
+}
+
+/* ===================================================================
+ *  Scoreboard overlay — shown while TAB is held.
+ *
+ *  Reads player data (name, kills, deaths, ping) from the server via
+ *  the Godot_GetScoreboardPlayer accessor and draws a semi-transparent
+ *  panel using the RenderingServer 2D API.
+ * =================================================================== */
+
+void MoHAARunner::update_scoreboard() {
+    /* Hide the overlay when TAB is not held or no map is loaded. */
+    if (!scoreboard_visible || Godot_GetServerState() < 3 /* SS_GAME */) {
+        if (scoreboard_layer) {
+            scoreboard_layer->set_visible(false);
+        }
+        return;
+    }
+
+    /* Create the canvas layer on first use. */
+    if (!scoreboard_layer) {
+        scoreboard_layer = memnew(CanvasLayer);
+        scoreboard_layer->set_layer(150); /* above HUD (100), below gamma (200) */
+        scoreboard_layer->set_name("ScoreboardLayer");
+        add_child(scoreboard_layer);
+
+        scoreboard_control = memnew(Control);
+        scoreboard_control->set_name("ScoreboardControl");
+        scoreboard_control->set_anchors_preset(Control::PRESET_FULL_RECT);
+        scoreboard_control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        scoreboard_layer->add_child(scoreboard_control);
+    }
+
+    scoreboard_layer->set_visible(true);
+
+    RID ci = scoreboard_control->get_canvas_item();
+    RenderingServer *rs = RenderingServer::get_singleton();
+    rs->canvas_item_clear(ci);
+
+    /* Viewport size for centering. */
+    Vector2 vp_size = get_viewport()->get_visible_rect().size;
+
+    /* Scoreboard dimensions. */
+    const float board_w = 500.0f;
+    const float row_h   = 24.0f;
+    const float header_h = 32.0f;
+    const float pad      = 12.0f;
+
+    /* Collect active players. */
+    struct PlayerEntry {
+        char name[64];
+        int kills;
+        int deaths;
+        int ping;
+    };
+    PlayerEntry players[64];
+    int num_players = 0;
+    int max_clients = Godot_GetMaxClients();
+    if (max_clients > 64) max_clients = 64;
+
+    for (int i = 0; i < max_clients && num_players < 64; i++) {
+        PlayerEntry pe;
+        if (Godot_GetScoreboardPlayer(i, pe.name, (int)sizeof(pe.name),
+                                       &pe.kills, &pe.deaths, &pe.ping)) {
+            players[num_players++] = pe;
+        }
+    }
+
+    float board_h = header_h + (float)num_players * row_h + pad * 2.0f;
+    float board_x = (vp_size.x - board_w) * 0.5f;
+    float board_y = (vp_size.y - board_h) * 0.5f;
+    if (board_y < 40.0f) board_y = 40.0f;
+
+    /* Background panel. */
+    Rect2 bg_rect(board_x, board_y, board_w, board_h);
+    rs->canvas_item_add_rect(ci, bg_rect, Color(0.0f, 0.0f, 0.0f, 0.7f));
+
+    /* Border. */
+    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y, board_w, 2), Color(0.6f, 0.6f, 0.6f, 0.8f));
+    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y + board_h - 2, board_w, 2), Color(0.6f, 0.6f, 0.6f, 0.8f));
+    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y, 2, board_h), Color(0.6f, 0.6f, 0.6f, 0.8f));
+    rs->canvas_item_add_rect(ci, Rect2(board_x + board_w - 2, board_y, 2, board_h), Color(0.6f, 0.6f, 0.6f, 0.8f));
+
+    /* Use the default theme font. */
+    Ref<Font> font = scoreboard_control->get_theme_default_font();
+    int font_size = 14;
+    int header_font_size = 16;
+
+    if (font.is_null()) {
+        return; /* Cannot render text without a font. */
+    }
+
+    /* Column layout: Name | Kills | Deaths | Ping */
+    float col_name_x   = board_x + pad;
+    float col_kills_x  = board_x + board_w - 200.0f;
+    float col_deaths_x = board_x + board_w - 130.0f;
+    float col_ping_x   = board_x + board_w - 60.0f;
+    float hdr_y = board_y + pad + (float)header_font_size;
+
+    /* Header row. */
+    Color hdr_color(0.9f, 0.85f, 0.6f, 1.0f);
+    font->draw_string(ci, Vector2(col_name_x, hdr_y), "Player", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
+    font->draw_string(ci, Vector2(col_kills_x, hdr_y), "Kills", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
+    font->draw_string(ci, Vector2(col_deaths_x, hdr_y), "Deaths", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
+    font->draw_string(ci, Vector2(col_ping_x, hdr_y), "Ping", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
+
+    /* Separator line below header. */
+    float sep_y = board_y + header_h;
+    rs->canvas_item_add_rect(ci, Rect2(board_x + pad, sep_y, board_w - pad * 2.0f, 1.0f),
+                             Color(0.5f, 0.5f, 0.5f, 0.6f));
+
+    /* Player rows. */
+    Color row_color(0.9f, 0.9f, 0.9f, 1.0f);
+    Color alt_bg(0.15f, 0.15f, 0.15f, 0.3f);
+
+    for (int p = 0; p < num_players; p++) {
+        float ry = sep_y + 4.0f + (float)p * row_h;
+        float text_y = ry + (float)font_size + 2.0f;
+
+        /* Alternating row highlight. */
+        if (p % 2 == 1) {
+            rs->canvas_item_add_rect(ci, Rect2(board_x + 2, ry, board_w - 4, row_h), alt_bg);
+        }
+
+        font->draw_string(ci, Vector2(col_name_x, text_y),
+                          String::utf8(players[p].name),
+                          HORIZONTAL_ALIGNMENT_LEFT, col_kills_x - col_name_x - 8.0f,
+                          font_size, row_color);
+        font->draw_string(ci, Vector2(col_kills_x, text_y),
+                          String::num_int64(players[p].kills),
+                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+        font->draw_string(ci, Vector2(col_deaths_x, text_y),
+                          String::num_int64(players[p].deaths),
+                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+        if (players[p].ping >= 0) {
+            font->draw_string(ci, Vector2(col_ping_x, text_y),
+                              String::num_int64(players[p].ping),
+                              HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+        } else {
+            font->draw_string(ci, Vector2(col_ping_x, text_y), "---",
+                              HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+        }
+    }
+
+    if (num_players == 0) {
+        float empty_y = sep_y + 4.0f + (float)font_size + 2.0f;
+        font->draw_string(ci, Vector2(col_name_x, empty_y), "No players",
+                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size,
+                          Color(0.6f, 0.6f, 0.6f, 0.8f));
+    }
 }
 
 /* ===================================================================
@@ -5871,6 +6047,9 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update 2D HUD overlay from captured draw commands (Phase 7h) ──
     update_2d_overlay();
+
+    // ── Update scoreboard overlay (TAB key) ──
+    update_scoreboard();
 
     // ── Update HUD model previews (Phase 148) ──
     update_hud_models();
@@ -6892,6 +7071,13 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
                 String(" godot_mouse_mode=") +
                 String::num_int64((int)Input::get_singleton()->get_mouse_mode()));
             return;
+        }
+
+        // TAB — track held state for Godot-side scoreboard overlay.
+        // The key event still flows through to the engine below so the
+        // engine's own +scores binding (if present) also fires.
+        if (!echo && key_event->get_keycode() == Key::KEY_TAB) {
+            scoreboard_visible = pressed;
         }
 
         // Get the keycode (logical key, respects keyboard layout)
