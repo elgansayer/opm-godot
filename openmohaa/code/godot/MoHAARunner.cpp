@@ -2167,13 +2167,25 @@ void MoHAARunner::update_entities() {
                 fnv_bytes(&actionWeight, sizeof(actionWeight));
                 fnv_bytes(&hModel, sizeof(hModel));
 
+                // ENTITYNUM_NONE is 1023 (MAX_GENTITIES-1) in q_shared.h.
+                // Temp models (debris) all share this entity number, so we
+                // must NOT cache them by ID or they will overwrite each other.
+                // We also skip cache for -1 just in case.
+                bool use_cache = (entNum != 1023 && entNum != -1);
+                bool cache_hit = false;
+
                 // Check cache: if animation state unchanged, reuse mesh
-                auto cache_it = skel_mesh_cache.find(entNum);
-                if (cache_it != skel_mesh_cache.end() &&
-                    cache_it->second.anim_hash == anim_hash &&
-                    cache_it->second.mesh != nullptr) {
-                    skinned_mesh = cache_it->second.mesh;
-                } else {
+                if (use_cache) {
+                    auto cache_it = skel_mesh_cache.find(entNum);
+                    if (cache_it != skel_mesh_cache.end() &&
+                        cache_it->second.anim_hash == anim_hash &&
+                        cache_it->second.mesh != nullptr) {
+                        skinned_mesh = cache_it->second.mesh;
+                        cache_hit = true;
+                    }
+                }
+
+                if (!cache_hit) {
                     int boneCount = 0;
                     void *boneCache = Godot_Skel_PrepareBones(
                         tikiPtr, entNum,
@@ -2277,11 +2289,20 @@ void MoHAARunner::update_entities() {
                     }
 
                     // Phase 60: Cache the newly built skinned mesh
-                    if (skinned_mesh.is_valid() && skinned_mesh->get_surface_count() > 0) {
+                    if (use_cache && skinned_mesh.is_valid() && skinned_mesh->get_surface_count() > 0) {
                         auto &entry = skel_mesh_cache[entNum];
                         entry.anim_hash = anim_hash;
                         entry.mesh = skinned_mesh;
                         entry.mesh_surfaces = skinned_mesh->get_surface_count();
+                    }
+
+                    // Debug log for temp models
+                    if (!use_cache && skinned_mesh.is_valid()) {
+                        static bool logged_temp = false;
+                        if (!logged_temp) {
+                            UtilityFunctions::print(String("[MoHAA] Temp model skinned (no cache): hModel=") + String::num_int64(hModel));
+                            logged_temp = true;
+                        }
                     }
                 }  // end else (cache miss)
             }

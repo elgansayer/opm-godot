@@ -2410,3 +2410,12 @@ Replaced the non-functional `canvas_item_set_custom_rect()` approach with proper
 - `code/godot/MoHAARunner.h` — Added `scissor_items` vector for scissor canvas item cleanup
 - `code/godot/godot_renderer.c` — `GR_ImageExists()` checks shader table before VFS
 - `project/Main.gd` — `dev_mode = false` default, `--dev` flag, cleaned up timer callback
+
+## Phase 146: ENTITYNUM_NONE Cache Thrashing Fix ✅
+
+**Problem:** Temporary models (debris, effects, gibs) all share the engine constant `ENTITYNUM_NONE` (1023). This caused skeletal mesh cache collisions in `MoHAARunner::update_entities` because the cache key relied on `entityNumber` as a unique identifier. Consequently, multiple debris pieces would overwrite each other's cache entries in the same frame, leading to severe thrashing and incorrect mesh rendering for these transient objects.
+
+**Fix:** Modified `MoHAARunner::update_entities` to explicitly bypass the `skel_mesh_cache` read/write logic for any entity with ID 1023 (`ENTITYNUM_NONE`) or -1. These entities now strictly use the per-frame CPU skinning path, ensuring correct independent animation at the cost of skipping the cache optimization for these specific objects.
+
+### Files modified (Phase 146)
+- `code/godot/MoHAARunner.cpp` — added check `if (entNum != 1023 && entNum != -1)` before cache access; added debug log for bypassed entities.
