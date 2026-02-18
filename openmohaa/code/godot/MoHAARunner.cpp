@@ -1014,6 +1014,15 @@ void MoHAARunner::update_pvs_visibility() {
     if (new_cluster == pvs_current_cluster) return;
     pvs_current_cluster = new_cluster;
 
+    // Camera position in Godot coordinates for distance checks
+    Vector3 cam_pos = id_to_godot_position(origin[0], origin[1], origin[2]);
+
+    // Distance threshold: always show clusters within this radius of the camera
+    // regardless of PVS, to compensate for incomplete BSP vis data and cluster
+    // boundary edge cases.  1024 id units ~ 26 metres ~ a couple of rooms.
+    static constexpr float PVS_FORCE_VISIBLE_DISTANCE = 1024.0f * MOHAA_UNIT_SCALE;
+    static constexpr float PVS_FORCE_VISIBLE_DIST_SQ = PVS_FORCE_VISIBLE_DISTANCE * PVS_FORCE_VISIBLE_DISTANCE;
+
     // If camera is outside the world (cluster -1), show everything
     if (new_cluster < 0) {
         for (int c = 0; c < num_clusters; c++) {
@@ -1023,14 +1032,32 @@ void MoHAARunner::update_pvs_visibility() {
         return;
     }
 
-    // Toggle per-cluster visibility based on PVS
+    // Toggle per-cluster visibility based on PVS + distance override
     int visible_count = 0;
     int hidden_count = 0;
+    int forced_count = 0;
     for (int c = 0; c < num_clusters; c++) {
         MeshInstance3D *mi = Godot_BSP_GetClusterMesh(c);
         if (!mi) continue;
 
         bool vis = (Godot_BSP_ClusterVisible(new_cluster, c) != 0);
+
+        // Distance override: force-show clusters whose AABB is near the camera.
+        // This prevents blue gaps from incomplete PVS data at cluster boundaries.
+        if (!vis) {
+            AABB aabb = mi->get_global_transform().xform(mi->get_aabb());
+            // Closest point on AABB to camera
+            Vector3 closest;
+            closest.x = CLAMP(cam_pos.x, aabb.position.x, aabb.position.x + aabb.size.x);
+            closest.y = CLAMP(cam_pos.y, aabb.position.y, aabb.position.y + aabb.size.y);
+            closest.z = CLAMP(cam_pos.z, aabb.position.z, aabb.position.z + aabb.size.z);
+            float dist_sq = (cam_pos - closest).length_squared();
+            if (dist_sq < PVS_FORCE_VISIBLE_DIST_SQ) {
+                vis = true;
+                forced_count++;
+            }
+        }
+
         mi->set_visible(vis);
         if (vis) visible_count++;
         else     hidden_count++;
@@ -1040,7 +1067,8 @@ void MoHAARunner::update_pvs_visibility() {
         UtilityFunctions::print(String("[PVS] Cluster ") +
                                 String::num_int64(new_cluster) +
                                 ": " + String::num_int64(visible_count) +
-                                " visible, " + String::num_int64(hidden_count) +
+                                " visible (" + String::num_int64(forced_count) +
+                                " forced), " + String::num_int64(hidden_count) +
                                 " hidden of " + String::num_int64(num_clusters) +
                                 " total.");
         pvs_log_count++;
@@ -4419,7 +4447,14 @@ void MoHAARunner::update_2d_overlay() {
                  * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
                  * - SHADER_OPAQUE: no blendFunc — force alpha=1 so texture alpha
                  *   doesn't cause background bleed-through (matches GL behaviour
-                 *   where alpha blending is disabled for opaque shaders). */
+                 *   where alpha blending is disabled for opaque shaders).
+                 *
+                 * Exception: in 2D mode, RB_SetGL2D() sets the default GL state
+                 * to GL_SRC_ALPHA/GL_ONE_MINUS_SRC_ALPHA with GL_BLEND enabled.
+                 * When SetColor passes vertex alpha < 1 the engine intends a
+                 * semi-transparent draw regardless of shader blendFunc, so we
+                 * must NOT force BLEND_OPAQUE or the draw becomes a solid stamp
+                 * (e.g. hover highlight becomes a dark opaque rectangle). */
                 int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
@@ -4428,7 +4463,7 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL;
                         } else if (sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
                             draw_blend = BLEND_MUL_INV;
-                        } else if (sp2->transparency == SHADER_OPAQUE) {
+                        } else if (sp2->transparency == SHADER_OPAQUE && draw_col.a >= 0.999f) {
                             draw_blend = BLEND_OPAQUE;
                         }
                     }
