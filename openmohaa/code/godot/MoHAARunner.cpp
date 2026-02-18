@@ -352,6 +352,31 @@ static bool    godot_quit_requested = false;
 // Keyed by shader handle.  Cleared alongside shader_textures on map/vid_restart.
 static std::unordered_map<int, std::string> s_shader_texture_loaded_names;
 
+// Per-surface animation cache for update_shader_animations: avoids per-frame
+// string conversion and hash lookups.  Cleared on map change.
+struct SurfAnimCache {
+    const GodotShaderProps *sp;
+    int shader_handle;
+    bool needs_animation;
+};
+static std::unordered_map<uint32_t, SurfAnimCache> s_surf_anim_cache;
+
+// Sprite/beam material caches: avoid per-frame material+texture creation.
+// Cleared on map change (shader handles are re-registered).
+static std::unordered_map<int, Ref<StandardMaterial3D>> s_sprite_mat_cache;
+static std::unordered_map<int, Ref<StandardMaterial3D>> s_beam_mat_cache;
+
+// Poly/terrain-mark material caches: keyed on (shader_handle << 2 | blend_type)
+// where blend_type: 0=alpha, 1=inv_mul (ShaderMaterial), 2=multiplicative.
+// Avoids per-frame material instantiation for effects that reuse the same shader.
+static std::unordered_map<int64_t, Ref<Material>> s_poly_mat_cache;
+static std::unordered_map<int64_t, Ref<Material>> s_terrain_mark_mat_cache;
+
+// Sprite/beam per-instance tint cache: keyed on (shader_handle << 16 | rgba_quantized).
+// Avoids duplicate() per sprite/beam per frame when tint is unchanged.
+static std::unordered_map<uint64_t, Ref<StandardMaterial3D>> s_sprite_tint_cache;
+static std::unordered_map<uint64_t, Ref<StandardMaterial3D>> s_beam_tint_cache;
+
 // Called from patched Sys_Error in sys_main.c
 extern "C" void Godot_SysError(const char *error) {
     strncpy(godot_error_message, error, sizeof(godot_error_message) - 1);
@@ -878,6 +903,13 @@ void MoHAARunner::check_world_load() {
             s_shader_texture_loaded_names.clear();  // Clear name tracking alongside texture cache
             animmap_info.clear();
             animmap_frames.clear();
+            s_surf_anim_cache.clear();
+            s_sprite_mat_cache.clear();
+            s_beam_mat_cache.clear();
+            s_poly_mat_cache.clear();
+            s_terrain_mark_mat_cache.clear();
+            s_sprite_tint_cache.clear();
+            s_beam_tint_cache.clear();
 #ifdef HAS_MESH_CACHE_MODULE
             Godot_MeshCache::get().clear();
             Godot_MaterialCache::get().clear();
@@ -926,6 +958,13 @@ void MoHAARunner::check_world_load() {
     animmap_info.clear();
     animmap_frames.clear();
     tinted_mat_cache.clear();
+    s_surf_anim_cache.clear();
+    s_sprite_mat_cache.clear();
+    s_beam_mat_cache.clear();
+    s_poly_mat_cache.clear();
+    s_terrain_mark_mat_cache.clear();
+    s_sprite_tint_cache.clear();
+    s_beam_tint_cache.clear();
 
     Node3D *map_node = Godot_BSP_LoadWorld(map_path);
     if (map_node) {
@@ -1724,9 +1763,8 @@ void MoHAARunner::update_entities() {
 
             // Cached billboard material per shader handle — avoids creating
             // a new StandardMaterial3D + shader props lookup every frame.
-            static std::unordered_map<int, Ref<StandardMaterial3D>> sprite_mat_cache;
-            auto sp_it = sprite_mat_cache.find(spriteShader);
-            if (sp_it == sprite_mat_cache.end()) {
+            auto sp_it = s_sprite_mat_cache.find(spriteShader);
+            if (sp_it == s_sprite_mat_cache.end()) {
                 Ref<StandardMaterial3D> smat;
                 smat.instantiate();
                 smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
@@ -1745,15 +1783,34 @@ void MoHAARunner::update_entities() {
                         apply_shader_props_to_material(smat, sn);
                     }
                 }
-                sprite_mat_cache[spriteShader] = smat;
-                sp_it = sprite_mat_cache.find(spriteShader);
+                s_sprite_mat_cache[spriteShader] = smat;
+                sp_it = s_sprite_mat_cache.find(spriteShader);
             }
 
-            // Duplicate per-instance only for the per-entity RGBA tint
-            Ref<StandardMaterial3D> inst_mat = sp_it->second->duplicate();
-            inst_mat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                       rgba[2] / 255.0f, rgba[3] / 255.0f));
-            mi->set_surface_override_material(0, inst_mat);
+            // Use tint cache to avoid duplicate() per sprite per frame.
+            // If RGBA is white (255,255,255,255), reuse the template directly.
+            if (rgba[0] == 255 && rgba[1] == 255 && rgba[2] == 255 && rgba[3] == 255) {
+                mi->set_surface_override_material(0, sp_it->second);
+            } else {
+                // Quantise RGBA to 4-bit per channel for cache key
+                uint16_t rq = (uint16_t)(rgba[0] >> 4);
+                uint16_t gq = (uint16_t)(rgba[1] >> 4);
+                uint16_t bq = (uint16_t)(rgba[2] >> 4);
+                uint16_t aq = (uint16_t)(rgba[3] >> 4);
+                uint64_t tint_key = ((uint64_t)spriteShader << 16) |
+                    ((uint64_t)rq << 12) | ((uint64_t)gq << 8) |
+                    ((uint64_t)bq << 4) | (uint64_t)aq;
+                auto stc_it = s_sprite_tint_cache.find(tint_key);
+                if (stc_it != s_sprite_tint_cache.end()) {
+                    mi->set_surface_override_material(0, stc_it->second);
+                } else {
+                    Ref<StandardMaterial3D> inst_mat = sp_it->second->duplicate();
+                    inst_mat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                               rgba[2] / 255.0f, rgba[3] / 255.0f));
+                    s_sprite_tint_cache[tint_key] = inst_mat;
+                    mi->set_surface_override_material(0, inst_mat);
+                }
+            }
 
             // Position sprite at entity origin
             Vector3 pos = id_to_godot_position(origin[0], origin[1], origin[2]);
@@ -1824,9 +1881,8 @@ void MoHAARunner::update_entities() {
             Godot_Renderer_GetEntitySprite(i, nullptr, nullptr, &customShader);
             int beamShader = (customShader > 0) ? customShader : hModel;
 
-            static std::unordered_map<int, Ref<StandardMaterial3D>> beam_mat_cache;
-            auto bm_it = beam_mat_cache.find(beamShader);
-            if (bm_it == beam_mat_cache.end()) {
+            auto bm_it = s_beam_mat_cache.find(beamShader);
+            if (bm_it == s_beam_mat_cache.end()) {
                 Ref<StandardMaterial3D> bmat;
                 bmat.instantiate();
                 bmat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
@@ -1844,15 +1900,32 @@ void MoHAARunner::update_entities() {
                         apply_shader_props_to_material(bmat, sn);
                     }
                 }
-                beam_mat_cache[beamShader] = bmat;
-                bm_it = beam_mat_cache.find(beamShader);
+                s_beam_mat_cache[beamShader] = bmat;
+                bm_it = s_beam_mat_cache.find(beamShader);
             }
 
-            // Duplicate per-instance only for the per-entity RGBA tint
-            Ref<StandardMaterial3D> inst_bmat = bm_it->second->duplicate();
-            inst_bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
-                                        rgba[2] / 255.0f, rgba[3] / 255.0f));
-            mi->set_surface_override_material(0, inst_bmat);
+            // Use tint cache to avoid duplicate() per beam per frame.
+            if (rgba[0] == 255 && rgba[1] == 255 && rgba[2] == 255 && rgba[3] == 255) {
+                mi->set_surface_override_material(0, bm_it->second);
+            } else {
+                uint16_t rq = (uint16_t)(rgba[0] >> 4);
+                uint16_t gq = (uint16_t)(rgba[1] >> 4);
+                uint16_t bq = (uint16_t)(rgba[2] >> 4);
+                uint16_t aq = (uint16_t)(rgba[3] >> 4);
+                uint64_t tint_key = ((uint64_t)beamShader << 16) |
+                    ((uint64_t)rq << 12) | ((uint64_t)gq << 8) |
+                    ((uint64_t)bq << 4) | (uint64_t)aq;
+                auto btc_it = s_beam_tint_cache.find(tint_key);
+                if (btc_it != s_beam_tint_cache.end()) {
+                    mi->set_surface_override_material(0, btc_it->second);
+                } else {
+                    Ref<StandardMaterial3D> inst_bmat = bm_it->second->duplicate();
+                    inst_bmat->set_albedo(Color(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                                rgba[2] / 255.0f, rgba[3] / 255.0f));
+                    s_beam_tint_cache[tint_key] = inst_bmat;
+                    mi->set_surface_override_material(0, inst_bmat);
+                }
+            }
             // Beam vertices are already in world space — use identity transform
             mi->set_global_transform(Transform3D());
             mi->set_visible(true);
@@ -2812,43 +2885,23 @@ void MoHAARunner::update_polys() {
         }
         mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 
-        // Material: textured + vertex colour + alpha blend, double-sided
-        Ref<StandardMaterial3D> mat = mi->get_surface_override_material(0);
-        if (mat.is_null()) {
-            mat.instantiate();
-            mi->set_surface_override_material(0, mat);
-        }
-
-        // Reset material state (reusing existing material)
-        mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-        mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-        mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-        mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-        mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
-        mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
-
-        // Reset properties that might be dirty from reuse
-        mat->set_albedo(Color(1, 1, 1, 1));
-        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MIX);
-        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, Ref<Texture2D>());
-        mat->set_uv1_scale(Vector3(1, 1, 1));
-        mat->set_uv1_offset(Vector3(0, 0, 0));
-        mat->set_alpha_scissor_threshold(0.5);
-
-        // Try to apply the poly's shader texture and shader properties
+        // Material: cached per (shader_handle, blend_type) — avoids per-frame
+        // instantiation, property resets, and shader/texture lookups.
+        // blend_type: 0=alpha (default), 1=inv_mul, 2=multiplicative
+        int blend_type = 0;
         if (hShader > 0) {
             const char *sn = Godot_Renderer_GetShaderName(hShader);
-            Ref<ImageTexture> tex = get_shader_texture(hShader);
+            const GodotShaderProps *poly_sp = (sn && sn[0]) ? Godot_ShaderProps_Find(sn) : nullptr;
+            if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE_INV) blend_type = 1;
+            else if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE) blend_type = 2;
+        }
 
-            // Check shader blend mode for special handling
-            const GodotShaderProps *poly_sp = nullptr;
-            if (sn && sn[0]) {
-                poly_sp = Godot_ShaderProps_Find(sn);
-            }
-
-            if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE_INV) {
+        int64_t poly_mat_key = ((int64_t)hShader << 2) | blend_type;
+        auto pm_it = s_poly_mat_cache.find(poly_mat_key);
+        if (pm_it == s_poly_mat_cache.end()) {
+            // First time seeing this (shader, blend) combo — create and cache
+            if (blend_type == 1) {
                 // Inverse-multiplicative: result = dst * (1 - src*vertex_color)
-                // Used by markShadow — cannot be expressed with StandardMaterial3D.
                 static Ref<Shader> inv_mul_poly_shader;
                 if (inv_mul_poly_shader.is_null()) {
                     inv_mul_poly_shader.instantiate();
@@ -2868,53 +2921,76 @@ void MoHAARunner::update_polys() {
                 Ref<ShaderMaterial> smat;
                 smat.instantiate();
                 smat->set_shader(inv_mul_poly_shader);
-                if (tex.is_valid()) {
-                    smat->set_shader_parameter("albedo_texture", tex);
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        smat->set_shader_parameter("albedo_texture", tex);
+                    }
                 }
-                mi->set_surface_override_material(0, smat);
-            } else if (poly_sp && poly_sp->transparency == SHADER_MULTIPLICATIVE) {
-                // Standard multiplicative: result = dst * src (filter)
-                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-                if (tex.is_valid()) {
-                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                }
-                mi->set_surface_override_material(0, mat);
+                s_poly_mat_cache[poly_mat_key] = smat;
             } else {
-                // Normal path: texture + shader properties + particle fallback
-                bool is_particle_effect = false;
-                if (sn && sn[0]) {
-                    const char* particle_keywords[] = {
-                        "tracer", "beam", "flare", "glow", "particle",
-                        "flash", "spark", "trail", nullptr
-                    };
-                    for (int kw = 0; particle_keywords[kw]; kw++) {
-                        if (strstr(sn, particle_keywords[kw])) {
-                            is_particle_effect = true;
-                            break;
+                // Standard or multiplicative — StandardMaterial3D
+                Ref<StandardMaterial3D> mat;
+                mat.instantiate();
+                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
+                mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+                mat->set_albedo(Color(1, 1, 1, 1));
+                mat->set_uv1_scale(Vector3(1, 1, 1));
+                mat->set_uv1_offset(Vector3(0, 0, 0));
+                mat->set_alpha_scissor_threshold(0.5);
+
+                if (blend_type == 2) {
+                    mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                }
+
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    } else if (blend_type == 0) {
+                        // Particle fallback: no texture available
+                        const char *sn = Godot_Renderer_GetShaderName(hShader);
+                        bool is_particle_effect = false;
+                        if (sn && sn[0]) {
+                            const char* particle_keywords[] = {
+                                "tracer", "beam", "flare", "glow", "particle",
+                                "flash", "spark", "trail", nullptr
+                            };
+                            for (int kw = 0; particle_keywords[kw]; kw++) {
+                                if (strstr(sn, particle_keywords[kw])) {
+                                    is_particle_effect = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (is_particle_effect) {
+                            mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
+                            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                            static std::unordered_set<std::string> logged_fallbacks;
+                            if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
+                                UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
+                                logged_fallbacks.insert(sn);
+                            }
+                        }
+                    }
+
+                    if (blend_type == 0) {
+                        const char *sn = Godot_Renderer_GetShaderName(hShader);
+                        if (sn && sn[0]) {
+                            apply_shader_props_to_material(mat, sn);
                         }
                     }
                 }
-
-                if (tex.is_valid()) {
-                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
-                } else if (is_particle_effect) {
-                    mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
-                    mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
-                    static std::unordered_set<std::string> logged_fallbacks;
-                    if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
-                        UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
-                        logged_fallbacks.insert(sn);
-                    }
-                }
-
-                if (sn && sn[0]) {
-                    apply_shader_props_to_material(mat, sn);
-                }
-                mi->set_surface_override_material(0, mat);
+                s_poly_mat_cache[poly_mat_key] = mat;
             }
-        } else {
-            mi->set_surface_override_material(0, mat);
+            pm_it = s_poly_mat_cache.find(poly_mat_key);
         }
+
+        mi->set_surface_override_material(0, pm_it->second);
         mi->set_visible(true);
     }
 
@@ -3118,83 +3194,86 @@ void MoHAARunner::update_terrain_marks() {
         tmesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
         mi->set_mesh(tmesh);
 
-        // Determine shader blend mode to pick the correct material type.
-        // markShadow uses GL_ZERO GL_ONE_MINUS_SRC_COLOR (SHADER_MULTIPLICATIVE_INV)
-        // which requires a custom spatial shader — StandardMaterial3D cannot
-        // express dst*(1-src).
-        const char *mark_shader_name = nullptr;
-        const GodotShaderProps *mark_sp = nullptr;
+        // Material: cached per (shader_handle, blend_type) — avoids per-frame
+        // instantiation and shader/texture lookups for terrain marks.
+        int mark_blend_type = 0;
         if (hShader > 0) {
-            mark_shader_name = Godot_Renderer_GetShaderName(hShader);
-            if (mark_shader_name && mark_shader_name[0]) {
-                mark_sp = Godot_ShaderProps_Find(mark_shader_name);
-            }
+            const char *mark_shader_name = Godot_Renderer_GetShaderName(hShader);
+            const GodotShaderProps *mark_sp = (mark_shader_name && mark_shader_name[0])
+                ? Godot_ShaderProps_Find(mark_shader_name) : nullptr;
+            if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE_INV) mark_blend_type = 1;
+            else if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE) mark_blend_type = 2;
         }
 
-        if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE_INV) {
-            // Inverse-multiplicative blend: result = dst * (1 - texture*vertex_color)
-            // Used by markShadow and similar darkening decal shaders.
-            static Ref<Shader> inv_mul_3d_shader;
-            if (inv_mul_3d_shader.is_null()) {
-                inv_mul_3d_shader.instantiate();
-                inv_mul_3d_shader->set_code(
-                    "shader_type spatial;\n"
-                    "render_mode blend_mul, unshaded, cull_disabled, "
-                    "depth_draw_never, depth_test_disabled;\n"
-                    "uniform sampler2D albedo_texture : source_color, "
-                    "filter_linear;\n"
-                    "void fragment() {\n"
-                    "    vec4 tex = texture(albedo_texture, UV);\n"
-                    "    ALBEDO = vec3(1.0) - tex.rgb * COLOR.rgb;\n"
-                    "    ALPHA = 1.0;\n"
-                    "}\n"
-                );
-            }
-            Ref<ShaderMaterial> smat;
-            smat.instantiate();
-            smat->set_shader(inv_mul_3d_shader);
-            if (hShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(hShader);
-                if (tex.is_valid()) {
-                    smat->set_shader_parameter("albedo_texture", tex);
+        int64_t tm_mat_key = ((int64_t)hShader << 2) | mark_blend_type;
+        auto tm_it = s_terrain_mark_mat_cache.find(tm_mat_key);
+        if (tm_it == s_terrain_mark_mat_cache.end()) {
+            if (mark_blend_type == 1) {
+                // Inverse-multiplicative blend: result = dst * (1 - texture*vertex_color)
+                static Ref<Shader> inv_mul_3d_shader;
+                if (inv_mul_3d_shader.is_null()) {
+                    inv_mul_3d_shader.instantiate();
+                    inv_mul_3d_shader->set_code(
+                        "shader_type spatial;\n"
+                        "render_mode blend_mul, unshaded, cull_disabled, "
+                        "depth_draw_never, depth_test_disabled;\n"
+                        "uniform sampler2D albedo_texture : source_color, "
+                        "filter_linear;\n"
+                        "void fragment() {\n"
+                        "    vec4 tex = texture(albedo_texture, UV);\n"
+                        "    ALBEDO = vec3(1.0) - tex.rgb * COLOR.rgb;\n"
+                        "    ALPHA = 1.0;\n"
+                        "}\n"
+                    );
                 }
-            }
-            mi->set_surface_override_material(0, smat);
-        } else if (mark_sp && mark_sp->transparency == SHADER_MULTIPLICATIVE) {
-            // Standard multiplicative blend: result = dst * src (filter)
-            Ref<StandardMaterial3D> mat;
-            mat.instantiate();
-            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
-            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-            if (hShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(hShader);
-                if (tex.is_valid()) {
-                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                Ref<ShaderMaterial> smat;
+                smat.instantiate();
+                smat->set_shader(inv_mul_3d_shader);
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        smat->set_shader_parameter("albedo_texture", tex);
+                    }
                 }
-            }
-            mi->set_surface_override_material(0, mat);
-        } else {
-            // Default: alpha blend with shader props applied
-            Ref<StandardMaterial3D> mat;
-            mat.instantiate();
-            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
-            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
-            mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
-            if (hShader > 0) {
-                Ref<ImageTexture> tex = get_shader_texture(hShader);
-                if (tex.is_valid()) {
-                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                s_terrain_mark_mat_cache[tm_mat_key] = smat;
+            } else if (mark_blend_type == 2) {
+                Ref<StandardMaterial3D> mat;
+                mat.instantiate();
+                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
                 }
+                s_terrain_mark_mat_cache[tm_mat_key] = mat;
+            } else {
+                Ref<StandardMaterial3D> mat;
+                mat.instantiate();
+                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
+                    const char *mark_shader_name = Godot_Renderer_GetShaderName(hShader);
+                    if (mark_shader_name && mark_shader_name[0]) {
+                        apply_shader_props_to_material(mat, mark_shader_name);
+                    }
+                }
+                s_terrain_mark_mat_cache[tm_mat_key] = mat;
             }
-            if (mark_shader_name && mark_shader_name[0]) {
-                apply_shader_props_to_material(mat, mark_shader_name);
-            }
-            mi->set_surface_override_material(0, mat);
+            tm_it = s_terrain_mark_mat_cache.find(tm_mat_key);
         }
+
+        mi->set_surface_override_material(0, tm_it->second);
         mi->set_global_transform(Transform3D());
         mi->set_visible(true);
     }
@@ -3408,13 +3487,7 @@ void MoHAARunner::update_shader_animations(double delta) {
     // Per-surface cache: avoids per-frame string→C-string conversion,
     // GodotShaderProps hash lookup, and O(N) linear shader scan.
     // Built on first access; cleared on map change alongside animmap caches.
-    struct SurfAnimCache {
-        const GodotShaderProps *sp;   // cached shader props pointer (stable for map lifetime)
-        int shader_handle;            // cached shader handle for animMap texture lookup
-        bool needs_animation;         // true if this surface has any runtime animation
-    };
     // Key = (child_index << 16) | surface_index — unique per BSP surface.
-    static std::unordered_map<uint32_t, SurfAnimCache> surf_anim_cache;
 
     // Walk MeshInstance3D children of bsp_map_node
     for (int c = 0; c < bsp_map_node->get_child_count(); c++) {
@@ -3427,8 +3500,8 @@ void MoHAARunner::update_shader_animations(double delta) {
         for (int s = 0; s < mesh->get_surface_count(); s++) {
             // Look up or populate per-surface cache
             uint32_t cache_key = ((uint32_t)c << 16) | (uint32_t)s;
-            auto cache_it = surf_anim_cache.find(cache_key);
-            if (cache_it == surf_anim_cache.end()) {
+            auto cache_it = s_surf_anim_cache.find(cache_key);
+            if (cache_it == s_surf_anim_cache.end()) {
                 SurfAnimCache entry;
                 entry.sp = nullptr;
                 entry.shader_handle = -1;
@@ -3452,8 +3525,8 @@ void MoHAARunner::update_shader_animations(double delta) {
                         }
                     }
                 }
-                surf_anim_cache[cache_key] = entry;
-                cache_it = surf_anim_cache.find(cache_key);
+                s_surf_anim_cache[cache_key] = entry;
+                cache_it = s_surf_anim_cache.find(cache_key);
             }
 
             const SurfAnimCache &sc = cache_it->second;
@@ -5621,11 +5694,18 @@ void MoHAARunner::_process(double delta) {
             }
         }
 
-        // Disable Environment brightness — gamma overlay handles everything.
+        // Overbright compensation: lightmaps are loaded with a << 1 shift
+        // (R_ColorShiftLightingBytes, overbrightShift=1).  The real GL renderer
+        // compensates via hardware overbright bits or identityLight scaling.
+        // We don't have that mechanism, so we halve the 3D scene brightness
+        // via Environment adjustment.  This only affects the 3D viewport —
+        // the 2D HUD/loading screen is unaffected.  The gamma overlay above
+        // then applies r_gamma correction to the entire display (3D + 2D).
         if (world_env) {
             Ref<Environment> env = world_env->get_environment();
             if (env.is_valid()) {
-                env->set_adjustment_enabled(false);
+                env->set_adjustment_enabled(true);
+                env->set_adjustment_brightness(0.5f);
             }
         }
     }
@@ -5654,6 +5734,13 @@ void MoHAARunner::_process(double delta) {
             s_shader_texture_loaded_names.clear();
             animmap_info.clear();
             animmap_frames.clear();
+            s_surf_anim_cache.clear();
+            s_sprite_mat_cache.clear();
+            s_beam_mat_cache.clear();
+            s_poly_mat_cache.clear();
+            s_terrain_mark_mat_cache.clear();
+            s_sprite_tint_cache.clear();
+            s_beam_tint_cache.clear();
 
             DisplayServer *ds = DisplayServer::get_singleton();
             if (ds) {
