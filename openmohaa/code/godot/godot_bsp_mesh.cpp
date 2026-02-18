@@ -734,26 +734,15 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
         uint8_t *dst = rgba.ptrw();
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
-            // R_ColorShiftLightingBytes: shift by overbrightShift (1 for
-            // default r_mapOverBrightBits=1, r_overBrightBits=0).
-            // Use hue-preserving normalisation instead of per-channel
-            // clamping — this matches the original renderer exactly.
-            int r = src[p * 3 + 0] << 1;
-            int g = src[p * 3 + 1] << 1;
-            int b = src[p * 3 + 2] << 1;
-
-            if ((r | g | b) > 255) {
-                int mx = r;
-                if (g > mx) mx = g;
-                if (b > mx) mx = b;
-                r = r * 255 / mx;
-                g = g * 255 / mx;
-                b = b * 255 / mx;
-            }
-
-            dst[p * 4 + 0] = (uint8_t)r;
-            dst[p * 4 + 1] = (uint8_t)g;
-            dst[p * 4 + 2] = (uint8_t)b;
+            // The real renderer applies R_ColorShiftLightingBytes (<< 1)
+            // here, but compensates during the multitexture combine via
+            // hardware overbright bits (GL_RGB_SCALE).  Our unshaded
+            // StandardMaterial3D pipeline has no such compensation, so we
+            // store raw lightmap values.  Net result matches the real
+            // renderer's final output: texture × lightmap (no 2× boost).
+            dst[p * 4 + 0] = src[p * 3 + 0];
+            dst[p * 4 + 1] = src[p * 3 + 1];
+            dst[p * 4 + 2] = src[p * 3 + 2];
             dst[p * 4 + 3] = 255;
         }
 
