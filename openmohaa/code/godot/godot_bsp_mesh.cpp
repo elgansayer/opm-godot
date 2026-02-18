@@ -959,6 +959,13 @@ static Ref<ArrayMesh> batches_to_array_mesh(
              * shader definition explicitly says "cull none". */
             mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
+            /* BSP world surfaces are lit exclusively by their lightmap
+             * (or vertex colours for nolightmap surfaces).  The real
+             * renderer never applies dynamic scene lights to BSP geometry.
+             * Unshaded prevents Godot's DirectionalLight / ambient from
+             * adding extra illumination (which caused double-lighting). */
+            mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+
             bool has_texture = false;
             if (batch.shader_name) {
                 Ref<ImageTexture> tex = load_texture(batch.shader_name);

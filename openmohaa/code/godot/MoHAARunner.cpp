@@ -5694,18 +5694,13 @@ void MoHAARunner::_process(double delta) {
             }
         }
 
-        // Overbright compensation: lightmaps are loaded with a << 1 shift
-        // (R_ColorShiftLightingBytes, overbrightShift=1).  The real GL renderer
-        // compensates via hardware overbright bits or identityLight scaling.
-        // We don't have that mechanism, so we halve the 3D scene brightness
-        // via Environment adjustment.  This only affects the 3D viewport —
-        // the 2D HUD/loading screen is unaffected.  The gamma overlay above
-        // then applies r_gamma correction to the entire display (3D + 2D).
+        // BSP materials are now unshaded (lightmap is sole illumination),
+        // so no Environment brightness compensation is needed.  Disable
+        // adjustment to avoid dimming the correctly-lit scene.
         if (world_env) {
             Ref<Environment> env = world_env->get_environment();
             if (env.is_valid()) {
-                env->set_adjustment_enabled(true);
-                env->set_adjustment_brightness(0.5f);
+                env->set_adjustment_enabled(false);
             }
         }
     }
