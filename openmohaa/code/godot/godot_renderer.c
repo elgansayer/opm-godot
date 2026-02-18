@@ -167,6 +167,7 @@ typedef enum {
     GR_2D_STRETCHPIC,  /* textured quad */
     GR_2D_BOX,         /* solid colour box */
     GR_2D_SCISSOR,     /* Phase 45: scissor region change */
+    GR_2D_TRIANGLE,    /* textured triangle (compass, needle, circle, spinner) */
 } gr_2d_type_t;
 
 typedef struct {
@@ -175,6 +176,9 @@ typedef struct {
     float s1, t1, s2, t2;    /* texture coordinates (for STRETCHPIC) */
     float color[4];           /* RGBA at time of draw */
     int   shader;             /* qhandle_t for texture lookup */
+    /* Triangle vertex data (for GR_2D_TRIANGLE only) */
+    float tri_verts[3][2];    /* 3 vertex positions in screen space */
+    float tri_uvs[3][2];      /* 3 vertex UV coordinates */
 } gr_2d_cmd_t;
 
 static gr_2d_cmd_t gr_2d_cmds[GR_MAX_2D_CMDS];
@@ -1119,32 +1123,67 @@ static void GR_DrawTilePicOffset( float x, float y, float w, float h,
     GR_DrawStretchPic( x, y, w, h, s0, t0, s1, t1, hShader );
 }
 
+/* Transform a single 2D point from widget ortho space to absolute screen space.
+ * Same maths as GR_Transform2D but for individual vertices. */
+static void GR_TransformPoint2D( float in_x, float in_y,
+                                 float *out_x, float *out_y )
+{
+    float range_x = gr_2d_right  - gr_2d_left;
+    float range_y = gr_2d_bottom - gr_2d_top;
+
+    if ( range_x <= 0.0f ) range_x = 640.0f;
+    if ( range_y <= 0.0f ) range_y = 480.0f;
+
+    float sx = (float)gr_2d_vp_w / range_x;
+    float sy = (float)gr_2d_vp_h / range_y;
+
+    *out_x = (float)gr_2d_vp_x + ( in_x - gr_2d_left ) * sx;
+    *out_y = (float)( stored_glconfig.vidHeight - gr_2d_vp_y - gr_2d_vp_h )
+             + ( in_y - gr_2d_top ) * sy;
+}
+
 static void GR_DrawTrianglePic( const vec2_t vPoints[3],
                                 const vec2_t vTexCoords[3],
                                 qhandle_t hShader )
 {
-    /* Phase 41: Approximate triangle as a bounding-box stretch pic.
-     * Full triangle rendering would need a dedicated 2D command type;
-     * for now emit the bounding rect to show *something*. */
     if ( !vPoints ) return;
-    float minX = vPoints[0][0], maxX = vPoints[0][0];
-    float minY = vPoints[0][1], maxY = vPoints[0][1];
-    float minS = vTexCoords ? vTexCoords[0][0] : 0, maxS = minS;
-    float minT = vTexCoords ? vTexCoords[0][1] : 0, maxT = minT;
-    for ( int i = 1; i < 3; i++ ) {
-        if ( vPoints[i][0] < minX ) minX = vPoints[i][0];
-        if ( vPoints[i][0] > maxX ) maxX = vPoints[i][0];
-        if ( vPoints[i][1] < minY ) minY = vPoints[i][1];
-        if ( vPoints[i][1] > maxY ) maxY = vPoints[i][1];
+    if ( gr_num2DCmds >= GR_MAX_2D_CMDS ) return;
+
+    gr_2d_cmd_t *cmd = &gr_2d_cmds[gr_num2DCmds++];
+    cmd->type   = GR_2D_TRIANGLE;
+    cmd->shader = (int)hShader;
+    cmd->color[0] = current_color[0];
+    cmd->color[1] = current_color[1];
+    cmd->color[2] = current_color[2];
+    cmd->color[3] = current_color[3];
+
+    /* Transform each vertex from widget ortho space to screen space */
+    for ( int i = 0; i < 3; i++ ) {
+        GR_TransformPoint2D( vPoints[i][0], vPoints[i][1],
+                             &cmd->tri_verts[i][0], &cmd->tri_verts[i][1] );
         if ( vTexCoords ) {
-            if ( vTexCoords[i][0] < minS ) minS = vTexCoords[i][0];
-            if ( vTexCoords[i][0] > maxS ) maxS = vTexCoords[i][0];
-            if ( vTexCoords[i][1] < minT ) minT = vTexCoords[i][1];
-            if ( vTexCoords[i][1] > maxT ) maxT = vTexCoords[i][1];
+            cmd->tri_uvs[i][0] = vTexCoords[i][0];
+            cmd->tri_uvs[i][1] = vTexCoords[i][1];
+        } else {
+            cmd->tri_uvs[i][0] = 0.0f;
+            cmd->tri_uvs[i][1] = 0.0f;
         }
     }
-    GR_DrawStretchPic( minX, minY, maxX - minX, maxY - minY,
-                       minS, minT, maxS, maxT, hShader );
+
+    /* Fill rect fields with bounding box (for scissor/diagnostics) */
+    cmd->x = cmd->tri_verts[0][0];
+    cmd->y = cmd->tri_verts[0][1];
+    float maxX = cmd->x, maxY = cmd->y;
+    for ( int i = 1; i < 3; i++ ) {
+        if ( cmd->tri_verts[i][0] < cmd->x ) cmd->x = cmd->tri_verts[i][0];
+        if ( cmd->tri_verts[i][1] < cmd->y ) cmd->y = cmd->tri_verts[i][1];
+        if ( cmd->tri_verts[i][0] > maxX ) maxX = cmd->tri_verts[i][0];
+        if ( cmd->tri_verts[i][1] > maxY ) maxY = cmd->tri_verts[i][1];
+    }
+    cmd->w = maxX - cmd->x;
+    cmd->h = maxY - cmd->y;
+    cmd->s1 = cmd->t1 = 0.0f;
+    cmd->s2 = cmd->t2 = 1.0f;
 }
 
 static void GR_DrawBackground( int cols, int rows, int bgr, uint8_t *data )
@@ -2907,6 +2946,28 @@ int Godot_Renderer_Get2DCmd( int index,
         color[3] = cmd->color[3];
     }
     if ( shader ) *shader = cmd->shader;
+    return 1;
+}
+
+int Godot_Renderer_Get2DCmdTriVerts( int index,
+                                     float *verts,   /* [3][2] = 6 floats: screen-space positions */
+                                     float *uvs )    /* [3][2] = 6 floats: texture coordinates */
+{
+    if ( index < 0 || index >= gr_num2DCmds ) return 0;
+    const gr_2d_cmd_t *cmd = &gr_2d_cmds[index];
+    if ( (int)cmd->type != (int)GR_2D_TRIANGLE ) return 0;
+    if ( verts ) {
+        for ( int i = 0; i < 3; i++ ) {
+            verts[i*2+0] = cmd->tri_verts[i][0];
+            verts[i*2+1] = cmd->tri_verts[i][1];
+        }
+    }
+    if ( uvs ) {
+        for ( int i = 0; i < 3; i++ ) {
+            uvs[i*2+0] = cmd->tri_uvs[i][0];
+            uvs[i*2+1] = cmd->tri_uvs[i][1];
+        }
+    }
     return 1;
 }
 

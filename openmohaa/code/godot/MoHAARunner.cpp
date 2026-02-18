@@ -147,6 +147,9 @@ extern "C" {
                                  float *x, float *y, float *w, float *h,
                                  float *s1, float *t1, float *s2, float *t2,
                                  float *color, int *shader);
+    int  Godot_Renderer_Get2DCmdTriVerts(int index,
+                                         float *verts,  /* [3][2] */
+                                         float *uvs);   /* [3][2] */
     const char *Godot_Renderer_GetShaderName(int handle);
     int  Godot_Renderer_GetShaderCount(void);
     int  Godot_Renderer_RegisterShader(const char *name);
@@ -340,6 +343,21 @@ extern "C" {
     // Cursor image accessor — from stubs.cpp
     int   Godot_GetPendingCursorImage(const unsigned char **out_pixels, int *out_w, int *out_h);
     void  Godot_ClearPendingCursorImage(void);
+
+    // Scoreboard capture buffer — from godot_scoreboard.c
+    int         Godot_SB_IsVisible(void);
+    int         Godot_SB_GetItemCount(void);
+    int         Godot_SB_GetColumnCount(void);
+    const char *Godot_SB_GetItemString(int item, int field);
+    void        Godot_SB_GetItemTextColor(int item, float *r, float *g, float *b, float *a);
+    void        Godot_SB_GetItemBackColor(int item, float *r, float *g, float *b, float *a);
+    int         Godot_SB_GetItemIsHeader(int item);
+    const char *Godot_SB_GetColumnName(int col);
+    int         Godot_SB_GetColumnWidth(int col);
+    void        Godot_SB_GetPosition(float *x, float *y, float *w, float *h);
+    void        Godot_SB_GetBGColor(float *r, float *g, float *b, float *a);
+    void        Godot_SB_GetFontColor(float *r, float *g, float *b, float *a);
+    int         Godot_SB_GetDrawHeader(void);
 }
 
 // ──────────────────────────────────────────────
@@ -4176,6 +4194,11 @@ void MoHAARunner::update_2d_overlay() {
         return seg.item;
     };
 
+    // Track whether a loading background image (map preview) was drawn.
+    // When present, fullscreen fills must be suppressed so the preview
+    // is visible underneath the loading HUD elements.
+    bool has_loading_bg = false;
+
     // Phase 58: Draw captured background image during loading/screens
     {
         int cols = 0, rows = 0, bgr = 0;
@@ -4222,6 +4245,7 @@ void MoHAARunner::update_2d_overlay() {
                 }
                 Rect2 full(0.0f, 0.0f, vp.x, vp.y);
                 rs->canvas_item_add_texture_rect(ci, full, (*bg_tex)->get_rid());
+                has_loading_bg = true;
             }
         }
     }
@@ -4309,6 +4333,15 @@ void MoHAARunner::update_2d_overlay() {
         // These screen clears would cover the 3D view.  But when UI menus
         // are active, we need them for menu backgrounds.
         if (!allow_fullscreen_fills && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
+            continue;
+        }
+
+        // When the loading screen background image (map preview from
+        // RE_DrawStretchRaw) was drawn, suppress fullscreen opaque fills.
+        // These fills (widget white bg + UI_ClearBackground black) would
+        // hide the map preview.  The real renderer draws the raw image
+        // after the fill, but our flattened stream draws it beforehand.
+        if (has_loading_bg && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
             continue;
         }
 
@@ -4472,12 +4505,12 @@ void MoHAARunner::update_2d_overlay() {
                  * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
                  * - SHADER_ADDITIVE: blendFunc add (src+dst) — e.g. glow effects
                  * - SHADER_OPAQUE: no blendFunc in .shader definition.
-                 *   The real GL renderer disables blending for these (stateBits = 0).
-                 *   However, some textures (e.g. hover overlays like multistart_h)
-                 *   have alpha channels for transparency despite being SHADER_OPAQUE.
-                 *   We check the loaded texture: if it has no alpha channel, use
-                 *   BLEND_OPAQUE (force alpha=1, matching GL behaviour). If it does
-                 *   have alpha, use BLEND_MIX so the alpha is respected. */
+                 *   The real GL renderer's Set2DWindow enables alpha blending
+                 *   (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) as the default for all
+                 *   2D draws.  SHADER_OPAQUE textures use SetColor with
+                 *   alpha=1.0, so alpha blending with alpha=1 produces the
+                 *   same result as disabled blending.  Use BLEND_MIX for all
+                 *   2D draws to match the real renderer's default state. */
                 int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
@@ -4488,14 +4521,9 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL_INV;
                         } else if (sp2->transparency == SHADER_ADDITIVE) {
                             draw_blend = BLEND_ADD;
-                        } else if (sp2->transparency == SHADER_OPAQUE) {
-                            // Check if the texture actually has alpha pixels
-                            auto alpha_it = shader_texture_has_alpha.find(shader);
-                            if (alpha_it != shader_texture_has_alpha.end() && !alpha_it->second) {
-                                draw_blend = BLEND_OPAQUE;
-                            }
-                            // else: texture has alpha → BLEND_MIX for hover etc.
                         }
+                        // SHADER_OPAQUE and SHADER_ALPHA_BLEND both use
+                        // BLEND_MIX — the engine's default 2D blend state.
                     }
                 }
                 RID target_ci = get_segment_ci(draw_blend);
@@ -4604,6 +4632,78 @@ void MoHAARunner::update_2d_overlay() {
             if (allow_fullscreen_fills || w * h < vid_area * 0.5f || color[3] < 0.9f) {
                 RID noshader_ci = get_segment_ci(BLEND_MIX);
                 rs->canvas_item_add_rect(noshader_ci, draw_rect, col);
+            }
+        } else if (type == 3 && shader > 0) {
+            // GR_2D_TRIANGLE — textured triangle (compass, needle, circle, spinner)
+            float tri_verts[6], tri_uvs[6];
+            if (Godot_Renderer_Get2DCmdTriVerts(i, tri_verts, tri_uvs)) {
+                Ref<ImageTexture> tex = get_shader_texture(shader);
+                if (tex.is_valid()) {
+                    // Transform triangle vertices from engine coords to viewport
+                    PackedVector2Array points;
+                    PackedVector2Array uvs;
+                    PackedColorArray colors_arr;
+                    points.resize(3);
+                    uvs.resize(3);
+                    colors_arr.resize(3);
+
+                    Color draw_col = col;
+                    // Apply shader stage rgbGen/alphaGen like STRETCHPIC
+                    const char *sname = Godot_Renderer_GetShaderName(shader);
+                    if (sname && sname[0]) {
+                        const GodotShaderProps *sp = Godot_ShaderProps_Find(sname);
+                        if (sp && sp->stage_count > 0) {
+                            for (int st = 0; st < sp->stage_count; st++) {
+                                if (!sp->stages[st].active) continue;
+                                if (sp->stages[st].isLightmap) continue;
+                                const MohaaShaderStage *stg = &sp->stages[st];
+                                if (stg->rgbGen == STAGE_RGBGEN_IDENTITY ||
+                                    stg->rgbGen == STAGE_RGBGEN_IDENTITY_LIGHTING) {
+                                    draw_col.r = draw_col.g = draw_col.b = 1.0f;
+                                } else if (stg->rgbGen == STAGE_RGBGEN_CONST) {
+                                    draw_col.r = stg->rgbConst[0];
+                                    draw_col.g = stg->rgbConst[1];
+                                    draw_col.b = stg->rgbConst[2];
+                                }
+                                if (stg->alphaGen == STAGE_ALPHAGEN_IDENTITY) {
+                                    draw_col.a = 1.0f;
+                                } else if (stg->alphaGen == STAGE_ALPHAGEN_CONST) {
+                                    draw_col.a = stg->alphaConst;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (draw_col.a < 0.001f) continue;
+
+                    for (int v = 0; v < 3; v++) {
+                        float vx = ui_offset_x + tri_verts[v*2+0] * ui_scale_x;
+                        float vy = ui_offset_y + tri_verts[v*2+1] * ui_scale_y;
+                        points.set(v, Vector2(vx, vy));
+                        uvs.set(v, Vector2(tri_uvs[v*2+0], tri_uvs[v*2+1]));
+                        colors_arr.set(v, draw_col);
+                    }
+
+                    // Choose blend mode based on shader transparency
+                    int draw_blend = BLEND_MIX;
+                    if (sname && sname[0]) {
+                        const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
+                        if (sp2) {
+                            if (sp2->transparency == SHADER_MULTIPLICATIVE) {
+                                draw_blend = BLEND_MUL;
+                            } else if (sp2->transparency == SHADER_MULTIPLICATIVE_INV) {
+                                draw_blend = BLEND_MUL_INV;
+                            } else if (sp2->transparency == SHADER_ADDITIVE) {
+                                draw_blend = BLEND_ADD;
+                            }
+                        }
+                    }
+                    RID target_ci = get_segment_ci(draw_blend);
+
+                    RID tex_rid = tex->get_rid();
+                    rs->canvas_item_add_polygon(target_ci, points, colors_arr, uvs, tex_rid);
+                    saw_textured_draw = true;
+                }
             }
         }
     }
@@ -4897,8 +4997,28 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
  * =================================================================== */
 
 void MoHAARunner::update_scoreboard() {
-    /* Hide the overlay when TAB is not held or no map is loaded. */
-    if (!scoreboard_visible || Godot_GetServerState() < 3 /* SS_GAME */) {
+    /*
+     * OPM-parity scoreboard rendering.
+     *
+     * Visibility is driven by the engine's own +scores/-scores pipeline:
+     * CG_ScoresDown_f → UI_ShowScoreboard_f → Godot_SB_SetVisible(1)
+     * CG_ScoresUp_f   → UI_HideScoreboard_f → Godot_SB_SetVisible(0)
+     *
+     * We also track TAB held state on the Godot side as a fallback,
+     * but the engine-driven flag takes priority.
+     */
+    bool show = Godot_SB_IsVisible() || scoreboard_visible;
+
+    if (!show || Godot_GetServerState() < 3 /* SS_GAME */) {
+        if (scoreboard_layer) {
+            scoreboard_layer->set_visible(false);
+        }
+        return;
+    }
+
+    int item_count = Godot_SB_GetItemCount();
+    int col_count  = Godot_SB_GetColumnCount();
+    if (item_count <= 0 || col_count <= 0) {
         if (scoreboard_layer) {
             scoreboard_layer->set_visible(false);
         }
@@ -4925,116 +5045,139 @@ void MoHAARunner::update_scoreboard() {
     RenderingServer *rs = RenderingServer::get_singleton();
     rs->canvas_item_clear(ci);
 
-    /* Viewport size for centering. */
-    Vector2 vp_size = get_viewport()->get_visible_rect().size;
-
-    /* Scoreboard dimensions. */
-    const float board_w = 500.0f;
-    const float row_h   = 24.0f;
-    const float header_h = 32.0f;
-    const float pad      = 12.0f;
-
-    /* Collect active players. */
-    struct PlayerEntry {
-        char name[64];
-        int kills;
-        int deaths;
-        int ping;
-    };
-    PlayerEntry players[64];
-    int num_players = 0;
-    int max_clients = Godot_GetMaxClients();
-    if (max_clients > 64) max_clients = 64;
-
-    for (int i = 0; i < max_clients && num_players < 64; i++) {
-        PlayerEntry pe;
-        if (Godot_GetScoreboardPlayer(i, pe.name, (int)sizeof(pe.name),
-                                       &pe.kills, &pe.deaths, &pe.ping)) {
-            players[num_players++] = pe;
-        }
-    }
-
-    float board_h = header_h + (float)num_players * row_h + pad * 2.0f;
-    float board_x = (vp_size.x - board_w) * 0.5f;
-    float board_y = (vp_size.y - board_h) * 0.5f;
-    if (board_y < 40.0f) board_y = 40.0f;
-
-    /* Background panel. */
-    Rect2 bg_rect(board_x, board_y, board_w, board_h);
-    rs->canvas_item_add_rect(ci, bg_rect, Color(0.0f, 0.0f, 0.0f, 0.7f));
-
-    /* Border. */
-    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y, board_w, 2), Color(0.6f, 0.6f, 0.6f, 0.8f));
-    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y + board_h - 2, board_w, 2), Color(0.6f, 0.6f, 0.6f, 0.8f));
-    rs->canvas_item_add_rect(ci, Rect2(board_x, board_y, 2, board_h), Color(0.6f, 0.6f, 0.6f, 0.8f));
-    rs->canvas_item_add_rect(ci, Rect2(board_x + board_w - 2, board_y, 2, board_h), Color(0.6f, 0.6f, 0.6f, 0.8f));
-
-    /* Use the default theme font. */
+    /* Use the default theme font (Godot doesn't ship RitualFont/Verdana). */
     Ref<Font> font = scoreboard_control->get_theme_default_font();
-    int font_size = 14;
-    int header_font_size = 16;
+    if (font.is_null()) return;
 
-    if (font.is_null()) {
-        return; /* Cannot render text without a font. */
+    /* ── Layout from the engine's capture buffer (virtual 640×480 coords) ── */
+    float sb_x, sb_y, sb_w, sb_h;
+    Godot_SB_GetPosition(&sb_x, &sb_y, &sb_w, &sb_h);
+
+    float bgR, bgG, bgB, bgA;
+    Godot_SB_GetBGColor(&bgR, &bgG, &bgB, &bgA);
+
+    float fcR, fcG, fcB, fcA;
+    Godot_SB_GetFontColor(&fcR, &fcG, &fcB, &fcA);
+
+    /* ── Scale virtual 640×480 to actual viewport ── */
+    Vector2 vp_size = get_viewport()->get_visible_rect().size;
+    float sx = vp_size.x / 640.0f;
+    float sy = vp_size.y / 480.0f;
+
+    /* OPM body font: "verdana-12" → ~12px line height in 640×480.
+       OPM header font: "facfont-20" → ~20px line height.
+       Row height = font line height (no extra padding in UIListCtrl). */
+    const float BODY_FONT_VH   = 10.0f;   /* virtual pixels for body text */
+    const float HEADER_FONT_VH = 14.0f;   /* virtual pixels for column header text */
+    const float ROW_HEIGHT_VH  = 12.0f;   /* body row: verdana-12 line height */
+    const float HEADER_ROW_VH  = 16.0f;   /* column header row height */
+    const float TEXT_PAD_VH    = 1.0f;     /* 1px text offset inside cell (OPM uses 1px) */
+
+    int body_font_size   = (int)(BODY_FONT_VH * sy + 0.5f);
+    int header_font_size = (int)(HEADER_FONT_VH * sy + 0.5f);
+    if (body_font_size < 6) body_font_size = 6;
+    if (header_font_size < 8) header_font_size = 8;
+
+    /* Font for header-marked items (team labels like "Allies - 4 Players").
+       Uses the headerFont ("facfont-20") which is larger. */
+    int section_font_size = (int)(13.0f * sy + 0.5f);
+    float section_row_h   = 15.0f * sy;
+
+    float row_h        = ROW_HEIGHT_VH * sy;
+    float header_row_h = HEADER_ROW_VH * sy;
+
+    /* Board position in screen pixels. */
+    float bx = sb_x * sx;
+    float by = sb_y * sy;
+    float bw = sb_w * sx;
+    float bh = sb_h * sy;
+
+    /* ── Background panel ── */
+    rs->canvas_item_add_rect(ci, Rect2(bx, by, bw, bh), Color(bgR, bgG, bgB, bgA));
+
+    /* ── Column header row — always drawn ── */
+    float cur_y = by;
+    Color font_color(fcR, fcG, fcB, fcA);
+
+    {
+        float cx = bx;
+        for (int c = 0; c < col_count; c++) {
+            float cw = (float)Godot_SB_GetColumnWidth(c) * sx;
+            const char *col_name = Godot_SB_GetColumnName(c);
+            float text_y = cur_y + header_row_h - TEXT_PAD_VH * sy;
+            font->draw_string(ci, Vector2(cx + TEXT_PAD_VH * sx, text_y),
+                              String::utf8(col_name),
+                              HORIZONTAL_ALIGNMENT_LEFT,
+                              cw - TEXT_PAD_VH * sx * 2.0f,
+                              header_font_size, font_color);
+            cx += cw;
+        }
+        cur_y += header_row_h;
     }
 
-    /* Column layout: Name | Kills | Deaths | Ping */
-    float col_name_x   = board_x + pad;
-    float col_kills_x  = board_x + board_w - 200.0f;
-    float col_deaths_x = board_x + board_w - 130.0f;
-    float col_ping_x   = board_x + board_w - 60.0f;
-    float hdr_y = board_y + pad + (float)header_font_size;
+    /* ── Item rows ── */
+    for (int item = 0; item < item_count; item++) {
+        int is_header = Godot_SB_GetItemIsHeader(item);
 
-    /* Header row. */
-    Color hdr_color(0.9f, 0.85f, 0.6f, 1.0f);
-    font->draw_string(ci, Vector2(col_name_x, hdr_y), "Player", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
-    font->draw_string(ci, Vector2(col_kills_x, hdr_y), "Kills", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
-    font->draw_string(ci, Vector2(col_deaths_x, hdr_y), "Deaths", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
-    font->draw_string(ci, Vector2(col_ping_x, hdr_y), "Ping", HORIZONTAL_ALIGNMENT_LEFT, -1, header_font_size, hdr_color);
+        float this_row_h = is_header ? section_row_h : row_h;
+        int   fs         = is_header ? section_font_size : body_font_size;
 
-    /* Separator line below header. */
-    float sep_y = board_y + header_h;
-    rs->canvas_item_add_rect(ci, Rect2(board_x + pad, sep_y, board_w - pad * 2.0f, 1.0f),
-                             Color(0.5f, 0.5f, 0.5f, 0.6f));
+        /* Clip: stop drawing if we exceed the board area. */
+        if (cur_y + this_row_h > by + bh) break;
 
-    /* Player rows. */
-    Color row_color(0.9f, 0.9f, 0.9f, 1.0f);
-    Color alt_bg(0.15f, 0.15f, 0.15f, 0.3f);
-
-    for (int p = 0; p < num_players; p++) {
-        float ry = sep_y + 4.0f + (float)p * row_h;
-        float text_y = ry + (float)font_size + 2.0f;
-
-        /* Alternating row highlight. */
-        if (p % 2 == 1) {
-            rs->canvas_item_add_rect(ci, Rect2(board_x + 2, ry, board_w - 4, row_h), alt_bg);
+        /* Per-item background colour. */
+        float brR, brG, brB, brA;
+        Godot_SB_GetItemBackColor(item, &brR, &brG, &brB, &brA);
+        if (brA > 0.0f) {
+            rs->canvas_item_add_rect(ci, Rect2(bx, cur_y, bw, this_row_h),
+                                     Color(brR, brG, brB, brA));
         }
 
-        font->draw_string(ci, Vector2(col_name_x, text_y),
-                          String::utf8(players[p].name),
-                          HORIZONTAL_ALIGNMENT_LEFT, col_kills_x - col_name_x - 8.0f,
-                          font_size, row_color);
-        font->draw_string(ci, Vector2(col_kills_x, text_y),
-                          String::num_int64(players[p].kills),
-                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
-        font->draw_string(ci, Vector2(col_deaths_x, text_y),
-                          String::num_int64(players[p].deaths),
-                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
-        if (players[p].ping >= 0) {
-            font->draw_string(ci, Vector2(col_ping_x, text_y),
-                              String::num_int64(players[p].ping),
-                              HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+        /* Per-item text colour. */
+        float trR, trG, trB, trA;
+        Godot_SB_GetItemTextColor(item, &trR, &trG, &trB, &trA);
+        Color text_color(trR, trG, trB, trA);
+
+        if (is_header) {
+            /* Section header: first non-empty string spans the full width.
+               (e.g. "Allies - 4 Players", "Spectators") */
+            const char *hdr_text = "";
+            for (int f = 0; f < col_count && f < 8; f++) {
+                const char *s = Godot_SB_GetItemString(item, f);
+                if (s && s[0] != '\0') {
+                    hdr_text = s;
+                    break;
+                }
+            }
+            float text_y = cur_y + this_row_h - TEXT_PAD_VH * sy;
+            font->draw_string(ci, Vector2(bx + TEXT_PAD_VH * sx, text_y),
+                              String::utf8(hdr_text),
+                              HORIZONTAL_ALIGNMENT_LEFT,
+                              bw - TEXT_PAD_VH * sx * 2.0f,
+                              fs, text_color);
+
+            /* 2px underline in backColor below the section header row. */
+            float line_h = 2.0f * sy;
+            rs->canvas_item_add_rect(ci,
+                Rect2(bx, cur_y + this_row_h - line_h, bw, line_h),
+                Color(brR, brG, brB, (brA > 0.0f) ? brA : 0.5f));
         } else {
-            font->draw_string(ci, Vector2(col_ping_x, text_y), "---",
-                              HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, row_color);
+            /* Regular player row: draw each column's string. */
+            float cx = bx;
+            for (int c = 0; c < col_count && c < 8; c++) {
+                float cw = (float)Godot_SB_GetColumnWidth(c) * sx;
+                const char *s = Godot_SB_GetItemString(item, c);
+                float text_y = cur_y + this_row_h - TEXT_PAD_VH * sy;
+                font->draw_string(ci, Vector2(cx + TEXT_PAD_VH * sx, text_y),
+                                  String::utf8(s),
+                                  HORIZONTAL_ALIGNMENT_LEFT,
+                                  cw - TEXT_PAD_VH * sx * 2.0f,
+                                  fs, text_color);
+                cx += cw;
+            }
         }
-    }
 
-    if (num_players == 0) {
-        float empty_y = sep_y + 4.0f + (float)font_size + 2.0f;
-        font->draw_string(ci, Vector2(col_name_x, empty_y), "No players",
-                          HORIZONTAL_ALIGNMENT_LEFT, -1, font_size,
-                          Color(0.6f, 0.6f, 0.6f, 0.8f));
+        cur_y += this_row_h;
     }
 }
 
