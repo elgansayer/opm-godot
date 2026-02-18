@@ -26,6 +26,7 @@ enum GodotShaderTransparency {
     SHADER_ADDITIVE,         /* blendFunc add / GL_ONE GL_ONE → BLEND_MODE_ADD */
     SHADER_MULTIPLICATIVE,   /* blendFunc filter / GL_DST_COLOR GL_ZERO → BLEND_MODE_MUL */
     SHADER_MULTIPLICATIVE_INV, /* GL_ZERO GL_ONE_MINUS_SRC_COLOR → dst*(1-src) */
+    SHADER_ALPHA_BLEND_INV,  /* GL_ONE_MINUS_SRC_ALPHA GL_SRC_ALPHA → src*(1-a)+dst*a (inverted alpha) */
 };
 
 /* ── Cull mode ── */

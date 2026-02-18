@@ -33,6 +33,28 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include <chrono>
 
+#ifdef GODOT_GDEXTENSION
+// Scoreboard capture hooks — implemented in godot_scoreboard.c
+extern "C" {
+    void Godot_SB_SetVisible(int visible);
+    void Godot_SB_SetMenuName(const char *name);
+    void Godot_SB_ResetColumns(void);
+    void Godot_SB_SetColumn(int index, const char *name, int width);
+    void Godot_SB_SetLayout(float x, float y, float w, float h,
+                            float bgR, float bgG, float bgB, float bgA,
+                            float fR, float fG, float fB, float fA,
+                            int drawHeader);
+    void Godot_SB_SetItem(int index,
+                          const char *s1, const char *s2,
+                          const char *s3, const char *s4,
+                          const char *s5, const char *s6,
+                          const char *s7, const char *s8,
+                          const float *textColor, const float *backColor,
+                          int isHeader);
+    void Godot_SB_DeleteItemsAfter(int maxIndex);
+}
+#endif
+
 typedef struct {
     float             fadetime;
     float             starttime;
@@ -4440,6 +4462,10 @@ void UI_ShowScoreboard_f(const char *pszMenuName)
         if (scoreboardlist && scoreboardlist->IsVisible()) {
             scoreboardlist->setShow(false);
         }
+#ifdef GODOT_GDEXTENSION
+        // Godot capture: scoreboard hidden because a menu is active.
+        Godot_SB_SetVisible(0);
+#endif
     } else {
         if (scoreboard_menuname.length()) {
             scoreboard_menu = menuManager.FindMenu(scoreboard_menuname);
@@ -4456,6 +4482,13 @@ void UI_ShowScoreboard_f(const char *pszMenuName)
         if (scoreboardlist && !scoreboardlist->IsVisible()) {
             scoreboardlist->setShow(true);
         }
+#ifdef GODOT_GDEXTENSION
+        // Godot capture: scoreboard shown.
+        Godot_SB_SetVisible(1);
+        if (scoreboard_menuname.length()) {
+            Godot_SB_SetMenuName(scoreboard_menuname.c_str());
+        }
+#endif
     }
 }
 
@@ -4476,6 +4509,10 @@ void UI_HideScoreboard_f(void)
             scoreboard_menu->ForceHide();
         }
     }
+#ifdef GODOT_GDEXTENSION
+    // Godot capture: scoreboard hidden.
+    Godot_SB_SetVisible(0);
+#endif
 }
 
 class ScoreboardListItem : public UIListCtrlItem
@@ -4602,6 +4639,33 @@ void UI_CreateScoreboard(void)
     scoreboardlist->SetUseScrollBar(false);
     scoreboardlist->SetDrawHeader(scoreboard_header);
     scoreboardlist->setHeaderFont("facfont-20");
+
+#ifdef GODOT_GDEXTENSION
+    // Godot capture: store column definitions and layout for Godot-side rendering.
+    {
+        float sb_x, sb_y, sb_w, sb_h;
+        float sb_bgR, sb_bgG, sb_bgB, sb_bgA;
+        float sb_fR, sb_fG, sb_fB, sb_fA;
+        int   sb_colW;
+        const char *sb_colName;
+
+        cge->CG_GetScoreBoardPosition(&sb_x, &sb_y, &sb_w, &sb_h);
+        cge->CG_GetScoreBoardColor(&sb_bgR, &sb_bgG, &sb_bgB, &sb_bgA);
+        cge->CG_GetScoreBoardFontColor(&sb_fR, &sb_fG, &sb_fB, &sb_fA);
+
+        Godot_SB_SetLayout(sb_x, sb_y, sb_w, sb_h,
+                           sb_bgR, sb_bgG, sb_bgB, sb_bgA,
+                           sb_fR, sb_fG, sb_fB, sb_fA,
+                           cge->CG_GetScoreBoardDrawHeader());
+
+        Godot_SB_ResetColumns();
+        for (int ci = 0; ci < 8; ci++) {
+            sb_colName = cge->CG_GetColumnName(ci, &sb_colW);
+            if (!sb_colName) break;
+            Godot_SB_SetColumn(ci, sb_colName, sb_colW);
+        }
+    }
+#endif
 }
 
 /*
@@ -4699,6 +4763,14 @@ void UI_SetScoreBoardItem(
             pItem->SetTitleItem(bIsHeader);
         }
     }
+
+#ifdef GODOT_GDEXTENSION
+    // Godot capture: copy the item data to the scoreboard buffer.
+    Godot_SB_SetItem(iItemNumber,
+                     pszData1, pszData2, pszData3, pszData4,
+                     pszData5, pszData6, pszData7, pszData8,
+                     pTextColor, pBackColor, bIsHeader);
+#endif
 }
 
 /*
@@ -4711,6 +4783,10 @@ void UI_DeleteScoreBoardItems(int iMaxIndex)
     while (iMaxIndex + 1 <= scoreboardlist->getNumItems()) {
         scoreboardlist->DeleteItem(scoreboardlist->getNumItems());
     }
+#ifdef GODOT_GDEXTENSION
+    // Godot capture: trim captured items to match.
+    Godot_SB_DeleteItemsAfter(iMaxIndex);
+#endif
 }
 
 /*

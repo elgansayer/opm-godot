@@ -187,6 +187,7 @@ private:
     bool scoreboard_visible = false;       // True while TAB is held
     CanvasLayer *scoreboard_layer = nullptr;
     Control *scoreboard_control = nullptr;
+    RID sb_map_preview_ci;                 // Child canvas item for map preview (alpha_inv material)
 
     // Render quality state — cached for getters (0=low, 1=medium, 2=high, 3=ultra)
     int texture_quality = 2;    // default high
@@ -318,6 +319,7 @@ private:
     static const int BLEND_MUL_INV = 2;
     static const int BLEND_OPAQUE = 3;
     static const int BLEND_ADD = 4;
+    static const int BLEND_ALPHA_INV = 5;
     struct CanvasSegment {
         RID item;
         int blend_mode;
@@ -331,6 +333,8 @@ private:
     Ref<ShaderMaterial> opaque_mix_material;
     Ref<Shader> opaque_mix_shader;
     Ref<CanvasItemMaterial> add_canvas_material;
+    Ref<Shader> alpha_inv_shader;
+    Ref<ShaderMaterial> alpha_inv_material;
 
     // Full-screen gamma overlay — replicates GLimp_SetGamma hardware gamma ramp.
     // Applied at CanvasLayer 200 (above HUD at 100) so it affects both 3D and 2D.

@@ -90,6 +90,9 @@ static GodotShaderTransparency classify_blend(const char *src, const char *dst) 
     if (!Q_stricmp(src, "GL_ZERO") && !Q_stricmp(dst, "GL_ONE_MINUS_SRC_COLOR"))
         return SHADER_MULTIPLICATIVE_INV;
 
+    /* GL_ONE_MINUS_SRC_ALPHA GL_SRC_ALPHA → inverted alpha blend */
+    if (!Q_stricmp(src, "GL_ONE_MINUS_SRC_ALPHA") && !Q_stricmp(dst, "GL_SRC_ALPHA"))
+        return SHADER_ALPHA_BLEND_INV;
     /* Anything with GL_SRC_ALPHA as source is alpha-blended */
     if (!Q_stricmp(src, "GL_SRC_ALPHA"))
         return SHADER_ALPHA_BLEND;
@@ -112,7 +115,7 @@ static GodotShaderTransparency classify_blend_factors(MohaaBlendFactor src,
     if (src == BLEND_SRC_ALPHA && dst == BLEND_ONE_MINUS_SRC_ALPHA)
         return SHADER_ALPHA_BLEND;
     if (src == BLEND_ONE_MINUS_SRC_ALPHA && dst == BLEND_SRC_ALPHA)
-        return SHADER_ALPHA_BLEND;
+        return SHADER_ALPHA_BLEND_INV;
     if (src == BLEND_ONE && dst == BLEND_ONE)
         return SHADER_ADDITIVE;
     if (src == BLEND_SRC_ALPHA && dst == BLEND_ONE)

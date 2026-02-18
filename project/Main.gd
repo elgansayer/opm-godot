@@ -57,7 +57,7 @@ func _ready():
 		runner.map_unloaded.connect(_on_map_unloaded)
 		runner.engine_shutdown_requested.connect(_on_engine_shutdown)
 		
-		runner.execute_command("exec server.cfg")
+		# runner.execute_command("exec server.cfg")
 		
 		# server.cfg already contains a map command, so skip the
 		# duplicate load_map that _on_load_timer would issue.

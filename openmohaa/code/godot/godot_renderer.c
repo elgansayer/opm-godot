@@ -452,8 +452,9 @@ static int GR_GetShaderHeight( qhandle_t hShader );
 static unsigned char gr_bgData[GR_MAX_BG_PIXELS];
 static int gr_bgCols   = 0;
 static int gr_bgRows   = 0;
-static int gr_bgBgr    = 0;
-static int gr_bgActive = 0;
+static int gr_bgBgr      = 0;
+static int gr_bgActive   = 0;
+static int gr_bgCmdIndex = 0;   /* 2D cmd count when GR_DrawBackground was called */
 
 /* -------------------------------------------------------------------
  *  Frame/render timing (Phase 37 perf)
@@ -744,6 +745,7 @@ static void GR_ClearScene( void )
     gr_numTerrainMarks     = 0;
     gr_numTerrainMarkVerts = 0;
     gr_bgActive     = 0;
+    gr_bgCmdIndex   = 0;
     gr_mainSceneRendered = 0;
 
     /* Advance per-frame skeleton pose index so GR_UpdatePoseInternal
@@ -1198,10 +1200,11 @@ static void GR_DrawBackground( int cols, int rows, int bgr, uint8_t *data )
         return;
     }
     memcpy( gr_bgData, data, totalBytes );
-    gr_bgCols   = cols;
-    gr_bgRows   = rows;
-    gr_bgBgr    = bgr;
-    gr_bgActive = 1;
+    gr_bgCols     = cols;
+    gr_bgRows     = rows;
+    gr_bgBgr      = bgr;
+    gr_bgActive   = 1;
+    gr_bgCmdIndex = gr_num2DCmds;  /* position in 2D stream where bg should render */
 }
 
 static void GR_DrawBox( float x, float y, float w, float h )
@@ -2836,6 +2839,11 @@ int Godot_Renderer_GetBackground( int *cols, int *rows, int *bgr,
     if ( bgr )  *bgr  = gr_bgBgr;
     if ( data ) *data  = gr_bgData;
     return 1;
+}
+
+int Godot_Renderer_GetBackgroundCmdIndex( void )
+{
+    return gr_bgCmdIndex;
 }
 
 int Godot_Renderer_GetDlightCount( void )

@@ -318,6 +318,7 @@ extern "C" {
     // Phase 33: Background image accessor — from godot_renderer.c
     int   Godot_Renderer_GetBackground(int *cols, int *rows, int *bgr,
                                        const unsigned char **data);
+    int   Godot_Renderer_GetBackgroundCmdIndex(void);
 
     // Phase 59: UI system — from godot_ui_system.cpp / godot_ui_input.cpp
     // Fallback declarations in case headers are absent:
@@ -358,6 +359,7 @@ extern "C" {
     void        Godot_SB_GetBGColor(float *r, float *g, float *b, float *a);
     void        Godot_SB_GetFontColor(float *r, float *g, float *b, float *a);
     int         Godot_SB_GetDrawHeader(void);
+    const char *Godot_SB_GetMenuName(void);
 }
 
 // ──────────────────────────────────────────────
@@ -548,6 +550,12 @@ MoHAARunner::~MoHAARunner() {
 #ifdef HAS_FRUSTUM_CULL_MODULE
     Godot_FrustumCull_Shutdown();
 #endif
+
+    /* Free scoreboard map preview child canvas item. */
+    if (sb_map_preview_ci.is_valid()) {
+        RenderingServer::get_singleton()->free_rid(sb_map_preview_ci);
+        sb_map_preview_ci = RID();
+    }
 
     g_godot_ready = false;
 }
@@ -3769,8 +3777,39 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
             }
 
             if (err == OK && !img->is_empty()) {
+                // Fix dead alpha: 32-bit TGA files sometimes have an unused
+                // alpha channel filled with zeros.  The real renderer
+                // ignores texture alpha for opaque shaders (GL_BLEND is
+                // disabled via GLS_DEFAULT stateBits), but our Godot canvas
+                // always blends.  Convert all-zero-alpha RGBA8 to RGB8 so
+                // the texture renders fully opaque.
+                if (img->get_format() == Image::FORMAT_RGBA8) {
+                    PackedByteArray imgdata = img->get_data();
+                    int pixel_count = img->get_width() * img->get_height();
+                    const uint8_t *pix = imgdata.ptr();
+                    bool all_zero_alpha = true;
+                    for (int p = 0; p < pixel_count && all_zero_alpha; p++) {
+                        if (pix[p * 4 + 3] > 0) {
+                            all_zero_alpha = false;
+                        }
+                    }
+                    if (all_zero_alpha) {
+                        img->convert(Image::FORMAT_RGB8);
+                    }
+                }
                 if (out_has_alpha) {
                     *out_has_alpha = (img->detect_alpha() != Image::ALPHA_NONE);
+                }
+                // Diagnostic: log texture format/alpha for levelshot shaders
+                if (name && (strstr(name, "mohdm") || strstr(name, "levelshot"))) {
+                    UtilityFunctions::print(
+                        String("[MoHAA][TEX-DIAG] shader='") + String(name) +
+                        String("' path='") + String(path) +
+                        String("' format=") + String::num_int64(img->get_format()) +
+                        String(" size=") + String::num_int64(img->get_width()) +
+                        String("x") + String::num_int64(img->get_height()) +
+                        String(" detect_alpha=") + String::num_int64(img->detect_alpha()) +
+                        String(" has_alpha=") + String(*out_has_alpha ? "true" : "false"));
                 }
                 img->generate_mipmaps();
                 Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
@@ -4137,7 +4176,11 @@ void MoHAARunner::update_2d_overlay() {
             "shader_type canvas_item;\n"
             "void fragment() {\n"
             "    vec4 tex = texture(TEXTURE, UV);\n"
-            "    COLOR = vec4(tex.rgb * COLOR.rgb, 1.0);\n"
+            "    // Ignore texture alpha (replicates GL_BLEND disabled for\n"
+            "    // GLS_DEFAULT/SHADER_OPAQUE), but preserve COLOR.a from\n"
+            "    // SetColor so hover/UI highlights with alpha < 1 still\n"
+            "    // composite correctly on the canvas.\n"
+            "    COLOR = vec4(tex.rgb * COLOR.rgb, COLOR.a);\n"
             "}\n"
         );
         opaque_mix_material.instantiate();
@@ -4146,6 +4189,23 @@ void MoHAARunner::update_2d_overlay() {
     if (add_canvas_material.is_null()) {
         add_canvas_material.instantiate();
         add_canvas_material->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+    }
+    if (alpha_inv_material.is_null()) {
+        alpha_inv_shader.instantiate();
+        alpha_inv_shader->set_code(
+            "shader_type canvas_item;\n"
+            "void fragment() {\n"
+            "    vec4 tex = texture(TEXTURE, UV);\n"
+            "    // Pre-composite two-stage GL pipeline:\n"
+            "    // Stage 0: $whiteimage (opaque white fill)\n"
+            "    // Stage 1: texture with GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA\n"
+            "    // result = tex.rgb * (1.0 - tex.a) + white * tex.a\n"
+            "    vec3 composited = tex.rgb * (1.0 - tex.a) + vec3(1.0) * tex.a;\n"
+            "    COLOR = vec4(composited * COLOR.rgb, COLOR.a);\n"
+            "}\n"
+        );
+        alpha_inv_material.instantiate();
+        alpha_inv_material->set_shader(alpha_inv_shader);
     }
 
     // Clear all existing segments
@@ -4185,6 +4245,8 @@ void MoHAARunner::update_2d_overlay() {
                 rs->canvas_item_set_material(seg.item, opaque_mix_material->get_rid());
             } else if (blend == BLEND_ADD) {
                 rs->canvas_item_set_material(seg.item, add_canvas_material->get_rid());
+            } else if (blend == BLEND_ALPHA_INV) {
+                rs->canvas_item_set_material(seg.item, alpha_inv_material->get_rid());
             }
             seg.blend_mode = blend;
         }
@@ -4194,19 +4256,20 @@ void MoHAARunner::update_2d_overlay() {
         return seg.item;
     };
 
-    // Track whether a loading background image (map preview) was drawn.
-    // When present, fullscreen fills must be suppressed so the preview
-    // is visible underneath the loading HUD elements.
+    // Phase 58: Prepare loading background image (map preview from
+    // RE_DrawStretchRaw).  We build a texture here but DON'T draw it yet.
+    // It will be drawn inside the 2D command loop at the correct Z-position
+    // (bg_cmd_index) so that widget backgrounds render UNDER the preview
+    // and the photo frame / text / loading bar render ON TOP.
+    static Ref<ImageTexture> loading_bg_tex;
+    static Ref<Image> loading_bg_img;
     bool has_loading_bg = false;
-
-    // Phase 58: Draw captured background image during loading/screens
+    int  bg_cmd_index   = 0;
     {
         int cols = 0, rows = 0, bgr = 0;
         const unsigned char *bg_data = nullptr;
         if (Godot_Renderer_GetBackground(&cols, &rows, &bgr, &bg_data) &&
             cols > 0 && rows > 0 && bg_data && !Godot_Renderer_IsWorldMapLoaded()) {
-            static Ref<ImageTexture> *bg_tex = new Ref<ImageTexture>();
-            static Ref<Image> *bg_img = new Ref<Image>();
 
             PackedByteArray pixels;
             pixels.resize(cols * rows * 4);
@@ -4227,25 +4290,18 @@ void MoHAARunner::update_2d_overlay() {
                 }
             }
 
-            *bg_img = Image::create_from_data(cols, rows, false, Image::FORMAT_RGBA8, pixels);
-            if (bg_img->is_valid()) {
-                if (bg_tex->is_null()) {
-                    *bg_tex = ImageTexture::create_from_image(*bg_img);
+            loading_bg_img = Image::create_from_data(cols, rows, false, Image::FORMAT_RGBA8, pixels);
+            if (loading_bg_img.is_valid()) {
+                if (loading_bg_tex.is_null()) {
+                    loading_bg_tex = ImageTexture::create_from_image(loading_bg_img);
                 } else {
-                    (*bg_tex)->update(*bg_img);
+                    loading_bg_tex->update(loading_bg_img);
                 }
             }
 
-            if (bg_tex->is_valid()) {
-                // Use actual viewport size for fullscreen background
-                Vector2 vp = hud_control->get_size();
-                if (vp.x < 1.0f || vp.y < 1.0f) {
-                    Rect2 visible_rect = get_viewport()->get_visible_rect();
-                    vp = visible_rect.size;
-                }
-                Rect2 full(0.0f, 0.0f, vp.x, vp.y);
-                rs->canvas_item_add_texture_rect(ci, full, (*bg_tex)->get_rid());
+            if (loading_bg_tex.is_valid()) {
                 has_loading_bg = true;
+                bg_cmd_index = Godot_Renderer_GetBackgroundCmdIndex();
             }
         }
     }
@@ -4336,14 +4392,7 @@ void MoHAARunner::update_2d_overlay() {
             continue;
         }
 
-        // When the loading screen background image (map preview from
-        // RE_DrawStretchRaw) was drawn, suppress fullscreen opaque fills.
-        // These fills (widget white bg + UI_ClearBackground black) would
-        // hide the map preview.  The real renderer draws the raw image
-        // after the fill, but our flattened stream draws it beforehand.
-        if (has_loading_bg && type == 1 && w * h > vid_area * 0.5f && color[3] > 0.9f) {
-            continue;
-        }
+        // no-op: loading bg fill suppression removed — bg now drawn at correct Z position
 
         // Scale from engine coords to actual viewport (with aspect correction)
         Rect2 rect(ui_offset_x + x * ui_scale_x, ui_offset_y + y * ui_scale_y,
@@ -4501,16 +4550,14 @@ void MoHAARunner::update_2d_overlay() {
                 if (draw_col.a < 0.001f) continue;
 
                 /* Choose blend mode based on shader transparency.
-                 * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src) — e.g. "shadow"
-                 * - SHADER_MULTIPLICATIVE_INV: dst*(1-src) — e.g. "pmshadow"
-                 * - SHADER_ADDITIVE: blendFunc add (src+dst) — e.g. glow effects
-                 * - SHADER_OPAQUE: no blendFunc in .shader definition.
-                 *   The real GL renderer's Set2DWindow enables alpha blending
-                 *   (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) as the default for all
-                 *   2D draws.  SHADER_OPAQUE textures use SetColor with
-                 *   alpha=1.0, so alpha blending with alpha=1 produces the
-                 *   same result as disabled blending.  Use BLEND_MIX for all
-                 *   2D draws to match the real renderer's default state. */
+                 * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src)
+                 * - SHADER_MULTIPLICATIVE_INV: dst*(1-src)
+                 * - SHADER_ADDITIVE: blendFunc add (src+dst)
+                 * - SHADER_OPAQUE: the real renderer disables GL_BLEND
+                 *   (GLS_DEFAULT stateBits), making texture alpha
+                 *   irrelevant.  BLEND_OPAQUE ignores texture alpha
+                 *   but preserves SetColor alpha (COLOR.a).
+                 * - SHADER_ALPHA_BLEND: standard alpha blending. */
                 int draw_blend = BLEND_MIX;
                 if (sname && sname[0]) {
                     const GodotShaderProps *sp2 = Godot_ShaderProps_Find(sname);
@@ -4521,9 +4568,32 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_MUL_INV;
                         } else if (sp2->transparency == SHADER_ADDITIVE) {
                             draw_blend = BLEND_ADD;
+                        } else if (sp2->transparency == SHADER_ALPHA_BLEND_INV) {
+                            draw_blend = BLEND_ALPHA_INV;
+                        } else if (sp2->transparency == SHADER_OPAQUE) {
+                            /* Real renderer: GLS_DEFAULT → GL_BLEND disabled →
+                             * texture alpha irrelevant.  BLEND_OPAQUE shader
+                             * discards tex.a but keeps COLOR.a (SetColor alpha)
+                             * so hover highlights still work. */
+                            draw_blend = BLEND_OPAQUE;
+                            /* Multi-stage shader: check the actual texture stage
+                             * for a custom blendFunc that overrides the opaque
+                             * default (e.g. GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA). */
+                            if (sp2->stage_count > 1) {
+                                for (int st = 0; st < sp2->stage_count; st++) {
+                                    if (sp2->stages[st].isLightmap) continue;
+                                    const char *sm = sp2->stages[st].map;
+                                    if (!sm[0]) continue;
+                                    if (strcmp(sm, "$lightmap") == 0) continue;
+                                    if (strcmp(sm, "$whiteimage") == 0) continue;
+                                    if (sp2->stages[st].blendSrc == BLEND_ONE_MINUS_SRC_ALPHA &&
+                                        sp2->stages[st].blendDst == BLEND_SRC_ALPHA) {
+                                        draw_blend = BLEND_ALPHA_INV;
+                                    }
+                                    break;
+                                }
+                            }
                         }
-                        // SHADER_OPAQUE and SHADER_ALPHA_BLEND both use
-                        // BLEND_MIX — the engine's default 2D blend state.
                     }
                 }
                 RID target_ci = get_segment_ci(draw_blend);
@@ -4695,6 +4765,24 @@ void MoHAARunner::update_2d_overlay() {
                                 draw_blend = BLEND_MUL_INV;
                             } else if (sp2->transparency == SHADER_ADDITIVE) {
                                 draw_blend = BLEND_ADD;
+                            } else if (sp2->transparency == SHADER_ALPHA_BLEND_INV) {
+                                draw_blend = BLEND_ALPHA_INV;
+                            } else if (sp2->transparency == SHADER_OPAQUE) {
+                                draw_blend = BLEND_OPAQUE;
+                                if (sp2->stage_count > 1) {
+                                    for (int st = 0; st < sp2->stage_count; st++) {
+                                        if (sp2->stages[st].isLightmap) continue;
+                                        const char *sm = sp2->stages[st].map;
+                                        if (!sm[0]) continue;
+                                        if (strcmp(sm, "$lightmap") == 0) continue;
+                                        if (strcmp(sm, "$whiteimage") == 0) continue;
+                                        if (sp2->stages[st].blendSrc == BLEND_ONE_MINUS_SRC_ALPHA &&
+                                            sp2->stages[st].blendDst == BLEND_SRC_ALPHA) {
+                                            draw_blend = BLEND_ALPHA_INV;
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -4991,21 +5079,39 @@ Ref<AudioStream> MoHAARunner::load_wav_from_vfs(int sfxHandle) {
 /* ===================================================================
  *  Scoreboard overlay — shown while TAB is held.
  *
- *  Reads player data (name, kills, deaths, ping) from the server via
- *  the Godot_GetScoreboardPlayer accessor and draws a semi-transparent
- *  panel using the RenderingServer 2D API.
+ *  Replicates the layout defined in the game's .urc menu files
+ *  (DM_Scoreboard, DM_Round_Scoreboard, Obj_Scoreboard, etc.)
+ *  plus the UIListCtrl player list.  The .urc provides static chrome
+ *  (backdrop panel, column header backgrounds, map preview image,
+ *  objective text labels) while the UIListCtrl provides dynamic
+ *  per-player row data captured via the Godot_SB_* buffer.
+ *
+ *  All coordinates are in virtual 640×480 space, scaled to the actual
+ *  viewport size at render time.
  * =================================================================== */
+
+/* Helper: draw an INDENT_BORDER style rect (recessed 3D look).
+ * Top+left edges get a darker line, bottom+right get a lighter line. */
+static void draw_indent_border_rect(RenderingServer *rs, RID ci,
+    float x, float y, float w, float h, const Color &bg)
+{
+    /* Fill */
+    rs->canvas_item_add_rect(ci, Rect2(x, y, w, h), bg);
+    /* Shadow (top + left edges) */
+    Color shadow(0.0f, 0.0f, 0.0f, 0.9f);
+    rs->canvas_item_add_rect(ci, Rect2(x, y, w, 1), shadow);
+    rs->canvas_item_add_rect(ci, Rect2(x, y, 1, h), shadow);
+    /* Highlight (bottom + right edges) */
+    Color highlight(0.3f, 0.3f, 0.3f, 0.5f);
+    rs->canvas_item_add_rect(ci, Rect2(x, y + h - 1, w, 1), highlight);
+    rs->canvas_item_add_rect(ci, Rect2(x + w - 1, y, 1, h), highlight);
+}
 
 void MoHAARunner::update_scoreboard() {
     /*
-     * OPM-parity scoreboard rendering.
-     *
      * Visibility is driven by the engine's own +scores/-scores pipeline:
      * CG_ScoresDown_f → UI_ShowScoreboard_f → Godot_SB_SetVisible(1)
      * CG_ScoresUp_f   → UI_HideScoreboard_f → Godot_SB_SetVisible(0)
-     *
-     * We also track TAB held state on the Godot side as a fallback,
-     * but the engine-driven flag takes priority.
      */
     bool show = Godot_SB_IsVisible() || scoreboard_visible;
 
@@ -5045,9 +5151,36 @@ void MoHAARunner::update_scoreboard() {
     RenderingServer *rs = RenderingServer::get_singleton();
     rs->canvas_item_clear(ci);
 
+    /* Also clear the map preview child canvas item if it exists. */
+    if (sb_map_preview_ci.is_valid()) {
+        rs->canvas_item_clear(sb_map_preview_ci);
+    }
+
     /* Use the default theme font (Godot doesn't ship RitualFont/Verdana). */
     Ref<Font> font = scoreboard_control->get_theme_default_font();
     if (font.is_null()) return;
+
+    /* ── Scale virtual 640×480 to actual viewport ── */
+    Vector2 vp_size = get_viewport()->get_visible_rect().size;
+    float sx = vp_size.x / 640.0f;
+    float sy = vp_size.y / 480.0f;
+
+    /* Font sizes matching OPM's verdana-12 (body) and facfont-20 (headers). */
+    const float BODY_FONT_VH   = 10.0f;
+    const float SECTION_FONT_VH = 13.0f;
+    const float HEADER_FONT_VH = 14.0f;
+    const float ROW_HEIGHT_VH  = 12.0f;
+    const float SECTION_ROW_VH = 15.0f;
+    const float TEXT_PAD_VH    = 1.0f;
+
+    int body_font_size   = (int)(BODY_FONT_VH * sy + 0.5f);
+    int header_font_size = (int)(HEADER_FONT_VH * sy + 0.5f);
+    int section_font_size = (int)(SECTION_FONT_VH * sy + 0.5f);
+    if (body_font_size < 6) body_font_size = 6;
+    if (header_font_size < 8) header_font_size = 8;
+
+    float row_h      = ROW_HEIGHT_VH * sy;
+    float section_h  = SECTION_ROW_VH * sy;
 
     /* ── Layout from the engine's capture buffer (virtual 640×480 coords) ── */
     float sb_x, sb_y, sb_w, sb_h;
@@ -5058,68 +5191,88 @@ void MoHAARunner::update_scoreboard() {
 
     float fcR, fcG, fcB, fcA;
     Godot_SB_GetFontColor(&fcR, &fcG, &fcB, &fcA);
+    Color font_color(fcR, fcG, fcB, fcA);
 
-    /* ── Scale virtual 640×480 to actual viewport ── */
-    Vector2 vp_size = get_viewport()->get_visible_rect().size;
-    float sx = vp_size.x / 640.0f;
-    float sy = vp_size.y / 480.0f;
+    /* Determine which .urc layout to use.  The menu name was captured by
+     * Godot_SB_SetMenuName() in UI_ShowScoreboard_f(). */
+    const char *menu_name = Godot_SB_GetMenuName();
+    bool is_obj = (menu_name && strcmp(menu_name, "Obj_Scoreboard") == 0);
 
-    /* OPM body font: "verdana-12" → ~12px line height in 640×480.
-       OPM header font: "facfont-20" → ~20px line height.
-       Row height = font line height (no extra padding in UIListCtrl). */
-    const float BODY_FONT_VH   = 10.0f;   /* virtual pixels for body text */
-    const float HEADER_FONT_VH = 14.0f;   /* virtual pixels for column header text */
-    const float ROW_HEIGHT_VH  = 12.0f;   /* body row: verdana-12 line height */
-    const float HEADER_ROW_VH  = 16.0f;   /* column header row height */
-    const float TEXT_PAD_VH    = 1.0f;     /* 1px text offset inside cell (OPM uses 1px) */
+    /* ═══════════════════════════════════════════════════════════════
+     *  .urc chrome — matches DM_Scoreboard.urc / DM_Round_Scoreboard.urc
+     *  (or Obj_Scoreboard.urc when is_obj is true)
+     *
+     *  All positions are hardcoded from the .urc files extracted from
+     *  the game's pk3 archives.  The .urc uses virtualres 1 (640×480).
+     * ═══════════════════════════════════════════════════════════════ */
 
-    int body_font_size   = (int)(BODY_FONT_VH * sy + 0.5f);
-    int header_font_size = (int)(HEADER_FONT_VH * sy + 0.5f);
-    if (body_font_size < 6) body_font_size = 6;
-    if (header_font_size < 8) header_font_size = 8;
+    /* ── 1. Right-side backdrop panel ──
+     * .urc "backdroppiece": rect 416 32 192 416, bgcolor 0,0,0,0.70 */
+    {
+        float bx = 416.0f * sx, by2 = 32.0f * sy;
+        float bw = 192.0f * sx, bh2 = 416.0f * sy;
+        rs->canvas_item_add_rect(ci, Rect2(bx, by2, bw, bh2),
+                                 Color(0.0f, 0.0f, 0.0f, 0.70f));
+    }
 
-    /* Font for header-marked items (team labels like "Allies - 4 Players").
-       Uses the headerFont ("facfont-20") which is larger. */
-    int section_font_size = (int)(13.0f * sy + 0.5f);
-    float section_row_h   = 15.0f * sy;
+    /* ── 2. Column header backgrounds ──
+     * .urc column labels at y=32, height=24, bgcolor 0,0,0,0.70, INDENT_BORDER
+     * " Name"    rect(32,  32, 128, 24)
+     * " Kills"   rect(160, 32, 64,  24)
+     * " Deaths"  rect(224, 32, 64,  24)  (or "Total" for round/obj modes)
+     * " Time"    rect(288, 32, 64,  24)
+     * " Ping"    rect(352, 32, 64,  24)  */
+    {
+        Color hdr_bg(0.0f, 0.0f, 0.0f, 0.70f);
+        struct { float x, w; const char *label; } hdrs[] = {
+            { 32.0f,  128.0f, " Name"   },
+            { 160.0f,  64.0f, " Kills"  },
+            { 224.0f,  64.0f, NULL      },  /* filled below */
+            { 288.0f,  64.0f, " Time"   },
+            { 352.0f,  64.0f, " Ping"   },
+        };
+        /* Column 2 label depends on gametype: "Deaths" for FFA, "Total" for team/obj */
+        const char *col2_label = " Deaths";
+        if (col_count >= 4) {
+            const char *captured = Godot_SB_GetColumnName(3);
+            if (captured && captured[0]) {
+                static char col2_buf[64];
+                snprintf(col2_buf, sizeof(col2_buf), " %s", captured);
+                col2_label = col2_buf;
+            }
+        }
+        hdrs[2].label = col2_label;
 
-    float row_h        = ROW_HEIGHT_VH * sy;
-    float header_row_h = HEADER_ROW_VH * sy;
+        for (int i = 0; i < 5; i++) {
+            float hx = hdrs[i].x * sx;
+            float hy = 32.0f * sy;
+            float hw = hdrs[i].w * sx;
+            float hh = 24.0f * sy;
+            draw_indent_border_rect(rs, ci, hx, hy, hw, hh, hdr_bg);
+            float text_y = hy + hh - TEXT_PAD_VH * sy;
+            font->draw_string(ci, Vector2(hx + TEXT_PAD_VH * sx, text_y),
+                              String::utf8(hdrs[i].label),
+                              HORIZONTAL_ALIGNMENT_LEFT,
+                              hw - TEXT_PAD_VH * sx * 2.0f,
+                              header_font_size, font_color);
+        }
+    }
 
-    /* Board position in screen pixels. */
+    /* ── 3. Player list background ──
+     * UIListCtrl positioned by CG_GetScoreBoardPosition (32, 56, 384, 392)
+     * bgcolor from CG_GetScoreBoardColor (0, 0, 0, 0.70) */
     float bx = sb_x * sx;
     float by = sb_y * sy;
     float bw = sb_w * sx;
     float bh = sb_h * sy;
-
-    /* ── Background panel ── */
     rs->canvas_item_add_rect(ci, Rect2(bx, by, bw, bh), Color(bgR, bgG, bgB, bgA));
 
-    /* ── Column header row — always drawn ── */
+    /* ── 4. Player list item rows ── */
     float cur_y = by;
-    Color font_color(fcR, fcG, fcB, fcA);
-
-    {
-        float cx = bx;
-        for (int c = 0; c < col_count; c++) {
-            float cw = (float)Godot_SB_GetColumnWidth(c) * sx;
-            const char *col_name = Godot_SB_GetColumnName(c);
-            float text_y = cur_y + header_row_h - TEXT_PAD_VH * sy;
-            font->draw_string(ci, Vector2(cx + TEXT_PAD_VH * sx, text_y),
-                              String::utf8(col_name),
-                              HORIZONTAL_ALIGNMENT_LEFT,
-                              cw - TEXT_PAD_VH * sx * 2.0f,
-                              header_font_size, font_color);
-            cx += cw;
-        }
-        cur_y += header_row_h;
-    }
-
-    /* ── Item rows ── */
     for (int item = 0; item < item_count; item++) {
         int is_header = Godot_SB_GetItemIsHeader(item);
 
-        float this_row_h = is_header ? section_row_h : row_h;
+        float this_row_h = is_header ? section_h : row_h;
         int   fs         = is_header ? section_font_size : body_font_size;
 
         /* Clip: stop drawing if we exceed the board area. */
@@ -5139,8 +5292,7 @@ void MoHAARunner::update_scoreboard() {
         Color text_color(trR, trG, trB, trA);
 
         if (is_header) {
-            /* Section header: first non-empty string spans the full width.
-               (e.g. "Allies - 4 Players", "Spectators") */
+            /* Section header: first non-empty string spans the full width. */
             const char *hdr_text = "";
             for (int f = 0; f < col_count && f < 8; f++) {
                 const char *s = Godot_SB_GetItemString(item, f);
@@ -5178,6 +5330,182 @@ void MoHAARunner::update_scoreboard() {
         }
 
         cur_y += this_row_h;
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+     *  Right-side content: map preview image + objective text labels.
+     *  Matches the .urc widget definitions exactly.
+     * ═══════════════════════════════════════════════════════════════ */
+
+    /* ── 5. Map preview image ──
+     * .urc "picture": rect 424 40 176 176  (SQUARE!)
+     * linkcvar "cg_scoreboardpic", linkcvartoshader */
+    {
+        const float PIC_X = 424.0f, PIC_Y = 40.0f;
+        const float PIC_W = 176.0f, PIC_H = 176.0f;
+        float img_x = PIC_X * sx;
+        float img_y = PIC_Y * sy;
+        float img_w = PIC_W * sx;
+        float img_h = PIC_H * sy;
+
+        char pic_cvar[256] = {0};
+        Cvar_VariableStringBuffer("cg_scoreboardpic", pic_cvar, sizeof(pic_cvar));
+
+        Ref<ImageTexture> map_tex;
+        const char *tex_shader_name = nullptr;
+
+        if (pic_cvar[0]) {
+            tex_shader_name = pic_cvar;
+        } else {
+            /* Fallback: construct path from map name */
+            const char *map_name = Godot_GetMapName();
+            if (map_name && map_name[0]) {
+                const char *slash = strrchr(map_name, '/');
+                const char *short_name = slash ? slash + 1 : map_name;
+                static char fallback_path[256];
+                snprintf(fallback_path, sizeof(fallback_path),
+                         "textures/mohdm/%s_scr", short_name);
+                tex_shader_name = fallback_path;
+            }
+        }
+
+        if (tex_shader_name) {
+            int sh = Godot_Renderer_RegisterShader(tex_shader_name);
+            if (sh > 0) {
+                map_tex = get_shader_texture(sh);
+            }
+        }
+
+        if (map_tex.is_valid()) {
+            /* Check if the shader has the inverted alpha pattern
+             * ($whiteimage stage + GL_ONE_MINUS_SRC_ALPHA/GL_SRC_ALPHA)
+             * and needs the compositing shader. */
+            bool use_alpha_inv = false;
+            if (tex_shader_name) {
+                const GodotShaderProps *sp_map = Godot_ShaderProps_Find(tex_shader_name);
+                if (sp_map && sp_map->stage_count > 1) {
+                    for (int st = 0; st < sp_map->stage_count; st++) {
+                        if (sp_map->stages[st].isLightmap) continue;
+                        const char *sm = sp_map->stages[st].map;
+                        if (!sm[0]) continue;
+                        if (strcmp(sm, "$lightmap") == 0) continue;
+                        if (strcmp(sm, "$whiteimage") == 0) continue;
+                        if (sp_map->stages[st].blendSrc == BLEND_ONE_MINUS_SRC_ALPHA &&
+                            sp_map->stages[st].blendDst == BLEND_SRC_ALPHA) {
+                            use_alpha_inv = true;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            RID tex_rid = map_tex->get_rid();
+            if (use_alpha_inv && alpha_inv_material.is_valid()) {
+                if (!sb_map_preview_ci.is_valid()) {
+                    sb_map_preview_ci = rs->canvas_item_create();
+                    rs->canvas_item_set_parent(sb_map_preview_ci, ci);
+                }
+                rs->canvas_item_set_material(sb_map_preview_ci, alpha_inv_material->get_rid());
+                rs->canvas_item_add_texture_rect(sb_map_preview_ci,
+                    Rect2(img_x, img_y, img_w, img_h),
+                    tex_rid, false, Color(1, 1, 1, 1));
+            } else {
+                rs->canvas_item_add_texture_rect(ci,
+                    Rect2(img_x, img_y, img_w, img_h),
+                    tex_rid, false, Color(1, 1, 1, 1));
+            }
+        }
+    }
+
+    /* ── 6. Objective text area ──
+     * .urc "alliesback": rect 424 256 176 144, bgcolor 0,0,0,0.30, INDENT_BORDER
+     *   (Obj_Scoreboard has separate alliesback at 424,232,176,96
+     *    and axisback at 424,344,176,96)
+     *
+     * Text labels bound to cg_obj_alliedtext1-3 at y=256,280,304
+     * and cg_obj_axistext1-3 at y=328,352,376 (DM_Scoreboard).
+     * textalign centerx for DM mode, left for Obj mode. */
+    {
+        if (is_obj) {
+            /* Obj_Scoreboard: two separate panels + section titles */
+            draw_indent_border_rect(rs, ci,
+                424.0f * sx, 232.0f * sy, 176.0f * sx, 96.0f * sy,
+                Color(0.0f, 0.0f, 0.0f, 0.30f));
+            draw_indent_border_rect(rs, ci,
+                424.0f * sx, 344.0f * sy, 176.0f * sx, 96.0f * sy,
+                Color(0.0f, 0.0f, 0.0f, 0.30f));
+
+            /* Section titles */
+            float title_fs = (float)header_font_size;
+            font->draw_string(ci, Vector2(424.0f * sx + 2, 232.0f * sy + 20.0f * sy),
+                              String("Allied Objectives"), HORIZONTAL_ALIGNMENT_LEFT,
+                              176.0f * sx - 4, (int)title_fs, font_color);
+            font->draw_string(ci, Vector2(424.0f * sx + 2, 344.0f * sy + 20.0f * sy),
+                              String("Axis Objectives"), HORIZONTAL_ALIGNMENT_LEFT,
+                              176.0f * sx - 4, (int)title_fs, font_color);
+
+            /* Allied texts at y=256,280,304 — textalign LEFT */
+            const char *allied_cvars[] = { "cg_obj_alliedtext1", "cg_obj_alliedtext2", "cg_obj_alliedtext3" };
+            float allied_y[] = { 256.0f, 280.0f, 304.0f };
+            for (int i = 0; i < 3; i++) {
+                char val[256] = {0};
+                Cvar_VariableStringBuffer(allied_cvars[i], val, sizeof(val));
+                if (val[0]) {
+                    float ty = allied_y[i] * sy + 20.0f * sy;
+                    font->draw_string(ci, Vector2(424.0f * sx + 2, ty),
+                                      String::utf8(val), HORIZONTAL_ALIGNMENT_LEFT,
+                                      176.0f * sx - 4, header_font_size, font_color);
+                }
+            }
+
+            /* Axis texts at y=368,392,416 — textalign LEFT */
+            const char *axis_cvars[] = { "cg_obj_axistext1", "cg_obj_axistext2", "cg_obj_axistext3" };
+            float axis_y[] = { 368.0f, 392.0f, 416.0f };
+            for (int i = 0; i < 3; i++) {
+                char val[256] = {0};
+                Cvar_VariableStringBuffer(axis_cvars[i], val, sizeof(val));
+                if (val[0]) {
+                    float ty = axis_y[i] * sy + 20.0f * sy;
+                    font->draw_string(ci, Vector2(424.0f * sx + 2, ty),
+                                      String::utf8(val), HORIZONTAL_ALIGNMENT_LEFT,
+                                      176.0f * sx - 4, header_font_size, font_color);
+                }
+            }
+        } else {
+            /* DM_Scoreboard / DM_Round_Scoreboard:
+             * Single alliesback panel, centerx text */
+            draw_indent_border_rect(rs, ci,
+                424.0f * sx, 256.0f * sy, 176.0f * sx, 144.0f * sy,
+                Color(0.0f, 0.0f, 0.0f, 0.30f));
+
+            /* Allied texts at y=256,280,304 */
+            const char *allied_cvars[] = { "cg_obj_alliedtext1", "cg_obj_alliedtext2", "cg_obj_alliedtext3" };
+            float allied_y[] = { 256.0f, 280.0f, 304.0f };
+            for (int i = 0; i < 3; i++) {
+                char val[256] = {0};
+                Cvar_VariableStringBuffer(allied_cvars[i], val, sizeof(val));
+                if (val[0]) {
+                    float ty = allied_y[i] * sy + 20.0f * sy;
+                    font->draw_string(ci, Vector2(424.0f * sx, ty),
+                                      String::utf8(val), HORIZONTAL_ALIGNMENT_CENTER,
+                                      176.0f * sx, header_font_size, font_color);
+                }
+            }
+
+            /* Axis texts at y=328,352,376 */
+            const char *axis_cvars[] = { "cg_obj_axistext1", "cg_obj_axistext2", "cg_obj_axistext3" };
+            float axis_y[] = { 328.0f, 352.0f, 376.0f };
+            for (int i = 0; i < 3; i++) {
+                char val[256] = {0};
+                Cvar_VariableStringBuffer(axis_cvars[i], val, sizeof(val));
+                if (val[0]) {
+                    float ty = axis_y[i] * sy + 20.0f * sy;
+                    font->draw_string(ci, Vector2(424.0f * sx, ty),
+                                      String::utf8(val), HORIZONTAL_ALIGNMENT_CENTER,
+                                      176.0f * sx, header_font_size, font_color);
+                }
+            }
+        }
     }
 }
 
