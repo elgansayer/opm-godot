@@ -43,6 +43,12 @@ func _ready():
 	if runner:
 		var startup_args = "+set dedicated %d +set developer %d" % [1 if launch_dedicated else 0, 1 if dev_mode else 0]
 		runner.set_startup_args(startup_args)
+		# Force high-end visual preset for next-gen rendering verification.
+		runner.set_render_quality("ultra")
+		runner.set_shadow_quality(3)
+		runner.set_effects_quality(3)
+		runner.set_msaa(2)
+		runner.set_fxaa_enabled(false)
 		runner.name = "MoHAARunnerInstance"
 		add_child(runner)
 		print("Main: MoHAARunner added to tree (dynamic).")

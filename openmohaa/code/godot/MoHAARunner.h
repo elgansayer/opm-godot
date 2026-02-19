@@ -196,7 +196,7 @@ private:
 
     // Render quality state — cached for getters (0=low, 1=medium, 2=high, 3=ultra)
     int texture_quality = 2;    // default high
-    int shadow_quality = 2;
+    int shadow_quality = 3;
     int geometry_quality = 2;
     int effects_quality = 2;
     int msaa_level = 0;         // 0=disabled, 1=2x, 2=4x, 3=8x

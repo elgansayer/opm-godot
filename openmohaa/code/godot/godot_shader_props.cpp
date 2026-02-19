@@ -1563,6 +1563,16 @@ const GodotShaderProps *Godot_ShaderProps_Find(const char *shader_name) {
     if (it != s_shader_props.end())
         return &it->second;
 
+    /* Retry stripping common image extensions (e.g. "foo.tga" -> "foo")
+     * in case the caller requested a filename instead of the shader key. */
+    size_t last_dot = key.find_last_of('.');
+    if (last_dot != std::string::npos && last_dot > 0) {
+        std::string key_no_ext = key.substr(0, last_dot);
+        it = s_shader_props.find(key_no_ext);
+        if (it != s_shader_props.end())
+            return &it->second;
+    }
+
     return nullptr;
 }
 

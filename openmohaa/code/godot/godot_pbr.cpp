@@ -128,6 +128,49 @@ static Ref<ImageTexture> load_png_from_disk(const String &abs_path) {
     return ImageTexture::create_from_image(img);
 }
 
+/* Generate a simple tangent-space normal map from albedo luminance.
+ * This is a fallback for textures that have no authored normal map. */
+static Ref<ImageTexture> generate_normal_from_albedo(const Ref<ImageTexture> &albedo_tex) {
+    if (!albedo_tex.is_valid()) return Ref<ImageTexture>();
+
+    Ref<Image> src = albedo_tex->get_image();
+    if (!src.is_valid() || src->is_empty()) return Ref<ImageTexture>();
+
+    int w = src->get_width();
+    int h = src->get_height();
+    if (w < 2 || h < 2) return Ref<ImageTexture>();
+
+    src->decompress();
+    Ref<Image> gray = src->duplicate();
+    gray->convert(Image::FORMAT_RGBA8);
+
+    Ref<Image> out;
+    out.instantiate();
+    out->create(w, h, false, Image::FORMAT_RGBA8);
+
+    auto lum = [&](int x, int y) -> float {
+        x = (x < 0) ? 0 : (x >= w ? w - 1 : x);
+        y = (y < 0) ? 0 : (y >= h ? h - 1 : y);
+        Color c = gray->get_pixel(x, y);
+        return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f;
+    };
+
+    const float strength = 3.0f;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            float dx = (lum(x + 1, y) - lum(x - 1, y)) * strength;
+            float dy = (lum(x, y + 1) - lum(x, y - 1)) * strength;
+            Vector3 n(-dx, -dy, 1.0f);
+            n = n.normalized();
+            Color nc(n.x * 0.5f + 0.5f, n.y * 0.5f + 0.5f, n.z * 0.5f + 0.5f, 1.0f);
+            out->set_pixel(x, y, nc);
+        }
+    }
+
+    out->generate_mipmaps();
+    return ImageTexture::create_from_image(out);
+}
+
 /* Recursively scan a directory for PBR texture sets */
 static void scan_directory(const String &dir_path, const std::string &rel_prefix) {
     Ref<DirAccess> dir = DirAccess::open(dir_path);
@@ -321,6 +364,10 @@ const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
     set.roughness = load_png_from_disk(String(paths.roughness_path.c_str()));
     set.emission = load_png_from_disk(String(paths.emission_path.c_str()));
 
+    if (!set.normal.is_valid() && set.albedo.is_valid()) {
+        set.normal = generate_normal_from_albedo(set.albedo);
+    }
+
     /* ── Material heuristics from texture path keywords ── */
 
     /* Metal detection: textures whose names suggest metallic surfaces. */
@@ -391,7 +438,7 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
     if (pbr->normal.is_valid()) {
         mat->set_feature(BaseMaterial3D::FEATURE_NORMAL_MAPPING, true);
         mat->set_texture(BaseMaterial3D::TEXTURE_NORMAL, pbr->normal);
-        mat->set_normal_scale(1.0f);
+        mat->set_normal_scale(1.35f);
     }
 
     /* Apply roughness map */

@@ -726,15 +726,14 @@ void MoHAARunner::setup_3d_scene() {
     camera->set_current(true);
     game_world->add_child(camera);
 
-    // Directional light — low energy so it only adds shadow contrast
-    // on top of the baked lightmap.  The lightmap × ambient provides
-    // the primary illumination; the sun's role is dynamic shadows.
+    // Directional light — strong enough to show dynamic shading/shadows,
+    // while baked lightmaps remain the base look.
     sun_light = memnew(DirectionalLight3D);
     sun_light->set_name("SunLight");
     sun_light->set_rotation(Vector3(Math::deg_to_rad(-45.0), Math::deg_to_rad(30.0), 0.0));
     sun_light->set_shadow(true);
     sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
-    sun_light->set_param(Light3D::PARAM_ENERGY, 0.3);
+    sun_light->set_param(Light3D::PARAM_ENERGY, 0.8);
     sun_light->set_color(Color(1.0, 0.95, 0.9));  // warm sunlight tint
     game_world->add_child(sun_light);
 
@@ -746,11 +745,9 @@ void MoHAARunner::setup_3d_scene() {
     env->set_background(Environment::BG_COLOR);
     env->set_bg_color(Color(0.4, 0.5, 0.6));   // light grey-blue sky
     env->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
-    /* Ambient = white at energy 1.0 so the lightmap detail-MUL texture
-     * passes through faithfully as the primary lighting.  The directional
-     * light only adds a small fill + shadow contrast on top. */
+    /* Keep ambient lower so directional/dynamic lights read clearly. */
     env->set_ambient_light_color(Color(1.0, 1.0, 1.0));
-    env->set_ambient_light_energy(1.0);
+    env->set_ambient_light_energy(0.55);
 
     // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
     // MOHAA uses 2x overbright on lightmaps. Linear tonemap with 1.0
@@ -1027,6 +1024,13 @@ void MoHAARunner::check_world_load() {
         pvs_log_count = 0;
         UtilityFunctions::print("[MoHAA] BSP world added to scene.");
 
+        // Ensure BSP clusters cast shadows (and can receive via lit materials).
+        for (int ci = 0; ci < bsp_map_node->get_child_count(); ci++) {
+            MeshInstance3D *cmi = Object::cast_to<MeshInstance3D>(bsp_map_node->get_child(ci));
+            if (!cmi) continue;
+            cmi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_ON);
+        }
+
         // Instantiate static TIKI models from BSP data
         load_static_models();
         UtilityFunctions::print(String("[MoHAA] Static models loaded for: ") + new_bsp);
@@ -1129,21 +1133,21 @@ void MoHAARunner::check_world_load() {
 
             // ── Sun / directional light quality ──
             if (sun_light) {
-                sun_light->set_param(Light3D::PARAM_ENERGY, 0.3);
+                sun_light->set_param(Light3D::PARAM_ENERGY, 0.8);
                 // Shadow already enabled in setup; reinforce cascade mode
                 sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
                 // Soft shadow penumbra via angular size
-                sun_light->set_param(Light3D::PARAM_SIZE, 0.5);
+                sun_light->set_param(Light3D::PARAM_SIZE, 0.65);
                 // Shadow cascade distances tuned for MOHAA map scale
-                sun_light->set_param(Light3D::PARAM_SHADOW_MAX_DISTANCE, 150.0);
+                sun_light->set_param(Light3D::PARAM_SHADOW_MAX_DISTANCE, 320.0);
                 sun_light->set_param(Light3D::PARAM_SHADOW_SPLIT_1_OFFSET, 0.05);
                 sun_light->set_param(Light3D::PARAM_SHADOW_SPLIT_2_OFFSET, 0.15);
                 sun_light->set_param(Light3D::PARAM_SHADOW_SPLIT_3_OFFSET, 0.35);
-                sun_light->set_param(Light3D::PARAM_SHADOW_FADE_START, 0.8);
-                sun_light->set_param(Light3D::PARAM_SHADOW_NORMAL_BIAS, 1.0);
-                sun_light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.04);
-                sun_light->set_param(Light3D::PARAM_SHADOW_BLUR, 1.0);
-                sun_light->set_param(Light3D::PARAM_SHADOW_OPACITY, 0.85);
+                sun_light->set_param(Light3D::PARAM_SHADOW_FADE_START, 0.92);
+                sun_light->set_param(Light3D::PARAM_SHADOW_NORMAL_BIAS, 0.7);
+                sun_light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.02);
+                sun_light->set_param(Light3D::PARAM_SHADOW_BLUR, 0.7);
+                sun_light->set_param(Light3D::PARAM_SHADOW_OPACITY, 1.0);
             }
 
             // ── Anti-aliasing ── MSAA 4x for geometry edges
@@ -1468,6 +1472,7 @@ void MoHAARunner::load_static_models() {
         mi->set_name(String("SM_") + String::num_int64(i));
         mi->set_mesh(cached->mesh);
         mi->set_extra_cull_margin(4.0f);
+        mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_ON);
 
         // Apply shader textures to each surface.
         // Mirrors R_InitStaticModels: register each surface shader via
@@ -1829,6 +1834,7 @@ void MoHAARunner::update_entities() {
         mi->set_name(String("Entity_") + String::num_int64((int64_t)entity_meshes.size()));
         mi->set_visible(false);
         mi->set_extra_cull_margin(4.0f);
+        mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_ON);
         entity_root->add_child(mi);
         entity_meshes.push_back(mi);
     }
@@ -1921,6 +1927,7 @@ void MoHAARunner::update_entities() {
 
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
         if (reType == RT_SPRITE) {
+            mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
             float radius = 0.0f, rotation = 0.0f;
             int customShader = 0;
             Godot_Renderer_GetEntitySprite(i, &radius, &rotation, &customShader);
@@ -2025,6 +2032,7 @@ void MoHAARunner::update_entities() {
 
         // ── Phase 23: RT_BEAM — line between two points (e.g. tracers, lasers) ──
         if (reType == RT_BEAM) {
+            mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
             float from[3], to[3], diameter = 1.0f;
             Godot_Renderer_GetEntityBeam(i, from, to, &diameter);
 
@@ -2136,6 +2144,10 @@ void MoHAARunner::update_entities() {
             continue;
         }
 
+        // Entity slots are reused across types.  Re-enable model shadow casting
+        // after sprite/beam paths may have disabled it on this same MeshInstance.
+        mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_ON);
+
         // 
         if (renderfx & 0x80) {  // RF_DONTDRAW
             mi->set_visible(false);
@@ -2144,6 +2156,10 @@ void MoHAARunner::update_entities() {
 
         bool is_first_person = (renderfx & 0x02) != 0;  // RF_FIRST_PERSON
         bool is_depthhack    = (renderfx & 0x04) != 0;  // RF_DEPTHHACK
+
+        if (is_first_person || is_depthhack) {
+            mi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_OFF);
+        }
 
         EntityCacheKey key { hModel, reType, 0, renderfx };
         bool same_key = (i < (int)entity_cache_keys.size() && entity_cache_keys[i] == key);
@@ -2974,8 +2990,12 @@ void MoHAARunner::update_dlights() {
         light->set_color(Color(r, g, b));
         // Convert intensity from id units to Godot energy + range
         float range_metres = intensity * MOHAA_UNIT_SCALE;
-        light->set_param(Light3D::PARAM_RANGE, range_metres);
-        light->set_param(Light3D::PARAM_ENERGY, 2.0);
+        if (range_metres < 1.5f) range_metres = 1.5f;
+        light->set_param(Light3D::PARAM_RANGE, range_metres * 1.2f);
+        float dyn_energy = 3.0f + (intensity / 150.0f);
+        if (dyn_energy > 8.0f) dyn_energy = 8.0f;
+        light->set_param(Light3D::PARAM_ENERGY, dyn_energy);
+        light->set_shadow(false);
         light->set_visible(true);
     }
 

@@ -122,6 +122,16 @@ static bool needs_diffuse_lighting(const GodotShaderProps *props) {
     return false;
 }
 
+/* Returns true if any active stage uses a lightmap bundle */
+static bool has_lightmap_stage(const GodotShaderProps *props) {
+    for (int i = 0; i < props->stage_count; i++) {
+        if (!props->stages[i].active) continue;
+        if (props->stages[i].isLightmap || props->stages[i].hasNextBundleLightmap)
+            return true;
+    }
+    return false;
+}
+
 /* ===================================================================
  *  Shader code generation
  * ================================================================ */
@@ -547,9 +557,13 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
     /* Shader type and render mode */
     code += "shader_type spatial;\n";
 
+    /* Lightmapped stages should stay lit so they can receive dynamic
+     * directional shadows on top of baked lightmaps. */
+    const bool has_lightmap = has_lightmap_stage(props);
+
     /* Build render_mode */
     std::string render_mode;
-    if (!needs_diffuse_lighting(props))
+    if (!needs_diffuse_lighting(props) && !has_lightmap)
         render_mode += "unshaded";
 
     switch (props->transparency) {
@@ -610,15 +624,8 @@ String Godot_Shader_GenerateCode(const GodotShaderProps *props) {
     }
 
     /* Overbright factor for lightmap compositing */
-    bool has_lightmap = false;
-    for (int i = 0; i < props->stage_count; i++) {
-        if (!props->stages[i].active) continue;
-        if (props->stages[i].isLightmap || props->stages[i].hasNextBundleLightmap) {
-            has_lightmap = true; break;
-        }
-    }
     if (has_lightmap)
-        code += "uniform float overbright_factor = 2.0;\n";
+        code += "uniform float overbright_factor = 1.0;\n";
 
     if (needs_entity_color(props))
         code += "uniform vec4 entity_color = vec4(1.0, 1.0, 1.0, 1.0);\n";
