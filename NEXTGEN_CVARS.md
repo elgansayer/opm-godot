@@ -29,14 +29,16 @@ All defaults are set to maximum quality (ultra). Use profiles or individual cvar
 - `r_ng_shadow_blobs` (0/1, default 1) — Projected blob shadows from RF_SHADOW entities.
 - `r_ng_sunlight` (0/1, default 1) — Directional sunlight energy.
 - `r_ng_sun_shadows` (0/1, default 1) — Directional sunlight shadows.
-- `r_ng_sun_energy` (float, default 0.8) — Sun light energy multiplier.
+- `r_ng_sun_energy` (float, default 0.15) — Sun light energy multiplier.
 
 ## Tone, ambient, and post processing
 
 - `r_ng_tonemap_exposure` (float, default 1.0) — Filmic tonemap exposure.
 - `r_ng_tonemap_white` (float, default 4.0) — Filmic tonemap white point.
-- `r_ng_ambient_energy` (float, default 0.55) — Ambient light energy.
+- `r_ng_ambient_energy` (float, default 0.85) — Ambient light energy.
 - `r_ng_ssao` (0/1, default 1) — Screen-space ambient occlusion.
+- `r_ng_ssil` (0/1, default 1) — Screen-space indirect lighting.
+- `r_ng_ssr` (0/1, default 1) — Screen-space reflections.
 - `r_ng_glow` (0/1, default 1) — Bloom/glow.
 - `r_ng_volfog` (0/1, default 1) — Volumetric fog.
 - `r_ng_volfog_reprojection` (0/1, default 1) — Volumetric fog temporal reprojection.
@@ -57,13 +59,9 @@ All defaults are set to maximum quality (ultra). Use profiles or individual cvar
 
 ## Removed cvars (no longer functional)
 
-The following were removed because SSIL and SSR cause green flash artefacts in Godot 4.x:
-
 - `r_ng_master` — was a master switch; all features are now always active
 - `r_ng_antiflicker` — was a guardrail for SSIL/SSR; no longer needed
 - `r_ng_allow_risky` — was an override for the guardrail; no longer needed
-- `r_ng_ssil` — removed (green flash)
-- `r_ng_ssr` — removed (green flash)
 
 ## Recommended command blocks
 
@@ -91,5 +89,7 @@ set r_ng_material_normal_scale 2.2
 set r_ng_material_specular_mul 1.4
 set r_ng_material_roughness_mul 0.75
 set r_ng_ssao 1
+set r_ng_ssil 1
+set r_ng_ssr 1
 set r_ng_refprobe 0
 ```

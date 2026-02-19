@@ -126,12 +126,14 @@ static void register_nextgen_cvars() {
     Cvar_Get("r_ng_shadow_blobs",     "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_sunlight",         "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_sun_shadows",      "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_sun_energy",       "0.8", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_sun_energy",       "0.15", CVAR_ARCHIVE_FLAG);
     // Post processing + environment (all on)
     Cvar_Get("r_ng_tonemap_exposure",  "1.0", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_tonemap_white",     "4.0", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_ambient_energy",    "0.55", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ambient_energy",    "0.85", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_ssao",             "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ssil",             "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ssr",              "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_glow",             "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog",           "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog_reprojection", "1", CVAR_ARCHIVE_FLAG);
@@ -214,11 +216,13 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_shadow_blobs", 1);
         queue_set_cvar_int("r_ng_sunlight", 1);
         queue_set_cvar_int("r_ng_sun_shadows", 1);
-        queue_set_cvar_float("r_ng_sun_energy", 0.8f);
+        queue_set_cvar_float("r_ng_sun_energy", 0.15f);
         queue_set_cvar_float("r_ng_tonemap_exposure", 1.0f);
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
-        queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
+        queue_set_cvar_float("r_ng_ambient_energy", 0.85f);
         queue_set_cvar_int("r_ng_ssao", 1);
+        queue_set_cvar_int("r_ng_ssil", 1);
+        queue_set_cvar_int("r_ng_ssr", 0);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -249,11 +253,13 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_shadow_blobs", 1);
         queue_set_cvar_int("r_ng_sunlight", 1);
         queue_set_cvar_int("r_ng_sun_shadows", 1);
-        queue_set_cvar_float("r_ng_sun_energy", 0.8f);
+        queue_set_cvar_float("r_ng_sun_energy", 0.15f);
         queue_set_cvar_float("r_ng_tonemap_exposure", 1.0f);
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
-        queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
+        queue_set_cvar_float("r_ng_ambient_energy", 0.85f);
         queue_set_cvar_int("r_ng_ssao", 1);
+        queue_set_cvar_int("r_ng_ssil", 1);
+        queue_set_cvar_int("r_ng_ssr", 1);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -319,20 +325,18 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
 
     Ref<Environment> env = world_env->get_environment();
 
-    // SSIL and SSR are permanently disabled — they cause green flash
-    // artefacts on many GPU/driver combinations in Godot 4.x.
-    env->set_ssil_enabled(false);
-    env->set_ssr_enabled(false);
+    bool ng_ssil = (cvar_int_default("r_ng_ssil", 1) != 0);
+    bool ng_ssr  = (cvar_int_default("r_ng_ssr",  1) != 0);
 
     bool ng_sunlight = (cvar_int_default("r_ng_sunlight", 1) != 0);
     bool ng_sun_shadows = (cvar_int_default("r_ng_sun_shadows", 1) != 0);
-    float ng_sun_energy = cvar_float_default("r_ng_sun_energy", 0.8f);
+    float ng_sun_energy = cvar_float_default("r_ng_sun_energy", 0.15f);
 
     env->set_tonemapper(Environment::TONE_MAPPER_ACES);
     env->set_tonemap_exposure(cvar_float_default("r_ng_tonemap_exposure", 1.0f));
     env->set_tonemap_white(cvar_float_default("r_ng_tonemap_white", 4.0f));
     env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
-    env->set_ambient_light_energy(cvar_float_default("r_ng_ambient_energy", 0.55f));
+    env->set_ambient_light_energy(cvar_float_default("r_ng_ambient_energy", 0.85f));
 
     bool ng_ssao = (cvar_int_default("r_ng_ssao", 1) != 0);
     bool ng_glow = (cvar_int_default("r_ng_glow", 1) != 0);
@@ -346,6 +350,8 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     float ng_volfog_reprojection_amount = cvar_float_default("r_ng_volfog_reprojection_amount", 0.90f);
 
     env->set_ssao_enabled(ng_ssao);
+    env->set_ssil_enabled(ng_ssil);
+    env->set_ssr_enabled(ng_ssr);
     env->set_glow_enabled(ng_glow);
     env->set_volumetric_fog_enabled(ng_volfog);
     env->set_fog_enabled(ng_fog);
@@ -1073,7 +1079,7 @@ void MoHAARunner::setup_3d_scene() {
     sun_light->set_rotation(Vector3(Math::deg_to_rad(-45.0), Math::deg_to_rad(30.0), 0.0));
     sun_light->set_shadow(true);
     sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
-    sun_light->set_param(Light3D::PARAM_ENERGY, 0.8);
+    sun_light->set_param(Light3D::PARAM_ENERGY, 0.15);
     sun_light->set_color(Color(1.0, 0.95, 0.9));  // warm sunlight tint
     game_world->add_child(sun_light);
 
@@ -1087,7 +1093,7 @@ void MoHAARunner::setup_3d_scene() {
     env->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
     /* Keep ambient lower so directional/dynamic lights read clearly. */
     env->set_ambient_light_color(Color(1.0, 1.0, 1.0));
-    env->set_ambient_light_energy(0.55);
+    env->set_ambient_light_energy(0.85);
 
     // Phase 81: Tonemap and exposure to match MOHAA's overbright/gamma
     // MOHAA uses 2x overbright on lightmaps. Linear tonemap with 1.0
@@ -1451,13 +1457,25 @@ void MoHAARunner::check_world_load() {
                 Ref<Environment> env = world_env->get_environment();
 
                 // ── SSAO quality parameters ──
-                env->set_ssao_radius(1.5);
-                env->set_ssao_intensity(2.0);
-                env->set_ssao_power(1.6);
-                env->set_ssao_detail(1.0);
-                env->set_ssao_horizon(0.04);
-                env->set_ssao_sharpness(0.95);
-                env->set_ssao_direct_light_affect(0.25);
+                env->set_ssao_radius(1.2);
+                env->set_ssao_intensity(1.0);
+                env->set_ssao_power(1.4);
+                env->set_ssao_detail(0.5);
+                env->set_ssao_horizon(0.06);
+                env->set_ssao_sharpness(0.8);
+                env->set_ssao_direct_light_affect(0.1);
+
+                // ── SSIL quality parameters ──
+                env->set_ssil_radius(1.5);
+                env->set_ssil_intensity(1.0);
+                env->set_ssil_sharpness(0.9);
+                env->set_ssil_normal_rejection(1.0);
+
+                // ── SSR quality parameters ──
+                env->set_ssr_max_steps(64);
+                env->set_ssr_fade_in(0.15);
+                env->set_ssr_fade_out(2.0);
+                env->set_ssr_depth_tolerance(0.2);
 
                 // ── Bloom / Glow quality parameters ──
                 env->set_glow_intensity(0.8);
@@ -5215,25 +5233,18 @@ void MoHAARunner::update_2d_overlay() {
                             /* Real renderer: GLS_DEFAULT → GL_BLEND disabled →
                              * texture alpha irrelevant.  BLEND_OPAQUE shader
                              * discards tex.a but keeps COLOR.a (SetColor alpha)
-                             * so hover highlights still work. */
+                             * so hover highlights still work.
+                             *
+                             * NOTE: Do NOT scan individual stage blendFunc here.
+                             * Multi-stage blending (e.g. $whiteimage base + texture
+                             * with GL_ONE_MINUS_SRC_ALPHA GL_SRC_ALPHA) is a
+                             * multi-pass rendering operation that only the real
+                             * renderer's RB_IterateStagesGeneric can execute.
+                             * Our 2D overlay draws a single texture in one call,
+                             * so applying per-stage blendFunc would produce wrong
+                             * results (e.g. cg_scoreboardpic "mohdm1" matching
+                             * the BSP world shader and rendering transparent). */
                             draw_blend = BLEND_OPAQUE;
-                            /* Multi-stage shader: check the actual texture stage
-                             * for a custom blendFunc that overrides the opaque
-                             * default (e.g. GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA). */
-                            if (sp2->stage_count > 1) {
-                                for (int st = 0; st < sp2->stage_count; st++) {
-                                    if (sp2->stages[st].isLightmap) continue;
-                                    const char *sm = sp2->stages[st].map;
-                                    if (!sm[0]) continue;
-                                    if (strcmp(sm, "$lightmap") == 0) continue;
-                                    if (strcmp(sm, "$whiteimage") == 0) continue;
-                                    if (sp2->stages[st].blendSrc == BLEND_ONE_MINUS_SRC_ALPHA &&
-                                        sp2->stages[st].blendDst == BLEND_SRC_ALPHA) {
-                                        draw_blend = BLEND_ALPHA_INV;
-                                    }
-                                    break;
-                                }
-                            }
                         }
                     } else {
                         /* No .shader definition found → implicit shader.
