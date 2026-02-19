@@ -107,49 +107,44 @@ static const int CVAR_ARCHIVE_FLAG = 0x0001;
 // Register all r_ng_* cvars with the engine so they appear in console,
 // tab-complete, and persist to the config file.  Must be called AFTER Com_Init().
 static void register_nextgen_cvars() {
-    // Master + profile
-    Cvar_Get("r_ng_profile",   "-1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_master",    "1",  CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_antiflicker", "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_allow_risky", "0", CVAR_ARCHIVE_FLAG);
-    // PBR + material depth
+    // Profile (default = ultra)
+    Cvar_Get("r_ng_profile",   "2", CVAR_ARCHIVE_FLAG);
+    // PBR + material depth (all maxed)
     Cvar_Get("r_ng_pbr",                 "1",    CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_pbr_proc_normals",    "1",    CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_pbr_wet",             "1",    CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_material_depth",      "1",    CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_material_overdrive",  "0",    CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_material_normal_scale", "1.35", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_material_roughness_mul", "1.0", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_material_specular_mul", "1.0",  CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_material_metallic_mul", "1.0",  CVAR_ARCHIVE_FLAG);
-    // Dynamic lights + shadows
+    Cvar_Get("r_ng_material_overdrive",  "1",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_normal_scale", "2.1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_roughness_mul", "0.80", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_specular_mul", "1.35",  CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_metallic_mul", "1.15",  CVAR_ARCHIVE_FLAG);
+    // Dynamic lights + shadows (maxed)
     Cvar_Get("r_ng_dynlights",        "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_dynlight_shadows", "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_dlight_shadow_max", "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_dlight_shadow_max", "2", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_shadow_blobs",     "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_sunlight",         "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_sun_shadows",      "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_sun_energy",       "0.8", CVAR_ARCHIVE_FLAG);
-    // Post processing + environment
+    // Post processing + environment (all on)
     Cvar_Get("r_ng_tonemap_exposure",  "1.0", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_tonemap_white",     "4.0", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_ambient_energy",    "0.55", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_ssao",             "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_ssil",             "0", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_ssr",              "0", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_glow",             "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog",           "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog_reprojection", "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_volfog_reprojection_amount", "0.90", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_volfog_reprojection_amount", "0.94", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_fog",              "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_colorgrade",       "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_lut",              "0", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_refprobe",         "0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_lut",              "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_refprobe",         "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_refprobe_update",  "0", CVAR_ARCHIVE_FLAG);
-    // Model visual enhancements
+    // Model visual enhancements (maxed)
     Cvar_Get("r_ng_rim_light",        "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_rim_light_amount", "0.35", CVAR_ARCHIVE_FLAG);
-    UtilityFunctions::print("[MoHAA] Next-gen cvars registered.");
+    Cvar_Get("r_ng_rim_light_amount", "0.5", CVAR_ARCHIVE_FLAG);
+    UtilityFunctions::print("[MoHAA] Next-gen cvars registered (ultra defaults).");
 }
 
 static int cvar_int_default(const char *name, int fallback) {
@@ -181,23 +176,29 @@ static void queue_set_cvar_float(const char *name, float value) {
 void MoHAARunner::apply_nextgen_profile_preset(int profile) {
     // r_ng_profile values:
     //  -1 = custom/manual (no auto-apply)
-    //   0 = stock look
-    //   1 = stable next-gen
-    //   2 = ultra/cinematic
+    //   0 = stock look (everything off)
+    //   1 = balanced next-gen
+    //   2 = ultra (all maxed — the default)
     if (profile == 0) {
-        queue_set_cvar_int("r_ng_antiflicker", 1);
-        queue_set_cvar_int("r_ng_allow_risky", 0);
+        queue_set_cvar_int("r_ng_pbr", 0);
         queue_set_cvar_int("r_ng_material_depth", 0);
         queue_set_cvar_int("r_ng_material_overdrive", 0);
         queue_set_cvar_int("r_ng_rim_light", 0);
-        queue_set_cvar_int("r_ng_master", 0);
+        queue_set_cvar_int("r_ng_dynlights", 0);
+        queue_set_cvar_int("r_ng_dynlight_shadows", 0);
+        queue_set_cvar_int("r_ng_shadow_blobs", 0);
+        queue_set_cvar_int("r_ng_sunlight", 0);
+        queue_set_cvar_int("r_ng_ssao", 0);
+        queue_set_cvar_int("r_ng_glow", 0);
+        queue_set_cvar_int("r_ng_volfog", 0);
+        queue_set_cvar_int("r_ng_fog", 0);
+        queue_set_cvar_int("r_ng_colorgrade", 0);
+        queue_set_cvar_int("r_ng_lut", 0);
+        queue_set_cvar_int("r_ng_refprobe", 0);
         return;
     }
 
     if (profile == 1) {
-        queue_set_cvar_int("r_ng_master", 1);
-        queue_set_cvar_int("r_ng_antiflicker", 1);
-        queue_set_cvar_int("r_ng_allow_risky", 0);
         queue_set_cvar_int("r_ng_pbr", 1);
         queue_set_cvar_int("r_ng_pbr_proc_normals", 1);
         queue_set_cvar_int("r_ng_pbr_wet", 1);
@@ -218,8 +219,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
         queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
         queue_set_cvar_int("r_ng_ssao", 1);
-        queue_set_cvar_int("r_ng_ssil", 0);
-        queue_set_cvar_int("r_ng_ssr", 0);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -235,9 +234,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
     }
 
     if (profile == 2) {
-        queue_set_cvar_int("r_ng_master", 1);
-        queue_set_cvar_int("r_ng_antiflicker", 1);
-        queue_set_cvar_int("r_ng_allow_risky", 1);
         queue_set_cvar_int("r_ng_pbr", 1);
         queue_set_cvar_int("r_ng_pbr_proc_normals", 1);
         queue_set_cvar_int("r_ng_pbr_wet", 1);
@@ -258,8 +254,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
         queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
         queue_set_cvar_int("r_ng_ssao", 1);
-        queue_set_cvar_int("r_ng_ssil", 1);
-        queue_set_cvar_int("r_ng_ssr", 1);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -283,15 +277,11 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
         last_ng_profile_applied = ng_profile;
     }
 
-    ng_master_enabled = (cvar_int_default("r_ng_master", 1) != 0);
-    ng_antiflicker_enabled = (cvar_int_default("r_ng_antiflicker", 1) != 0);
-    bool ng_allow_risky = (cvar_int_default("r_ng_allow_risky", 0) != 0);
-
-    bool pbr_enabled = ng_master_enabled && (cvar_int_default("r_ng_pbr", 1) != 0);
-    bool pbr_proc_normals = ng_master_enabled && (cvar_int_default("r_ng_pbr_proc_normals", 1) != 0);
-    bool pbr_wet = ng_master_enabled && (cvar_int_default("r_ng_pbr_wet", 1) != 0);
-    bool pbr_depth = ng_master_enabled && (cvar_int_default("r_ng_material_depth", 1) != 0);
-    bool pbr_depth_overdrive = ng_master_enabled && (cvar_int_default("r_ng_material_overdrive", 0) != 0);
+    bool pbr_enabled = (cvar_int_default("r_ng_pbr", 1) != 0);
+    bool pbr_proc_normals = (cvar_int_default("r_ng_pbr_proc_normals", 1) != 0);
+    bool pbr_wet = (cvar_int_default("r_ng_pbr_wet", 1) != 0);
+    bool pbr_depth = (cvar_int_default("r_ng_material_depth", 1) != 0);
+    bool pbr_depth_overdrive = (cvar_int_default("r_ng_material_overdrive", 0) != 0);
     float pbr_depth_normal_scale = cvar_float_default("r_ng_material_normal_scale", 1.35f);
     float pbr_depth_roughness_mul = cvar_float_default("r_ng_material_roughness_mul", 1.0f);
     float pbr_depth_specular_mul = cvar_float_default("r_ng_material_specular_mul", 1.0f);
@@ -309,8 +299,8 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     Godot_PBR_SetDepthMetallicMul(pbr_depth_metallic_mul);
 #endif
 
-    ng_dynlights_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlights", 1) != 0);
-    ng_dynlight_shadows_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlight_shadows", 1) != 0);
+    ng_dynlights_enabled = (cvar_int_default("r_ng_dynlights", 1) != 0);
+    ng_dynlight_shadows_enabled = (cvar_int_default("r_ng_dynlight_shadows", 1) != 0);
     ng_dlight_shadow_max = cvar_int_default("r_ng_dlight_shadow_max", 1);
     if (ng_dlight_shadow_max < 0) ng_dlight_shadow_max = 0;
     if (ng_dlight_shadow_max > 8) ng_dlight_shadow_max = 8;
@@ -329,27 +319,10 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
 
     Ref<Environment> env = world_env->get_environment();
 
-    if (!ng_master_enabled) {
-        env->set_tonemapper(Environment::TONE_MAPPER_LINEAR);
-        env->set_tonemap_exposure(1.0f);
-        env->set_tonemap_white(1.0f);
-        env->set_ssao_enabled(false);
-        env->set_ssil_enabled(false);
-        env->set_ssr_enabled(false);
-        env->set_glow_enabled(false);
-        env->set_volumetric_fog_enabled(false);
-        env->set_fog_enabled(false);
-        env->set_adjustment_enabled(false);
-        env->set_adjustment_color_correction(Ref<Texture>());
-        env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
-        env->set_ambient_light_energy(1.0f);
-        if (main_reflection_probe) main_reflection_probe->set_visible(false);
-        if (sun_light) {
-            sun_light->set_shadow(false);
-            sun_light->set_param(Light3D::PARAM_ENERGY, 0.0f);
-        }
-        return;
-    }
+    // SSIL and SSR are permanently disabled — they cause green flash
+    // artefacts on many GPU/driver combinations in Godot 4.x.
+    env->set_ssil_enabled(false);
+    env->set_ssr_enabled(false);
 
     bool ng_sunlight = (cvar_int_default("r_ng_sunlight", 1) != 0);
     bool ng_sun_shadows = (cvar_int_default("r_ng_sun_shadows", 1) != 0);
@@ -362,8 +335,6 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     env->set_ambient_light_energy(cvar_float_default("r_ng_ambient_energy", 0.55f));
 
     bool ng_ssao = (cvar_int_default("r_ng_ssao", 1) != 0);
-    bool ng_ssil = (cvar_int_default("r_ng_ssil", 0) != 0);
-    bool ng_ssr = (cvar_int_default("r_ng_ssr", 0) != 0);
     bool ng_glow = (cvar_int_default("r_ng_glow", 1) != 0);
     bool ng_volfog = (cvar_int_default("r_ng_volfog", 1) != 0);
     bool ng_fog = (cvar_int_default("r_ng_fog", 1) != 0);
@@ -374,17 +345,7 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     bool ng_volfog_reprojection = (cvar_int_default("r_ng_volfog_reprojection", 1) != 0);
     float ng_volfog_reprojection_amount = cvar_float_default("r_ng_volfog_reprojection_amount", 0.90f);
 
-    // Anti-flicker guardrail: when enabled, risky passes stay off unless explicitly allowed.
-    if (ng_antiflicker_enabled && !ng_allow_risky) {
-        ng_ssil = false;
-        ng_ssr = false;
-        ng_lut = false;
-        ng_refprobe_update = 0;
-    }
-
     env->set_ssao_enabled(ng_ssao);
-    env->set_ssil_enabled(ng_ssil);
-    env->set_ssr_enabled(ng_ssr);
     env->set_glow_enabled(ng_glow);
     env->set_volumetric_fog_enabled(ng_volfog);
     env->set_fog_enabled(ng_fog);
@@ -1497,18 +1458,6 @@ void MoHAARunner::check_world_load() {
                 env->set_ssao_horizon(0.04);
                 env->set_ssao_sharpness(0.95);
                 env->set_ssao_direct_light_affect(0.25);
-
-                // ── SSIL quality parameters ──
-                env->set_ssil_radius(1.8);
-                env->set_ssil_intensity(1.25);
-                env->set_ssil_sharpness(0.9);
-                env->set_ssil_normal_rejection(1.0);
-
-                // ── SSR quality parameters ──
-                env->set_ssr_max_steps(64);
-                env->set_ssr_fade_in(0.15);
-                env->set_ssr_fade_out(2.0);
-                env->set_ssr_depth_tolerance(0.2);
 
                 // ── Bloom / Glow quality parameters ──
                 env->set_glow_intensity(0.8);
@@ -5277,10 +5226,14 @@ void MoHAARunner::update_2d_overlay() {
                     // to suffer from failed shader lookups or subtle transparency interpretation.
                     // This explicitly catches "mohdm1" through "mohdm7" (and similar levels)
                     // appearing in map preview widgets.
-                    if (sname && (strstr(sname, "mohdm") || strstr(sname, "obj_"))) {
-                         if (strstr(sname, "dmloading") || 
-                             (strncmp(sname, "mohdm", 5) == 0 && strlen(sname) < 10) ||
-                             (strncmp(sname, "obj_", 4) == 0 && strlen(sname) < 15)) {
+                    if (sname) {
+                         bool is_map_preview = false;
+                         if (strstr(sname, "levelshots/") || strstr(sname, "dmloading")) is_map_preview = true;
+                         // Catch simple names "mohdm1", "obj_team1" too
+                         if (strncmp(sname, "mohdm", 5) == 0) is_map_preview = true;
+                         if (strncmp(sname, "obj_", 4) == 0) is_map_preview = true;
+                         
+                         if (is_map_preview) {
                              UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview: ") + String(sname));
                              draw_blend = BLEND_ALPHA_INV;
                          }

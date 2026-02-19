@@ -216,8 +216,6 @@ private:
     Ref<ImageTexture> cinematic_lut_texture;          // Runtime-generated colour grading LUT
     double nextgen_cvar_poll_accum = 0.0;             // Runtime cvar polling timer
     int last_ng_profile_applied = -9999;              // Edge-trigger r_ng_profile preset application
-    bool ng_master_enabled = true;
-    bool ng_antiflicker_enabled = true;
     bool ng_dynlights_enabled = true;
     bool ng_dynlight_shadows_enabled = true;
     int ng_dlight_shadow_max = 1;
