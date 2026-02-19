@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/world_environment.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
+#include <godot_cpp/classes/reflection_probe.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
@@ -211,6 +212,8 @@ private:
     Camera3D *camera = nullptr;              // Driven by engine refdef_t each frame
     DirectionalLight3D *sun_light = nullptr;  // Basic directional light
     WorldEnvironment *world_env = nullptr;    // Ambient/fog environment
+    ReflectionProbe *main_reflection_probe = nullptr; // Cinematic local reflections
+    Ref<ImageTexture> cinematic_lut_texture;          // Runtime-generated colour grading LUT
 
     // BSP world geometry (Phase 7b)
     Node3D *bsp_map_node = nullptr;          // Currently loaded BSP mesh tree

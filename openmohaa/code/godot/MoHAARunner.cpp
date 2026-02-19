@@ -24,6 +24,7 @@
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/sky.hpp>
 #include <godot_cpp/classes/cubemap.hpp>
+#include <godot_cpp/classes/reflection_probe.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/shader_material.hpp>
 #include <godot_cpp/classes/light3d.hpp>
@@ -39,6 +40,58 @@
 #include <string>
 #include <unordered_set>
 #include <setjmp.h>
+
+/* Build a subtle cinematic 16x16x16 LUT packed into a 256x16 texture.
+ * This adds gentle filmic contrast, warm highlights, and cool shadows. */
+static Ref<ImageTexture> build_cinematic_lut_texture() {
+    const int lut_size = 16;
+    const int width = lut_size * lut_size;
+    const int height = lut_size;
+
+    Ref<Image> img = Image::create(width, height, false, Image::FORMAT_RGBA8);
+    if (!img.is_valid() || img->is_empty()) {
+        return Ref<ImageTexture>();
+    }
+
+    for (int b = 0; b < lut_size; b++) {
+        for (int g = 0; g < lut_size; g++) {
+            for (int r = 0; r < lut_size; r++) {
+                float rf = (float)r / (float)(lut_size - 1);
+                float gf = (float)g / (float)(lut_size - 1);
+                float bf = (float)b / (float)(lut_size - 1);
+
+                // Mild S-curve contrast.
+                auto grade = [](float v) -> float {
+                    float x = (v - 0.5f) * 1.08f + 0.5f;
+                    x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+                    return powf(x, 0.97f);
+                };
+
+                float rr = grade(rf);
+                float gg = grade(gf);
+                float bb = grade(bf);
+
+                // Subtle teal/orange look: warm highlights, cool shadows.
+                float luma = rr * 0.2126f + gg * 0.7152f + bb * 0.0722f;
+                float warm = luma;
+                float cool = 1.0f - luma;
+                rr = rr + 0.03f * warm;
+                gg = gg + 0.01f * warm;
+                bb = bb + 0.03f * cool;
+
+                rr = rr < 0.0f ? 0.0f : (rr > 1.0f ? 1.0f : rr);
+                gg = gg < 0.0f ? 0.0f : (gg > 1.0f ? 1.0f : gg);
+                bb = bb < 0.0f ? 0.0f : (bb > 1.0f ? 1.0f : bb);
+
+                int px = b * lut_size + r;
+                int py = (lut_size - 1) - g;
+                img->set_pixel(px, py, Color(rr, gg, bb, 1.0f));
+            }
+        }
+    }
+
+    return ImageTexture::create_from_image(img);
+}
 
 // From register_types.cpp — track engine lifecycle across module boundary
 extern void Godot_SetEngineInitialized(bool v);
@@ -849,6 +902,12 @@ void MoHAARunner::update_camera() {
     Basis basis(right_g, up_g, back_g);
     camera->set_global_transform(Transform3D(basis, pos));
 
+    // Keep the main reflection probe near the camera so local reflections
+    // remain relevant while moving through the map.
+    if (main_reflection_probe) {
+        main_reflection_probe->set_global_position(pos);
+    }
+
     // ── FOV ──
     // Engine provides vertical fov_y in degrees; Godot's Camera3D.fov
     // is vertical FOV when keep_aspect == KEEP_HEIGHT
@@ -966,6 +1025,7 @@ void MoHAARunner::check_world_load() {
             pvs_log_count = 0;
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
+        main_reflection_probe = nullptr;
         return;
     }
 
@@ -1024,6 +1084,23 @@ void MoHAARunner::check_world_load() {
         pvs_log_count = 0;
         UtilityFunctions::print("[MoHAA] BSP world added to scene.");
 
+        // Reflection probe for local glossy response (PBR metals/wet surfaces).
+        if (!main_reflection_probe) {
+            main_reflection_probe = memnew(ReflectionProbe);
+            main_reflection_probe->set_name("MainReflectionProbe");
+            main_reflection_probe->set_intensity(0.35f);
+            main_reflection_probe->set_size(Vector3(220.0f, 120.0f, 220.0f));
+            main_reflection_probe->set_origin_offset(Vector3(0.0f, 10.0f, 0.0f));
+            main_reflection_probe->set_enable_box_projection(true);
+            main_reflection_probe->set_enable_shadows(true);
+            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ALWAYS);
+            main_reflection_probe->set_cull_mask(0xFFFFFFFFu);
+            game_world->add_child(main_reflection_probe);
+        }
+        if (camera && main_reflection_probe) {
+            main_reflection_probe->set_global_position(camera->get_global_position());
+        }
+
         // Ensure BSP clusters cast shadows (and can receive via lit materials).
         for (int ci = 0; ci < bsp_map_node->get_child_count(); ci++) {
             MeshInstance3D *cmi = Object::cast_to<MeshInstance3D>(bsp_map_node->get_child(ci));
@@ -1068,6 +1145,18 @@ void MoHAARunner::check_world_load() {
                 env->set_ssao_enabled(true);
                 env->set_ssao_radius(1.5);
                 env->set_ssao_intensity(2.0);
+                env->set_ssao_power(1.6);
+                env->set_ssao_detail(1.0);
+                env->set_ssao_horizon(0.04);
+                env->set_ssao_sharpness(0.95);
+                env->set_ssao_direct_light_affect(0.25);
+
+                // ── SSIL (contact-like micro bounce / darkening) ──
+                env->set_ssil_enabled(true);
+                env->set_ssil_radius(1.8);
+                env->set_ssil_intensity(1.25);
+                env->set_ssil_sharpness(0.9);
+                env->set_ssil_normal_rejection(1.0);
 
                 // ── SSR (Screen-Space Reflections) ──
                 // Adds real-time reflections on wet/polished surfaces
@@ -1125,8 +1214,14 @@ void MoHAARunner::check_world_load() {
                 // Subtle: contrast for depth, slight desaturation for WW2 feel
                 env->set_adjustment_enabled(true);
                 env->set_adjustment_brightness(1.0);
-                env->set_adjustment_contrast(1.05);
-                env->set_adjustment_saturation(0.9);
+                env->set_adjustment_contrast(1.08);
+                env->set_adjustment_saturation(0.92);
+                if (cinematic_lut_texture.is_null()) {
+                    cinematic_lut_texture = build_cinematic_lut_texture();
+                }
+                if (cinematic_lut_texture.is_valid()) {
+                    env->set_adjustment_color_correction(cinematic_lut_texture);
+                }
 
                 UtilityFunctions::print("[PBR] Next-gen environment: ACES, SSR, bloom, volumetric fog, SSAO, colour grading.");
             }
@@ -1148,6 +1243,8 @@ void MoHAARunner::check_world_load() {
                 sun_light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.02);
                 sun_light->set_param(Light3D::PARAM_SHADOW_BLUR, 0.7);
                 sun_light->set_param(Light3D::PARAM_SHADOW_OPACITY, 1.0);
+                sun_light->set_blend_splits(true);
+                sun_light->set_sky_mode(DirectionalLight3D::SKY_MODE_LIGHT_AND_SKY);
             }
 
             // ── Anti-aliasing ── MSAA 4x for geometry edges
