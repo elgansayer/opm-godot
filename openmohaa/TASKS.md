@@ -2410,3 +2410,24 @@ Replaced the non-functional `canvas_item_set_custom_rect()` approach with proper
 - `code/godot/MoHAARunner.h` — Added `scissor_items` vector for scissor canvas item cleanup
 - `code/godot/godot_renderer.c` — `GR_ImageExists()` checks shader table before VFS
 - `project/Main.gd` — `dev_mode = false` default, `--dev` flag, cleaned up timer callback
+
+## Phase 146: Flare Rendering ✅
+
+- [x] **Task 146.1:** Added `flares_root` to `MoHAARunner` to hold flare instances.
+- [x] **Task 146.2:** Implemented `load_flares()` in `MoHAARunner.cpp`:
+  - Retrieves flare data collected during BSP load (Phase 74).
+  - Creates a billboarded `MeshInstance3D` for each flare.
+  - Uses `ArrayMesh` with baked vertex colors (from BSP) for tinting.
+  - Applies shader textures with `StandardMaterial3D` (Unshaded, Additive, Billboard).
+  - Respects shader properties (transparency, cull) via `apply_shader_props_to_material`.
+- [x] **Task 146.3:** Integrated into `check_world_load()` — flares load after static models.
+
+### Key technical details (Phase 146):
+- Flares are rendered as individual 1m x 1m quads with `BILLBOARD_ENABLED`.
+- Vertex colors are baked into the mesh to support per-instance tinting without material duplication.
+- Materials are cached by shader handle to minimize state changes.
+- Coordinates are already converted to Godot space by the BSP loader (Phase 74).
+
+### Files modified (Phase 146):
+- `code/godot/MoHAARunner.h` — added `flares_root` and `load_flares()` declaration.
+- `code/godot/MoHAARunner.cpp` — implemented `load_flares()`, integrated into world load/unload.

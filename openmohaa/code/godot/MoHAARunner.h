@@ -218,6 +218,7 @@ private:
 
     // Static BSP models (Phase 10)
     Node3D *static_model_root = nullptr;     // Container for TIKI static models from BSP
+    Node3D *flares_root = nullptr;           // Container for BSP flares
 
     // Weapon SubViewport (Phase 62) — renders FPS weapon in a separate
     // depth buffer so they never clip into world geometry.
@@ -403,6 +404,7 @@ private:
     void update_camera();     // Read engine viewpoint and update Camera3D
     void check_world_load();  // Load BSP geometry if a new map was loaded
     void load_static_models(); // Register and instantiate static TIKI models from BSP
+    void load_flares();       // Create billboards for BSP flare surfaces
     void update_entities();   // Read captured entities and update debug meshes
     void update_dlights();    // Read captured dynamic lights and update OmniLight3D
     void update_polys();      // Render captured polys (particles, effects)

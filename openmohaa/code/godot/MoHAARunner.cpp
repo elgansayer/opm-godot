@@ -919,6 +919,7 @@ void MoHAARunner::check_world_load() {
             bsp_map_node->queue_free();
             bsp_map_node = nullptr;
             static_model_root = nullptr;  // child of bsp_map_node, freed with it
+            flares_root = nullptr;
             loaded_bsp_name = "";
             GodotSkelModelCache::get().clear();  // Invalidate model cache
             skel_mesh_cache.clear();              // Phase 60: Clear skinned mesh cache
@@ -965,6 +966,8 @@ void MoHAARunner::check_world_load() {
     if (bsp_map_node) {
         bsp_map_node->queue_free();
         bsp_map_node = nullptr;
+        static_model_root = nullptr;
+        flares_root = nullptr;
         Godot_BSP_Unload();
     }
 
@@ -1002,6 +1005,9 @@ void MoHAARunner::check_world_load() {
         // Instantiate static TIKI models from BSP data
         load_static_models();
         UtilityFunctions::print(String("[MoHAA] Static models loaded for: ") + new_bsp);
+
+        // Load flares
+        load_flares();
 
         // Load skybox cubemap from sky shader (Phase 12)
         load_skybox();
@@ -1424,6 +1430,127 @@ void MoHAARunner::load_static_models() {
     UtilityFunctions::print(String("[MoHAA] Static models: ") +
                             String::num_int64(placed) + " placed, " +
                             String::num_int64(failed) + " failed.");
+}
+
+// ──────────────────────────────────────────────
+//  Flare loading (Phase 135)
+// ──────────────────────────────────────────────
+
+void MoHAARunner::load_flares() {
+    int count = Godot_BSP_GetFlareCount();
+    if (count <= 0) return;
+
+    // Clean up any previous flares
+    if (flares_root) {
+        flares_root->queue_free();
+        flares_root = nullptr;
+    }
+
+    flares_root = memnew(Node3D);
+    flares_root->set_name("Flares");
+    if (bsp_map_node) {
+        bsp_map_node->add_child(flares_root);
+    } else {
+        game_world->add_child(flares_root);
+    }
+
+    int placed = 0;
+    std::unordered_map<int, Ref<StandardMaterial3D>> mat_cache;
+
+    for (int i = 0; i < count; i++) {
+        const BSPFlare *flare = Godot_BSP_GetFlare(i);
+        if (!flare) continue;
+
+        // Build a quad mesh with baked vertex color
+        PackedVector3Array verts;
+        PackedVector2Array uvs;
+        PackedColorArray cols;
+        PackedInt32Array inds;
+
+        verts.resize(4);
+        uvs.resize(4);
+        cols.resize(4);
+        inds.resize(6);
+
+        // 1m x 1m quad centered at origin
+        float half = 0.5f; // 1.0m size
+        verts.set(0, Vector3(-half, -half, 0));
+        verts.set(1, Vector3( half, -half, 0));
+        verts.set(2, Vector3( half,  half, 0));
+        verts.set(3, Vector3(-half,  half, 0));
+
+        uvs.set(0, Vector2(0, 1));
+        uvs.set(1, Vector2(1, 1));
+        uvs.set(2, Vector2(1, 0));
+        uvs.set(3, Vector2(0, 0));
+
+        Color col(flare->color[0], flare->color[1], flare->color[2], 1.0f);
+        cols.set(0, col);
+        cols.set(1, col);
+        cols.set(2, col);
+        cols.set(3, col);
+
+        inds.set(0, 0); inds.set(1, 1); inds.set(2, 2);
+        inds.set(3, 0); inds.set(4, 2); inds.set(5, 3);
+
+        Array arrays;
+        arrays.resize(Mesh::ARRAY_MAX);
+        arrays[Mesh::ARRAY_VERTEX] = verts;
+        arrays[Mesh::ARRAY_TEX_UV] = uvs;
+        arrays[Mesh::ARRAY_COLOR] = cols;
+        arrays[Mesh::ARRAY_INDEX] = inds;
+
+        Ref<ArrayMesh> mesh;
+        mesh.instantiate();
+        mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+
+        MeshInstance3D *mi = memnew(MeshInstance3D);
+        mi->set_name(String("Flare_") + String::num_int64(i));
+        mi->set_mesh(mesh);
+        mi->set_position(Vector3(flare->origin[0], flare->origin[1], flare->origin[2]));
+        mi->set_extra_cull_margin(2.0f); // Ensure visibility when near edge
+
+        // Material setup
+        int shader_handle = 0;
+        if (flare->shader[0]) {
+            shader_handle = Godot_Renderer_RegisterShader(flare->shader);
+        }
+
+        if (shader_handle > 0) {
+            Ref<StandardMaterial3D> mat;
+            auto it = mat_cache.find(shader_handle);
+            if (it != mat_cache.end()) {
+                mat = it->second;
+            } else {
+                mat.instantiate();
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                mat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+                mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+
+                Ref<ImageTexture> tex = get_shader_texture(shader_handle);
+                if (tex.is_valid()) {
+                    mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                } else {
+                    // Fallback texture? Or just color.
+                }
+
+                // Apply shader props (transparency/cull might differ from default)
+                apply_shader_props_to_material(mat, flare->shader);
+
+                mat_cache[shader_handle] = mat;
+            }
+            mi->set_surface_override_material(0, mat);
+        }
+
+        flares_root->add_child(mi);
+        placed++;
+    }
+
+    UtilityFunctions::print(String("[MoHAA] Loaded ") + String::num_int64(placed) + " flares.");
 }
 
 // ──────────────────────────────────────────────
