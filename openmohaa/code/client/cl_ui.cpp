@@ -173,6 +173,7 @@ const UColor UGreenChatMessageColor(0.0, 1.0, 0.333, 1.0);
 void UI_MultiplayerMenuWidgetsUpdate(void);
 void UI_MultiplayerMainMenuWidgetsUpdate(void);
 void UI_MainMenuWidgetsUpdate(void);
+void UI_WantsKeyboard(void);
 
 static UIRect2D getDefaultGMBoxRectangle(void);
 static UIRect2D getDefaultDMBoxRectangle(void);
@@ -1527,6 +1528,7 @@ void UI_FocusMenuIfExists(void)
 
     if (currentMenu) {
         IN_MouseOn();
+        UI_WantsKeyboard();
 
         if (view3d->IsActive()) {
             uWinMan.DeactivateCurrentControl();
@@ -1559,6 +1561,7 @@ void UI_OpenConsole(void)
     fakk_console->setShow(true);
     uWinMan.ActivateControl(fakk_console);
     IN_MouseOn();
+    UI_WantsKeyboard();
 }
 
 /*
@@ -1627,6 +1630,7 @@ void UI_OpenDMConsole(int iMode)
     dm_console->setShow(true);
     uWinMan.ActivateControl(dm_console);
     IN_MouseOff();
+    UI_WantsKeyboard();
 }
 
 /*
@@ -1678,6 +1682,7 @@ void UI_OpenDeveloperConsole(void)
     developer_console->setShow(true);
     uWinMan.ActivateControl(developer_console);
     IN_MouseOn();
+    UI_WantsKeyboard();
 }
 
 /*

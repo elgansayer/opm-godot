@@ -216,6 +216,25 @@ private:
     Ref<ImageTexture> cinematic_lut_texture;          // Runtime-generated colour grading LUT
     double nextgen_cvar_poll_accum = 0.0;             // Runtime cvar polling timer
     int last_ng_profile_applied = -9999;              // Edge-trigger r_ng_profile preset application
+    // Change-tracking for environment properties — only set when value differs
+    // to avoid Godot re-processing the environment pipeline every poll interval.
+    int last_env_tonemapper = -1;
+    float last_env_exposure = -1.0f;
+    float last_env_white = -1.0f;
+    float last_env_ambient_energy = -1.0f;
+    int last_env_ssao = -1;
+    float last_env_ssao_radius = -1.0f;
+    float last_env_ssao_intensity = -1.0f;
+    float last_env_ssao_power = -1.0f;
+    float last_env_ssao_detail = -1.0f;
+    float last_env_ssao_horizon = -1.0f;
+    int last_env_glow = -1;
+    int last_env_volfog = -1;
+    int last_env_fog = -1;
+    float last_env_sun_energy = -1.0f;
+    int last_env_sun_shadows = -1;
+    int last_env_refprobe = -1;
+    int last_env_refprobe_update = -1;
     bool ng_dynlights_enabled = true;
     bool ng_dynlight_shadows_enabled = true;
     int ng_dlight_shadow_max = 1;

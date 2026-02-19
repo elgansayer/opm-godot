@@ -2990,6 +2990,12 @@ int Godot_Renderer_GetShaderCount( void )
     return gr_numShaders;
 }
 
+int Godot_Renderer_IsShaderNoMip( int handle )
+{
+    if ( handle < 0 || handle >= gr_numShaders ) return 0;
+    return gr_shaders[handle].nomip;
+}
+
 /* Public shader registration — callable from MoHAARunner.cpp (C++ side).
  * Wraps the internal GR_RegisterShader so that Godot code can register
  * shader names into the shader table and receive a valid handle for use

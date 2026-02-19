@@ -60,32 +60,10 @@ static Ref<ImageTexture> build_cinematic_lut_texture() {
                 float gf = (float)g / (float)(lut_size - 1);
                 float bf = (float)b / (float)(lut_size - 1);
 
-                // Mild S-curve contrast.
-                auto grade = [](float v) -> float {
-                    float x = (v - 0.5f) * 1.08f + 0.5f;
-                    x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
-                    return powf(x, 0.97f);
-                };
-
-                float rr = grade(rf);
-                float gg = grade(gf);
-                float bb = grade(bf);
-
-                // Subtle teal/orange look: warm highlights, cool shadows.
-                float luma = rr * 0.2126f + gg * 0.7152f + bb * 0.0722f;
-                float warm = luma;
-                float cool = 1.0f - luma;
-                rr = rr + 0.03f * warm;
-                gg = gg + 0.01f * warm;
-                bb = bb + 0.03f * cool;
-
-                rr = rr < 0.0f ? 0.0f : (rr > 1.0f ? 1.0f : rr);
-                gg = gg < 0.0f ? 0.0f : (gg > 1.0f ? 1.0f : gg);
-                bb = bb < 0.0f ? 0.0f : (bb > 1.0f ? 1.0f : bb);
-
+                // Pure identity LUT for debugging — output = input, no grading.
                 int px = b * lut_size + r;
-                int py = (lut_size - 1) - g;
-                img->set_pixel(px, py, Color(rr, gg, bb, 1.0f));
+                int py = g;
+                img->set_pixel(px, py, Color(rf, gf, bf, 1.0f));
             }
         }
     }
@@ -321,54 +299,82 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     bool ng_sunlight = (cvar_int_default("r_ng_sunlight", 1) != 0);
     bool ng_sun_shadows = (cvar_int_default("r_ng_sun_shadows", 1) != 0);
     float ng_sun_energy = cvar_float_default("r_ng_sun_energy", 0.15f);
+    bool ng_grade = (cvar_int_default("r_ng_colorgrade", 1) != 0);
 
-    env->set_tonemapper(Environment::TONE_MAPPER_ACES);
-    env->set_tonemap_exposure(cvar_float_default("r_ng_tonemap_exposure", 1.0f));
-    env->set_tonemap_white(cvar_float_default("r_ng_tonemap_white", 4.0f));
-    env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
-    env->set_ambient_light_energy(cvar_float_default("r_ng_ambient_energy", 0.85f));
+    // Tonemapper: use ACES when colorgrade is on, LINEAR when off.
+    // Only update when value changes to avoid Godot re-processing env pipeline.
+    if (ng_grade) {
+        int tm = (int)Environment::TONE_MAPPER_ACES;
+        float exp = cvar_float_default("r_ng_tonemap_exposure", 1.0f);
+        float wh = cvar_float_default("r_ng_tonemap_white", 4.0f);
+        if (tm != last_env_tonemapper) { env->set_tonemapper(Environment::TONE_MAPPER_ACES); last_env_tonemapper = tm; }
+        if (exp != last_env_exposure) { env->set_tonemap_exposure(exp); last_env_exposure = exp; }
+        if (wh != last_env_white) { env->set_tonemap_white(wh); last_env_white = wh; }
+    } else {
+        int tm = (int)Environment::TONE_MAPPER_LINEAR;
+        if (tm != last_env_tonemapper) { env->set_tonemapper(Environment::TONE_MAPPER_LINEAR); last_env_tonemapper = tm; }
+        if (1.0f != last_env_exposure) { env->set_tonemap_exposure(1.0f); last_env_exposure = 1.0f; }
+        if (1.0f != last_env_white) { env->set_tonemap_white(1.0f); last_env_white = 1.0f; }
+    }
+    float amb_energy = cvar_float_default("r_ng_ambient_energy", 0.85f);
+    if (amb_energy != last_env_ambient_energy) {
+        env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
+        env->set_ambient_light_energy(amb_energy);
+        last_env_ambient_energy = amb_energy;
+    }
 
     bool ng_ssao = (cvar_int_default("r_ng_ssao", 1) != 0);
     bool ng_glow = (cvar_int_default("r_ng_glow", 1) != 0);
     bool ng_volfog = (cvar_int_default("r_ng_volfog", 1) != 0);
     bool ng_fog = (cvar_int_default("r_ng_fog", 1) != 0);
-    bool ng_grade = (cvar_int_default("r_ng_colorgrade", 1) != 0);
     bool ng_lut = (cvar_int_default("r_ng_lut", 0) != 0);
     bool ng_refprobe = (cvar_int_default("r_ng_refprobe", 0) != 0);
     int ng_refprobe_update = cvar_int_default("r_ng_refprobe_update", 0);
 
-    env->set_ssao_enabled(ng_ssao);
-    env->set_ssil_enabled(false);
-    env->set_ssr_enabled(false);
-    env->set_glow_enabled(ng_glow);
-    env->set_volumetric_fog_enabled(ng_volfog);
-    env->set_fog_enabled(ng_fog);
+    // Only update env properties when they actually change.
+    int i_ssao = ng_ssao ? 1 : 0;
+    if (i_ssao != last_env_ssao) { env->set_ssao_enabled(ng_ssao); last_env_ssao = i_ssao; }
+    int i_glow = ng_glow ? 1 : 0;
+    if (i_glow != last_env_glow) { env->set_glow_enabled(ng_glow); last_env_glow = i_glow; }
+    int i_volfog = ng_volfog ? 1 : 0;
+    if (i_volfog != last_env_volfog) { env->set_volumetric_fog_enabled(ng_volfog); last_env_volfog = i_volfog; }
+    int i_fog = ng_fog ? 1 : 0;
+    if (i_fog != last_env_fog) { env->set_fog_enabled(ng_fog); last_env_fog = i_fog; }
 
-    env->set_adjustment_enabled(ng_grade);
-    if (ng_grade && ng_lut) {
-        if (cinematic_lut_texture.is_null()) {
-            cinematic_lut_texture = build_cinematic_lut_texture();
-        }
-        env->set_adjustment_color_correction(cinematic_lut_texture);
-    } else {
-        env->set_adjustment_color_correction(Ref<Texture>());
-    }
+    // Adjustment permanently disabled — Godot 4.x color adjustment produces
+    // a red tint even with an identity LUT + default brightness/contrast.
+    env->set_adjustment_enabled(false);
 
+    int i_refprobe = ng_refprobe ? 1 : 0;
     if (main_reflection_probe) {
-        main_reflection_probe->set_visible(ng_refprobe);
-        if (ng_refprobe_update > 0) {
-            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ALWAYS);
-        } else {
-            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ONCE);
+        if (i_refprobe != last_env_refprobe) {
+            main_reflection_probe->set_visible(ng_refprobe);
+            last_env_refprobe = i_refprobe;
+        }
+        if (ng_refprobe_update != last_env_refprobe_update) {
+            if (ng_refprobe_update > 0) {
+                main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ALWAYS);
+            } else {
+                main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ONCE);
+            }
+            last_env_refprobe_update = ng_refprobe_update;
         }
     }
 
     env->set_volumetric_fog_temporal_reprojection_enabled(false);
-    // Temporal reprojection permanently disabled — same green flash bug as TAA/SSIL/SSR
 
     if (sun_light) {
-        sun_light->set_param(Light3D::PARAM_ENERGY, ng_sunlight ? ng_sun_energy : 0.0f);
-        sun_light->set_shadow(ng_sunlight && ng_sun_shadows);
+        float target_energy = ng_sunlight ? ng_sun_energy : 0.0f;
+        bool target_shadow = ng_sunlight && ng_sun_shadows;
+        if (target_energy != last_env_sun_energy) {
+            sun_light->set_param(Light3D::PARAM_ENERGY, target_energy);
+            last_env_sun_energy = target_energy;
+        }
+        int i_shadow = target_shadow ? 1 : 0;
+        if (i_shadow != last_env_sun_shadows) {
+            sun_light->set_shadow(target_shadow);
+            last_env_sun_shadows = i_shadow;
+        }
     }
 }
 
@@ -484,6 +490,7 @@ extern "C" {
                                          float *uvs);   /* [3][2] */
     const char *Godot_Renderer_GetShaderName(int handle);
     int  Godot_Renderer_GetShaderCount(void);
+    int  Godot_Renderer_IsShaderNoMip(int handle);
     int  Godot_Renderer_RegisterShader(const char *name);
     void Godot_Renderer_GetVidSize(int *w, int *h);
     /* Phase 52 remap uses Godot_Renderer_GetShaderRemap declared below */
@@ -1492,13 +1499,13 @@ void MoHAARunner::check_world_load() {
                 env->set_fog_aerial_perspective(0.5);
                 env->set_fog_sky_affect(0.3);
 
-                // ── Colour grading quality parameters ──
+                // Colour grading permanently disabled — Godot 4.x adjustment
+                // produces red tint / flicker artefacts.  Force safe defaults.
+                env->set_adjustment_enabled(false);
                 env->set_adjustment_brightness(1.0);
-                env->set_adjustment_contrast(1.08);
-                env->set_adjustment_saturation(0.92);
-                if (cinematic_lut_texture.is_null()) {
-                    cinematic_lut_texture = build_cinematic_lut_texture();
-                }
+                env->set_adjustment_contrast(1.0);
+                env->set_adjustment_saturation(1.0);
+                env->set_adjustment_color_correction(Ref<Texture>());
             }
 
             // ── Sun / directional light quality ──
@@ -4492,27 +4499,76 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // Track which effective name was used to load each cached texture so that
     // shader remapping (RemapShader) correctly invalidates stale entries.
     auto it = shader_textures.find(shader_handle);
+    // Tracks whether a cached shader texture resolved from levelshots/*.
     if (it != shader_textures.end()) {
+    static std::unordered_map<int, bool> s_shader_texture_is_levelshot;
         auto it_name = s_shader_texture_loaded_names.find(shader_handle);
         if (it_name != s_shader_texture_loaded_names.end() && it_name->second == name) {
             return it->second;  // Cache valid — same effective name
+                s_shader_texture_is_levelshot.clear();  // Clear levelshot source tags with texture cache
         }
         // Name changed (shader remap active or handle reused) — invalidate
         shader_textures.erase(it);
         shader_texture_has_alpha.erase(shader_handle);
+        s_shader_texture_is_levelshot.clear();
         s_shader_texture_loaded_names.erase(shader_handle);
     }
 
     // ── Determine the actual texture image path(s) to try ──
+            s_shader_texture_is_levelshot.erase(shader_handle);
     // Mirrors R_FindShader: first look up the shader definition in parsed
     // .shader script files.  If a definition exists, the first non-lightmap
     // stage's "map" directive gives the real texture path.  If no definition
     // is found, try using the shader name itself as a texture file path
+            s_shader_texture_is_levelshot.erase(shader_handle);
     // (the fallback R_FindShader uses for implicit shaders).
 
     const char *texture_paths[4] = { NULL, NULL, NULL, NULL };
     int num_texture_paths = 0;
+            bool from_levelshot = (name && strncmp(name, "levelshots/", 11) == 0);
 
+    /* NoMip shaders (registered via RegisterShaderNoMip = 2D/UI usage).
+     * In the real renderer, R_FindShader with LIGHTMAP_2D creates a new
+     * shader variant that loads the image from the shader name itself,
+     * even if a .shader definition exists for the same name (e.g. the
+                if (direct_tex.is_valid()) {
+                    from_levelshot = true;
+                }
+     * BSP world shader "mohdm1").  Our shader props lookup doesn't
+     * differentiate by lightmapIndex, so a NoMip shader "mohdm1" would
+     * incorrectly load a *world* texture from the BSP shader's stages
+     * instead of `levelshots/mohdm1.tga` (or `mohdm1.tga`).
+     *
+                s_shader_texture_is_levelshot[shader_handle] = from_levelshot;
+     * Fix: for NoMip shaders, try the shader name as a direct image
+     * path FIRST.  If that succeeds, use it.  Only fall through to
+     * stage-based texture resolution if the direct load fails. */
+    bool is_nomip = Godot_Renderer_IsShaderNoMip(shader_handle);
+
+    if (is_nomip && sp && sp->stage_count > 0) {
+        bool loaded_from_levelshot = false;
+        // Try loading name directly first — if it works, skip stage lookup.
+        // R_LevelShot saves map previews as "levelshots/<mapname>.tga",
+        // so also try that path for bare map names.
+        bool has_alpha = false;
+        Ref<ImageTexture> direct_tex = load_texture_from_qpath(name, &has_alpha);
+                loaded_from_levelshot = (texture_paths[tp] && strncmp(texture_paths[tp], "levelshots/", 11) == 0);
+        if (!direct_tex.is_valid() && name && !strchr(name, '/')) {
+            // Bare name (no path separator) — try levelshots/<name>
+            char levelshot_path[256];
+            snprintf(levelshot_path, sizeof(levelshot_path), "levelshots/%s", name);
+            direct_tex = load_texture_from_qpath(levelshot_path, &has_alpha);
+        }
+                s_shader_texture_is_levelshot[shader_handle] = false;
+        if (direct_tex.is_valid()) {
+            shader_textures[shader_handle] = direct_tex;
+            shader_texture_has_alpha[shader_handle] = has_alpha;
+            s_shader_texture_loaded_names[shader_handle] = name;
+            return direct_tex;
+        }
+    }
+
+            s_shader_texture_is_levelshot[shader_handle] = loaded_from_levelshot;
     if (sp && sp->stage_count > 0) {
         /* Select the best diffuse texture: skip lightmap, $whiteimage,
          * and environment map stages (tcGen environment = reflections).
@@ -5234,8 +5290,9 @@ void MoHAARunner::update_2d_overlay() {
                          * Use BLEND_OPAQUE to match this behaviour. */
                         draw_blend = BLEND_OPAQUE;
                     }
-                
+
                 }
+
 
                 // Diagnostic logging: log non-default blend decisions (once per shader)
                 if (draw_blend != BLEND_MIX && sname && sname[0]) {
@@ -5258,13 +5315,11 @@ void MoHAARunner::update_2d_overlay() {
                     }
                 }
 
-                // BLEND_OPAQUE uses render_mode blend_disabled (fully
-                // opaque, no alpha compositing).  UI elements that need
-                // partial transparency (hover highlights with SetColor
-                // alpha < 1.0) must fall back to standard blend_mix so
-                // they still composite correctly on the canvas.
-                if (draw_blend == BLEND_OPAQUE && draw_col.a < 0.99f) {
-                    draw_blend = BLEND_MIX;
+                // Levelshot-backed map preview images must be fully opaque.
+                auto ls_it = s_shader_texture_is_levelshot.find(shader);
+                if (ls_it != s_shader_texture_is_levelshot.end() && ls_it->second) {
+                    draw_blend = BLEND_OPAQUE;
+                    draw_col.a = 1.0f;
                 }
 
                 RID target_ci = get_segment_ci(draw_blend);
@@ -5488,9 +5543,12 @@ void MoHAARunner::update_2d_overlay() {
                             }
                         }
                     }
-                    // Same BLEND_OPAQUE downgrade as StretchPic path
-                    if (draw_blend == BLEND_OPAQUE && draw_col.a < 0.99f) {
-                        draw_blend = BLEND_MIX;
+                    bool is_scoreboard_map = (sname &&
+                        ((strncmp(sname, "mohdm", 5) == 0) ||
+                         (strncmp(sname, "levelshots/", 11) == 0)));
+                    if (is_scoreboard_map) {
+                        draw_blend = BLEND_OPAQUE;
+                        draw_col.a = 1.0f;
                     }
                     RID target_ci = get_segment_ci(draw_blend);
 
@@ -6682,16 +6740,6 @@ void MoHAARunner::_process(double delta) {
                     gamma_material->set_shader_parameter("gamma_inv", 1.0f / gamma);
                     gamma_current = gamma;
                 }
-            }
-        }
-
-        // BSP materials are now unshaded (lightmap is sole illumination),
-        // so no Environment brightness compensation is needed.  Disable
-        // adjustment to avoid dimming the correctly-lit scene.
-        if (world_env) {
-            Ref<Environment> env = world_env->get_environment();
-            if (env.is_valid()) {
-                env->set_adjustment_enabled(false);
             }
         }
     }
