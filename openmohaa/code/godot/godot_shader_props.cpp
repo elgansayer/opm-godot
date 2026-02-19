@@ -1571,6 +1571,26 @@ const GodotShaderProps *Godot_ShaderProps_Find(const char *shader_name) {
         it = s_shader_props.find(key_no_ext);
         if (it != s_shader_props.end())
             return &it->second;
+
+        /* Also try stripping directory from the NO-EXTENSION name
+         * (e.g. "levelshots/foo.tga" -> "foo") */
+        size_t last_slash = key_no_ext.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            std::string key_basename = key_no_ext.substr(last_slash + 1);
+            it = s_shader_props.find(key_basename);
+            if (it != s_shader_props.end())
+                return &it->second;
+        }
+    }
+
+    /* Finally, try stripping directory from the original key
+     * (e.g. "levelshots/foo" -> "foo") */
+    size_t last_slash = key.find_last_of('/');
+    if (last_slash != std::string::npos) {
+        std::string key_basename = key.substr(last_slash + 1);
+        it = s_shader_props.find(key_basename);
+        if (it != s_shader_props.end())
+            return &it->second;
     }
 
     return nullptr;

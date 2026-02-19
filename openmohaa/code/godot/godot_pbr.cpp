@@ -354,6 +354,7 @@ const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
 
     set.is_metallic = false;
     set.is_emissive = false;
+    set.is_wet = false;
 
     set.albedo = load_png_from_disk(String(paths.albedo_path.c_str()));
     if (set.albedo.is_valid()) {
@@ -394,6 +395,20 @@ const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
     for (const char **kw = emissive_keywords; *kw; kw++) {
         if (key.find(*kw) != std::string::npos) {
             set.is_emissive = true;
+            break;
+        }
+    }
+
+    /* Wetness detection: rain/damp/water-like surfaces benefit from
+     * lower roughness and stronger specular highlights. */
+    static const char *wet_keywords[] = {
+        "wet", "water", "puddle", "mud", "damp", "rain",
+        "leak", "drip", "slime", "slick", "stream", "flood",
+        nullptr
+    };
+    for (const char **kw = wet_keywords; *kw; kw++) {
+        if (key.find(*kw) != std::string::npos) {
+            set.is_wet = true;
             break;
         }
     }
@@ -461,6 +476,18 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
     } else {
         mat->set_metallic(0.0f);
         mat->set_specular(0.5f);
+    }
+
+    /* Wet materials: strong highlights, smoother micro-surface.
+     * Keeps metallic at 0 while boosting reflective response. */
+    if (pbr->is_wet) {
+        mat->set_metallic(0.0f);
+        mat->set_specular(0.9f);
+        if (pbr->roughness.is_valid()) {
+            mat->set_roughness(0.22f);
+        } else {
+            mat->set_roughness(0.28f);
+        }
     }
 
     /* ── Emission (self-illumination for lights, screens, fire) ── */

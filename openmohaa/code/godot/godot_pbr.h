@@ -31,6 +31,7 @@ struct PBRTextureSet {
     bool loaded;                    /* True if at least the albedo was loaded */
     bool is_metallic;               /* Heuristic: texture name implies metal */
     bool is_emissive;               /* Heuristic: texture name implies light source */
+    bool is_wet;                    /* Heuristic: wet/water/puddle-like surface */
 };
 
 /* Initialise the PBR system: scan the PBR asset directory and build

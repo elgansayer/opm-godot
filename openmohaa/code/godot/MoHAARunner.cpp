@@ -1102,10 +1102,36 @@ void MoHAARunner::check_world_load() {
         }
 
         // Ensure BSP clusters cast shadows (and can receive via lit materials).
+        AABB world_bounds;
+        bool have_world_bounds = false;
         for (int ci = 0; ci < bsp_map_node->get_child_count(); ci++) {
             MeshInstance3D *cmi = Object::cast_to<MeshInstance3D>(bsp_map_node->get_child(ci));
             if (!cmi) continue;
             cmi->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_ON);
+
+            AABB aabb = cmi->get_aabb();
+            if (!have_world_bounds) {
+                world_bounds = aabb;
+                have_world_bounds = true;
+            } else {
+                world_bounds = world_bounds.merge(aabb);
+            }
+        }
+
+        // Map-adaptive reflection probe sizing for higher fidelity speculars.
+        if (main_reflection_probe && have_world_bounds) {
+            Vector3 ws = world_bounds.size;
+            Vector3 centre = world_bounds.position + ws * 0.5f;
+
+            // Clamp to sane range to avoid giant probes on huge maps.
+            ws.x = ws.x < 80.0f ? 80.0f : (ws.x > 320.0f ? 320.0f : ws.x);
+            ws.y = ws.y < 50.0f ? 50.0f : (ws.y > 180.0f ? 180.0f : ws.y);
+            ws.z = ws.z < 80.0f ? 80.0f : (ws.z > 320.0f ? 320.0f : ws.z);
+
+            main_reflection_probe->set_size(ws);
+            main_reflection_probe->set_global_position(centre);
+            main_reflection_probe->set_origin_offset(Vector3(0.0f, ws.y * 0.15f, 0.0f));
+            main_reflection_probe->set_intensity(0.45f);
         }
 
         // Instantiate static TIKI models from BSP data
@@ -3092,7 +3118,20 @@ void MoHAARunner::update_dlights() {
         float dyn_energy = 3.0f + (intensity / 150.0f);
         if (dyn_energy > 8.0f) dyn_energy = 8.0f;
         light->set_param(Light3D::PARAM_ENERGY, dyn_energy);
-        light->set_shadow(false);
+
+        // Optional ultra-polish: only strongest/hero dlights cast shadows.
+        // Keeps performance sane while adding dramatic next-gen moments.
+        bool hero_shadow = false;
+        if (i < 2) {
+            if (intensity > 260.0f || type == 1) {
+                hero_shadow = true;
+            }
+        }
+        light->set_shadow(hero_shadow);
+        if (hero_shadow) {
+            light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.05f);
+            light->set_param(Light3D::PARAM_SHADOW_NORMAL_BIAS, 0.8f);
+        }
         light->set_visible(true);
     }
 
