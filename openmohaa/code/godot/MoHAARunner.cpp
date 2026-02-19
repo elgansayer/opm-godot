@@ -96,6 +96,62 @@ static Ref<ImageTexture> build_cinematic_lut_texture() {
 extern "C" void Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
 extern "C" void Cbuf_AddText(const char *text);
 
+// Forward declare cvar_t as opaque — we cannot include q_shared.h in godot-cpp TUs.
+struct cvar_s;
+typedef struct cvar_s cvar_t;
+extern "C" cvar_t *Cvar_Get(const char *var_name, const char *value, int flags);
+
+// CVAR_ARCHIVE flag (0x0001) — saves to vars.rc so the user's settings persist.
+static const int CVAR_ARCHIVE_FLAG = 0x0001;
+
+// Register all r_ng_* cvars with the engine so they appear in console,
+// tab-complete, and persist to the config file.  Must be called AFTER Com_Init().
+static void register_nextgen_cvars() {
+    // Master + profile
+    Cvar_Get("r_ng_profile",   "-1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_master",    "1",  CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_antiflicker", "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_allow_risky", "0", CVAR_ARCHIVE_FLAG);
+    // PBR + material depth
+    Cvar_Get("r_ng_pbr",                 "1",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_pbr_proc_normals",    "1",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_pbr_wet",             "1",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_depth",      "1",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_overdrive",  "0",    CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_normal_scale", "1.35", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_roughness_mul", "1.0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_specular_mul", "1.0",  CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_material_metallic_mul", "1.0",  CVAR_ARCHIVE_FLAG);
+    // Dynamic lights + shadows
+    Cvar_Get("r_ng_dynlights",        "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_dynlight_shadows", "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_dlight_shadow_max", "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_shadow_blobs",     "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_sunlight",         "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_sun_shadows",      "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_sun_energy",       "0.8", CVAR_ARCHIVE_FLAG);
+    // Post processing + environment
+    Cvar_Get("r_ng_tonemap_exposure",  "1.0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_tonemap_white",     "4.0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ambient_energy",    "0.55", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ssao",             "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ssil",             "0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_ssr",              "0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_glow",             "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_volfog",           "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_volfog_reprojection", "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_volfog_reprojection_amount", "0.90", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_fog",              "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_colorgrade",       "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_lut",              "0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_refprobe",         "0", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_refprobe_update",  "0", CVAR_ARCHIVE_FLAG);
+    // Model visual enhancements
+    Cvar_Get("r_ng_rim_light",        "1", CVAR_ARCHIVE_FLAG);
+    Cvar_Get("r_ng_rim_light_amount", "0.35", CVAR_ARCHIVE_FLAG);
+    UtilityFunctions::print("[MoHAA] Next-gen cvars registered.");
+}
+
 static int cvar_int_default(const char *name, int fallback) {
     char buf[64] = {0};
     Cvar_VariableStringBuffer(name, buf, (int)sizeof(buf));
@@ -133,6 +189,7 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_allow_risky", 0);
         queue_set_cvar_int("r_ng_material_depth", 0);
         queue_set_cvar_int("r_ng_material_overdrive", 0);
+        queue_set_cvar_int("r_ng_rim_light", 0);
         queue_set_cvar_int("r_ng_master", 0);
         return;
     }
@@ -172,6 +229,8 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_refprobe_update", 0);
         queue_set_cvar_int("r_ng_volfog_reprojection", 1);
         queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.90f);
+        queue_set_cvar_int("r_ng_rim_light", 1);
+        queue_set_cvar_float("r_ng_rim_light_amount", 0.35f);
         return;
     }
 
@@ -210,6 +269,8 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_refprobe_update", 0);
         queue_set_cvar_int("r_ng_volfog_reprojection", 1);
         queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.94f);
+        queue_set_cvar_int("r_ng_rim_light", 1);
+        queue_set_cvar_float("r_ng_rim_light_amount", 0.5f);
     }
 }
 
@@ -1417,23 +1478,18 @@ void MoHAARunner::check_world_load() {
 
 #ifdef HAS_PBR_MODULE
         // ── Next-gen rendering pipeline (requires PBR) ──
+        // IMPORTANT: This block sets quality PARAMETERS only (radius,
+        // intensity, pyramid levels, fog density, etc.).  The actual
+        // enable/disable of each pass is handled by
+        // apply_nextgen_cvar_toggles() which is called immediately
+        // after — this prevents the green flash that occurred when
+        // SSIL/SSR/LUT were unconditionally enabled for the first
+        // frames before the cvar poll could disable them.
         if (Godot_PBR_IsEnabled()) {
             if (world_env && world_env->get_environment().is_valid()) {
                 Ref<Environment> env = world_env->get_environment();
 
-                // ── Tonemapping ──
-                // ACES filmic with neutral exposure — the baked lightmaps
-                // already contain correct lighting levels so we don't boost.
-                env->set_tonemapper(Environment::TONE_MAPPER_ACES);
-                env->set_tonemap_exposure(1.0);
-                env->set_tonemap_white(4.0);
-
-                // ── Ambient light ── (lightmap pass-through, set in setup)
-                // Keep ambient at 1.0 white — the lightmap detail-MUL texture
-                // IS the lighting.  Don't override to a lower value here.
-
-                // ── SSAO (Screen-Space Ambient Occlusion) ──
-                env->set_ssao_enabled(true);
+                // ── SSAO quality parameters ──
                 env->set_ssao_radius(1.5);
                 env->set_ssao_intensity(2.0);
                 env->set_ssao_power(1.6);
@@ -1442,24 +1498,19 @@ void MoHAARunner::check_world_load() {
                 env->set_ssao_sharpness(0.95);
                 env->set_ssao_direct_light_affect(0.25);
 
-                // ── SSIL (contact-like micro bounce / darkening) ──
-                env->set_ssil_enabled(true);
+                // ── SSIL quality parameters ──
                 env->set_ssil_radius(1.8);
                 env->set_ssil_intensity(1.25);
                 env->set_ssil_sharpness(0.9);
                 env->set_ssil_normal_rejection(1.0);
 
-                // ── SSR (Screen-Space Reflections) ──
-                // Adds real-time reflections on wet/polished surfaces
-                env->set_ssr_enabled(true);
+                // ── SSR quality parameters ──
                 env->set_ssr_max_steps(64);
                 env->set_ssr_fade_in(0.15);
                 env->set_ssr_fade_out(2.0);
                 env->set_ssr_depth_tolerance(0.2);
 
-                // ── Bloom / Glow ──
-                // Cinematic glow on bright lights, explosions, fire
-                env->set_glow_enabled(true);
+                // ── Bloom / Glow quality parameters ──
                 env->set_glow_intensity(0.8);
                 env->set_glow_strength(1.2);
                 env->set_glow_bloom(0.1);
@@ -1476,9 +1527,7 @@ void MoHAARunner::check_world_load() {
                 env->set_glow_level(5, 0.3);
                 env->set_glow_level(6, 0.1);
 
-                // ── Volumetric Fog ──
-                // Atmospheric depth, god rays from windows and lights
-                env->set_volumetric_fog_enabled(true);
+                // ── Volumetric Fog quality parameters ──
                 env->set_volumetric_fog_density(0.01);
                 env->set_volumetric_fog_albedo(Color(0.9, 0.9, 0.95));
                 env->set_volumetric_fog_emission(Color(0.0, 0.0, 0.0));
@@ -1489,11 +1538,8 @@ void MoHAARunner::check_world_load() {
                 env->set_volumetric_fog_gi_inject(1.0);
                 env->set_volumetric_fog_ambient_inject(0.0);
                 env->set_volumetric_fog_sky_affect(0.5);
-                env->set_volumetric_fog_temporal_reprojection_enabled(true);
-                env->set_volumetric_fog_temporal_reprojection_amount(0.9);
 
-                // ── Depth fog (exponential distance fog fallback) ──
-                env->set_fog_enabled(true);
+                // ── Depth fog quality parameters ──
                 env->set_fog_light_color(Color(0.7, 0.75, 0.85));
                 env->set_fog_light_energy(0.5);
                 env->set_fog_sun_scatter(0.3);
@@ -1501,26 +1547,18 @@ void MoHAARunner::check_world_load() {
                 env->set_fog_aerial_perspective(0.5);
                 env->set_fog_sky_affect(0.3);
 
-                // ── Colour grading ──
-                // Subtle: contrast for depth, slight desaturation for WW2 feel
-                env->set_adjustment_enabled(true);
+                // ── Colour grading quality parameters ──
                 env->set_adjustment_brightness(1.0);
                 env->set_adjustment_contrast(1.08);
                 env->set_adjustment_saturation(0.92);
                 if (cinematic_lut_texture.is_null()) {
                     cinematic_lut_texture = build_cinematic_lut_texture();
                 }
-                if (cinematic_lut_texture.is_valid()) {
-                    env->set_adjustment_color_correction(cinematic_lut_texture);
-                }
-
-                UtilityFunctions::print("[PBR] Next-gen environment: ACES, SSR, bloom, volumetric fog, SSAO, colour grading.");
             }
 
             // ── Sun / directional light quality ──
             if (sun_light) {
-                sun_light->set_param(Light3D::PARAM_ENERGY, 0.8);
-                // Shadow already enabled in setup; reinforce cascade mode
+                // Shadow cascade mode for quality
                 sun_light->set_shadow_mode(DirectionalLight3D::SHADOW_PARALLEL_4_SPLITS);
                 // Soft shadow penumbra via angular size
                 sun_light->set_param(Light3D::PARAM_SIZE, 0.65);
@@ -1544,6 +1582,13 @@ void MoHAARunner::check_world_load() {
                 vp->set_msaa_3d(Viewport::MSAA_4X);
                 vp->set_screen_space_aa(Viewport::SCREEN_SPACE_AA_FXAA);
             }
+
+            // ── Apply cvar toggles NOW — this sets the correct enable/disable
+            // state for SSAO/SSIL/SSR/glow/fog/LUT based on the user's cvars,
+            // BEFORE any frame is rendered.  This is what prevents the green flash.
+            apply_nextgen_cvar_toggles();
+
+            UtilityFunctions::print("[PBR] Next-gen environment configured (cvar-driven).");
         }
 #endif
 
@@ -1761,6 +1806,21 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
         Godot_PBR_ApplyToMaterial(mat, shader_name);
     }
 #endif
+
+    // ── Rim lighting (Fresnel edge highlight) ──
+    // Makes low-poly model silhouettes pop and adds visual depth.
+    // Controlled by r_ng_rim_light / r_ng_rim_light_amount cvars.
+    // Only applied to lit (PER_PIXEL) materials — skip unshaded/billboard.
+    if (cvar_int_default("r_ng_rim_light", 1) != 0 &&
+        mat->get_shading_mode() == BaseMaterial3D::SHADING_MODE_PER_PIXEL &&
+        mat->get_billboard_mode() == BaseMaterial3D::BILLBOARD_DISABLED) {
+        float rim_amount = cvar_float_default("r_ng_rim_light_amount", 0.35f);
+        if (rim_amount > 0.01f) {
+            mat->set_feature(BaseMaterial3D::FEATURE_RIM, true);
+            mat->set_rim(rim_amount);
+            mat->set_rim_tint(0.3f);  // Blend between albedo and light colour
+        }
+    }
 }
 
 /// id Tech 3 AngleVectorsLeft — computes forward/left/up vectors from
@@ -1879,8 +1939,8 @@ void MoHAARunner::load_static_models() {
              * prevents double-lighting while ambient=1.0 preserves the
              * original brightness. */
             mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
-            mat->set_specular(0.2f);
-            mat->set_roughness(0.9f);
+            mat->set_specular(0.4f);
+            mat->set_roughness(0.7f);
 
             const String &shader_name = cached->surfaces[s].shader_name;
             bool found_tex = false;
@@ -2677,8 +2737,8 @@ void MoHAARunner::update_entities() {
                     mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
                     /* PER_PIXEL so skeletal entities cast + receive shadows */
                     mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_PER_PIXEL);
-                    mat->set_specular(0.2f);
-                    mat->set_roughness(0.85f);
+                    mat->set_specular(0.4f);
+                    mat->set_roughness(0.7f);
 
                     const String &shader_name = surf_shader_names[s];
                     bool found_tex = false;
@@ -6464,6 +6524,12 @@ void MoHAARunner::_ready() {
 
     Com_Init(cmdline);
     NET_Init();
+
+    // Register all r_ng_* cvars so they appear in console and tab-complete.
+    register_nextgen_cvars();
+
+    // Apply cvar toggles immediately so defaults take effect before first frame.
+    apply_nextgen_cvar_toggles();
 
     /* Load shader properties early so menu shaders resolve correctly.
      * This is loaded again during Godot_BSP_LoadWorld() for each map,

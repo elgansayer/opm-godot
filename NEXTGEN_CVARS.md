@@ -131,6 +131,17 @@ This document lists all next-gen rendering CVars, what they do, and recommended 
   - `0` = update once (stable)
   - `1` = update always (higher dynamism, higher flicker risk)
 
+## Model visual enhancements
+
+- `r_ng_rim_light` (0/1, default 1)
+  - Fresnel rim lighting on lit surfaces.
+  - Adds edge highlighting that makes low-poly model silhouettes pop.
+
+- `r_ng_rim_light_amount` (float, default 0.35)
+  - Rim light intensity. Higher = stronger edge glow.
+  - Useful range: `0.1`–`0.8`.
+  - Profile 1 (stable): `0.35`, Profile 2 (ultra): `0.5`.
+
 ## Recommended command blocks
 
 ### Stock OpenMOHAA look
