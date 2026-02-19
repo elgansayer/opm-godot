@@ -1463,7 +1463,7 @@ void MoHAARunner::check_world_load() {
                 env->set_glow_intensity(0.8);
                 env->set_glow_strength(1.2);
                 env->set_glow_bloom(0.1);
-                env->set_glow_blend_mode(Environment::GLOW_BLEND_MODE_SOFTLIGHT);
+                env->set_glow_blend_mode(Environment::GLOW_BLEND_MODE_ADDITIVE);
                 env->set_glow_hdr_bleed_threshold(1.0);
                 env->set_glow_hdr_bleed_scale(2.0);
                 env->set_glow_hdr_luminance_cap(12.0);
@@ -1525,11 +1525,14 @@ void MoHAARunner::check_world_load() {
                 sun_light->set_sky_mode(DirectionalLight3D::SKY_MODE_LIGHT_AND_SKY);
             }
 
-            // ── Anti-aliasing ── MSAA 4x for geometry edges
+            // ── Anti-aliasing ── MSAA 4x + FXAA; TAA must be OFF
+            // TAA causes continuous green/colour flashing in Godot 4.x
+            // Forward+ with dynamic scenes (mesh rebuilds, glow, ACES).
             Viewport *vp = get_viewport();
             if (vp) {
                 vp->set_msaa_3d(Viewport::MSAA_4X);
                 vp->set_screen_space_aa(Viewport::SCREEN_SPACE_AA_FXAA);
+                vp->set_use_taa(false);
             }
 
             // ── Apply cvar toggles NOW — this sets the correct enable/disable
@@ -4317,13 +4320,25 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // UI scripts may provide namespaced aliases (e.g. "MENU/multiarrow")
     // while the .shader definition key is the leaf token ("multiarrow").
     // Retry lookups using basename to match renderer behaviour.
-    if (!sp) {
+    // IMPORTANT: Skip this for standard game asset directories where the full
+    // path IS the real identifier.  "levelshots/mohdm1" must NOT match the
+    // "mohdm1" BSP world shader — it's an implicit shader that should load
+    // the levelshot image directly.
+    if (!sp && name) {
         const char *slash = strrchr(name, '/');
         if (slash && slash[1]) {
-            const GodotShaderProps *sp_base = Godot_ShaderProps_Find(slash + 1);
-            if (sp_base) {
-                sp = sp_base;
-                lookup_name = slash + 1;
+            bool is_asset_dir = (strncmp(name, "levelshots/", 11) == 0 ||
+                                 strncmp(name, "textures/", 9) == 0 ||
+                                 strncmp(name, "models/", 7) == 0 ||
+                                 strncmp(name, "gfx/", 4) == 0 ||
+                                 strncmp(name, "sprites/", 8) == 0 ||
+                                 strncmp(name, "sound/", 6) == 0);
+            if (!is_asset_dir) {
+                const GodotShaderProps *sp_base = Godot_ShaderProps_Find(slash + 1);
+                if (sp_base) {
+                    sp = sp_base;
+                    lookup_name = slash + 1;
+                }
             }
         }
     }
@@ -5220,25 +5235,38 @@ void MoHAARunner::update_2d_overlay() {
                                 }
                             }
                         }
+                    } else {
+                        /* No .shader definition found → implicit shader.
+                         * The real renderer creates implicit shaders with
+                         * GLS_DEFAULT stateBits (GL_BLEND disabled), making
+                         * them fully opaque regardless of texture alpha.
+                         * Use BLEND_OPAQUE to match this behaviour. */
+                        draw_blend = BLEND_OPAQUE;
                     }
+                
+                }
 
-                    // Force opaque blend for MOHAA scoreboard map previews which tend
-                    // to suffer from failed shader lookups or subtle transparency interpretation.
-                    // This explicitly catches "mohdm1" through "mohdm7" (and similar levels)
-                    // appearing in map preview widgets.
-                    if (sname) {
-                         bool is_map_preview = false;
-                         if (strstr(sname, "levelshots/") || strstr(sname, "dmloading")) is_map_preview = true;
-                         // Catch simple names "mohdm1", "obj_team1" too
-                         if (strncmp(sname, "mohdm", 5) == 0) is_map_preview = true;
-                         if (strncmp(sname, "obj_", 4) == 0) is_map_preview = true;
-                         
-                         if (is_map_preview) {
-                             UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview: ") + String(sname));
-                             draw_blend = BLEND_ALPHA_INV;
-                         }
+                // Diagnostic logging: log non-default blend decisions (once per shader)
+                if (draw_blend != BLEND_MIX && sname && sname[0]) {
+                    static std::unordered_set<int> logged_blend_shaders;
+                    if (logged_blend_shaders.find(shader) == logged_blend_shaders.end()) {
+                        logged_blend_shaders.insert(shader);
+                        const char *blend_name = "?";
+                        switch (draw_blend) {
+                            case BLEND_OPAQUE: blend_name = "OPAQUE"; break;
+                            case BLEND_ADD: blend_name = "ADD"; break;
+                            case BLEND_MUL: blend_name = "MUL"; break;
+                            case BLEND_MUL_INV: blend_name = "MUL_INV"; break;
+                            case BLEND_ALPHA_INV: blend_name = "ALPHA_INV"; break;
+                        }
+                        const GodotShaderProps *sp_log = Godot_ShaderProps_Find(sname);
+                        UtilityFunctions::print(String("[MoHAA][2D-BLEND] shader='") + String(sname) +
+                            String("' blend=") + String(blend_name) +
+                            String(" has_def=") + String(sp_log ? "YES" : "NO") +
+                            String(" col_a=") + String::num(draw_col.a, 3));
                     }
                 }
+
                 RID target_ci = get_segment_ci(draw_blend);
 
                 // Detect tiling: if the source rect extends beyond the

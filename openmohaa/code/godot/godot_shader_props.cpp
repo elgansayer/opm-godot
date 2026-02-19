@@ -1571,27 +1571,14 @@ const GodotShaderProps *Godot_ShaderProps_Find(const char *shader_name) {
         it = s_shader_props.find(key_no_ext);
         if (it != s_shader_props.end())
             return &it->second;
-
-        /* Also try stripping directory from the NO-EXTENSION name
-         * (e.g. "levelshots/foo.tga" -> "foo") */
-        size_t last_slash = key_no_ext.find_last_of('/');
-        if (last_slash != std::string::npos) {
-            std::string key_basename = key_no_ext.substr(last_slash + 1);
-            it = s_shader_props.find(key_basename);
-            if (it != s_shader_props.end())
-                return &it->second;
-        }
     }
 
-    /* Finally, try stripping directory from the original key
-     * (e.g. "levelshots/foo" -> "foo") */
-    size_t last_slash = key.find_last_of('/');
-    if (last_slash != std::string::npos) {
-        std::string key_basename = key.substr(last_slash + 1);
-        it = s_shader_props.find(key_basename);
-        if (it != s_shader_props.end())
-            return &it->second;
-    }
+    /* NOTE: Directory stripping (basename fallback) is intentionally NOT done
+     * here.  Stripping directories causes dangerous false matches — e.g.
+     * "levelshots/mohdm1" would match the "mohdm1" BSP world shader, giving
+     * wrong texture paths and wrong transparency classification.  Callers that
+     * genuinely need basename resolution (e.g. UI scripts using "MENU/foo"
+     * aliases) handle it explicitly in their own code. */
 
     return nullptr;
 }
