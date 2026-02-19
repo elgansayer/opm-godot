@@ -45,6 +45,9 @@ void Godot_PBR_Shutdown();
 
 /* Returns true if PBR mode is enabled (r_pbr cvar). */
 bool Godot_PBR_IsEnabled();
+void Godot_PBR_SetEnabled(bool enabled);
+void Godot_PBR_SetProceduralNormalsEnabled(bool enabled);
+void Godot_PBR_SetWetHeuristicsEnabled(bool enabled);
 
 /* Look up PBR textures for an engine texture path.
  * |engine_texture_path| is the qpath used by the engine, e.g.

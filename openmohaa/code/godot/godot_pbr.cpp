@@ -44,6 +44,8 @@ extern "C" {
 
 /* PBR enabled flag — controlled by runtime toggle */
 static bool s_pbr_enabled = true;
+static bool s_pbr_procedural_normals_enabled = true;
+static bool s_pbr_wet_heuristics_enabled = true;
 
 /* Root directory for PBR assets on the real filesystem */
 static std::string s_pbr_root;
@@ -323,6 +325,18 @@ bool Godot_PBR_IsEnabled() {
     return s_pbr_enabled && s_pbr_count > 0;
 }
 
+void Godot_PBR_SetEnabled(bool enabled) {
+    s_pbr_enabled = enabled;
+}
+
+void Godot_PBR_SetProceduralNormalsEnabled(bool enabled) {
+    s_pbr_procedural_normals_enabled = enabled;
+}
+
+void Godot_PBR_SetWetHeuristicsEnabled(bool enabled) {
+    s_pbr_wet_heuristics_enabled = enabled;
+}
+
 const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
     if (!s_pbr_enabled || !engine_texture_path || !engine_texture_path[0]) {
         return nullptr;
@@ -365,7 +379,7 @@ const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
     set.roughness = load_png_from_disk(String(paths.roughness_path.c_str()));
     set.emission = load_png_from_disk(String(paths.emission_path.c_str()));
 
-    if (!set.normal.is_valid() && set.albedo.is_valid()) {
+    if (s_pbr_procedural_normals_enabled && !set.normal.is_valid() && set.albedo.is_valid()) {
         set.normal = generate_normal_from_albedo(set.albedo);
     }
 
@@ -480,7 +494,7 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
 
     /* Wet materials: strong highlights, smoother micro-surface.
      * Keeps metallic at 0 while boosting reflective response. */
-    if (pbr->is_wet) {
+    if (s_pbr_wet_heuristics_enabled && pbr->is_wet) {
         mat->set_metallic(0.0f);
         mat->set_specular(0.9f);
         if (pbr->roughness.is_valid()) {

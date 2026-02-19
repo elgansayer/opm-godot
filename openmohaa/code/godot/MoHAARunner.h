@@ -214,6 +214,11 @@ private:
     WorldEnvironment *world_env = nullptr;    // Ambient/fog environment
     ReflectionProbe *main_reflection_probe = nullptr; // Cinematic local reflections
     Ref<ImageTexture> cinematic_lut_texture;          // Runtime-generated colour grading LUT
+    double nextgen_cvar_poll_accum = 0.0;             // Runtime cvar polling timer
+    bool ng_master_enabled = true;
+    bool ng_dynlights_enabled = true;
+    bool ng_dynlight_shadows_enabled = true;
+    bool ng_shadow_blobs_enabled = true;
 
     // BSP world geometry (Phase 7b)
     Node3D *bsp_map_node = nullptr;          // Currently loaded BSP mesh tree
@@ -427,6 +432,7 @@ private:
     void update_scoreboard(); // Draw scoreboard overlay when TAB is held
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
+    void apply_nextgen_cvar_toggles(); // Runtime next-gen feature toggles via cvars
 
 protected:
     static void _bind_methods();

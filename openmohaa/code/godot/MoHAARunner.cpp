@@ -93,6 +93,121 @@ static Ref<ImageTexture> build_cinematic_lut_texture() {
     return ImageTexture::create_from_image(img);
 }
 
+extern "C" void Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
+
+static int cvar_int_default(const char *name, int fallback) {
+    char buf[64] = {0};
+    Cvar_VariableStringBuffer(name, buf, (int)sizeof(buf));
+    if (!buf[0]) return fallback;
+    return atoi(buf);
+}
+
+static float cvar_float_default(const char *name, float fallback) {
+    char buf[64] = {0};
+    Cvar_VariableStringBuffer(name, buf, (int)sizeof(buf));
+    if (!buf[0]) return fallback;
+    return (float)atof(buf);
+}
+
+void MoHAARunner::apply_nextgen_cvar_toggles() {
+    ng_master_enabled = (cvar_int_default("r_ng_master", 1) != 0);
+
+    bool pbr_enabled = ng_master_enabled && (cvar_int_default("r_ng_pbr", 1) != 0);
+    bool pbr_proc_normals = ng_master_enabled && (cvar_int_default("r_ng_pbr_proc_normals", 1) != 0);
+    bool pbr_wet = ng_master_enabled && (cvar_int_default("r_ng_pbr_wet", 1) != 0);
+
+#ifdef HAS_PBR_MODULE
+    Godot_PBR_SetEnabled(pbr_enabled);
+    Godot_PBR_SetProceduralNormalsEnabled(pbr_proc_normals);
+    Godot_PBR_SetWetHeuristicsEnabled(pbr_wet);
+#endif
+
+    ng_dynlights_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlights", 1) != 0);
+    ng_dynlight_shadows_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlight_shadows", 1) != 0);
+    ng_shadow_blobs_enabled = (cvar_int_default("r_ng_shadow_blobs", 1) != 0);
+
+    if (!world_env || !world_env->get_environment().is_valid()) {
+        if (main_reflection_probe) {
+            main_reflection_probe->set_visible(false);
+        }
+        if (sun_light) {
+            sun_light->set_shadow(false);
+            sun_light->set_param(Light3D::PARAM_ENERGY, 0.0f);
+        }
+        return;
+    }
+
+    Ref<Environment> env = world_env->get_environment();
+
+    if (!ng_master_enabled) {
+        env->set_tonemapper(Environment::TONE_MAPPER_LINEAR);
+        env->set_tonemap_exposure(1.0f);
+        env->set_tonemap_white(1.0f);
+        env->set_ssao_enabled(false);
+        env->set_ssil_enabled(false);
+        env->set_ssr_enabled(false);
+        env->set_glow_enabled(false);
+        env->set_volumetric_fog_enabled(false);
+        env->set_fog_enabled(false);
+        env->set_adjustment_enabled(false);
+        env->set_adjustment_color_correction(Ref<Texture>());
+        env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
+        env->set_ambient_light_energy(1.0f);
+        if (main_reflection_probe) main_reflection_probe->set_visible(false);
+        if (sun_light) {
+            sun_light->set_shadow(false);
+            sun_light->set_param(Light3D::PARAM_ENERGY, 0.0f);
+        }
+        return;
+    }
+
+    bool ng_sunlight = (cvar_int_default("r_ng_sunlight", 1) != 0);
+    bool ng_sun_shadows = (cvar_int_default("r_ng_sun_shadows", 1) != 0);
+    float ng_sun_energy = cvar_float_default("r_ng_sun_energy", 0.8f);
+
+    env->set_tonemapper(Environment::TONE_MAPPER_ACES);
+    env->set_tonemap_exposure(cvar_float_default("r_ng_tonemap_exposure", 1.0f));
+    env->set_tonemap_white(cvar_float_default("r_ng_tonemap_white", 4.0f));
+    env->set_ambient_light_color(Color(1.0f, 1.0f, 1.0f));
+    env->set_ambient_light_energy(cvar_float_default("r_ng_ambient_energy", 0.55f));
+
+    bool ng_ssao = (cvar_int_default("r_ng_ssao", 1) != 0);
+    bool ng_ssil = (cvar_int_default("r_ng_ssil", 0) != 0);
+    bool ng_ssr = (cvar_int_default("r_ng_ssr", 0) != 0);
+    bool ng_glow = (cvar_int_default("r_ng_glow", 1) != 0);
+    bool ng_volfog = (cvar_int_default("r_ng_volfog", 1) != 0);
+    bool ng_fog = (cvar_int_default("r_ng_fog", 1) != 0);
+    bool ng_grade = (cvar_int_default("r_ng_colorgrade", 1) != 0);
+    bool ng_lut = (cvar_int_default("r_ng_lut", 0) != 0);
+    bool ng_refprobe = (cvar_int_default("r_ng_refprobe", 0) != 0);
+
+    env->set_ssao_enabled(ng_ssao);
+    env->set_ssil_enabled(ng_ssil);
+    env->set_ssr_enabled(ng_ssr);
+    env->set_glow_enabled(ng_glow);
+    env->set_volumetric_fog_enabled(ng_volfog);
+    env->set_fog_enabled(ng_fog);
+
+    env->set_adjustment_enabled(ng_grade);
+    if (ng_grade && ng_lut) {
+        if (cinematic_lut_texture.is_null()) {
+            cinematic_lut_texture = build_cinematic_lut_texture();
+        }
+        env->set_adjustment_color_correction(cinematic_lut_texture);
+    } else {
+        env->set_adjustment_color_correction(Ref<Texture>());
+    }
+
+    if (main_reflection_probe) {
+        main_reflection_probe->set_visible(ng_refprobe);
+    }
+
+    if (sun_light) {
+        sun_light->set_param(Light3D::PARAM_ENERGY, ng_sunlight ? ng_sun_energy : 0.0f);
+        sun_light->set_shadow(ng_sunlight && ng_sun_shadows);
+    }
+}
+
 // From register_types.cpp — track engine lifecycle across module boundary
 extern void Godot_SetEngineInitialized(bool v);
 
@@ -1093,7 +1208,7 @@ void MoHAARunner::check_world_load() {
             main_reflection_probe->set_origin_offset(Vector3(0.0f, 10.0f, 0.0f));
             main_reflection_probe->set_enable_box_projection(true);
             main_reflection_probe->set_enable_shadows(true);
-            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ALWAYS);
+            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ONCE);
             main_reflection_probe->set_cull_mask(0xFFFFFFFFu);
             game_world->add_child(main_reflection_probe);
         }
@@ -3080,6 +3195,14 @@ void MoHAARunner::update_entities() {
 void MoHAARunner::update_dlights() {
     if (!game_world) return;
 
+    if (!ng_dynlights_enabled) {
+        for (int i = 0; i < (int)dlight_nodes.size(); i++) {
+            if (dlight_nodes[i]) dlight_nodes[i]->set_visible(false);
+        }
+        active_dlight_count = 0;
+        return;
+    }
+
     int dl_count = Godot_Renderer_GetDlightCount();
 
     // Log dlight count once when first lights appear
@@ -3127,6 +3250,7 @@ void MoHAARunner::update_dlights() {
                 hero_shadow = true;
             }
         }
+        hero_shadow = hero_shadow && ng_dynlight_shadows_enabled;
         light->set_shadow(hero_shadow);
         if (hero_shadow) {
             light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.05f);
@@ -4929,6 +5053,20 @@ void MoHAARunner::update_2d_overlay() {
                             }
                         }
                     }
+
+                    // Force opaque blend for MOHAA scoreboard map previews which tend
+                    // to suffer from failed shader lookups or subtle transparency interpretation.
+                    // This explicitly catches "mohdm1" through "mohdm7" (and similar levels)
+                    // appearing in map preview widgets.
+                    if (sname && strstr(sname, "mohdm") && strstr(sname, "dmloading")) {
+                         UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview: ") + String(sname));
+                         draw_blend = BLEND_ALPHA_INV;
+                    }
+                    else if (sname && strncmp(sname, "mohdm", 5) == 0 && strlen(sname) < 10) {
+                         // Also catch straightforward "mohdm1", "mohdm2" without directory prefix
+                         UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview shader: ") + String(sname));
+                         draw_blend = BLEND_ALPHA_INV;
+                    }
                 }
                 RID target_ci = get_segment_ci(draw_blend);
 
@@ -6463,6 +6601,13 @@ void MoHAARunner::_process(double delta) {
     // ── Load BSP world geometry if a new map was loaded (Phase 7b) ──
     check_world_load();
 
+    // ── Runtime next-gen cvar toggles (poll at low frequency) ──
+    nextgen_cvar_poll_accum += delta;
+    if (nextgen_cvar_poll_accum >= 0.20) {
+        nextgen_cvar_poll_accum = 0.0;
+        apply_nextgen_cvar_toggles();
+    }
+
     // ── PVS cluster visibility culling ──
     update_pvs_visibility();
 
@@ -6472,7 +6617,14 @@ void MoHAARunner::_process(double delta) {
     update_polys();
     update_swipe_effects();     // Phase 24: swipe/melee trails
     update_terrain_marks();     // Phase 25: terrain mark decals
-    update_shadow_blobs();      // Shadow blob projection under RF_SHADOW entities
+    if (ng_shadow_blobs_enabled) {
+        update_shadow_blobs();      // Shadow blob projection under RF_SHADOW entities
+    } else {
+        for (auto *mi : shadow_blob_meshes) {
+            if (mi) mi->set_visible(false);
+        }
+        active_shadow_blob_count = 0;
+    }
     update_shader_animations(delta);  // Phase 36: tcMod scroll/rotate
 
     // ── Update 2D HUD overlay from captured draw commands (Phase 7h) ──
