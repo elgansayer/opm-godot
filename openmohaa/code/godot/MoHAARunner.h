@@ -215,9 +215,12 @@ private:
     ReflectionProbe *main_reflection_probe = nullptr; // Cinematic local reflections
     Ref<ImageTexture> cinematic_lut_texture;          // Runtime-generated colour grading LUT
     double nextgen_cvar_poll_accum = 0.0;             // Runtime cvar polling timer
+    int last_ng_profile_applied = -9999;              // Edge-trigger r_ng_profile preset application
     bool ng_master_enabled = true;
+    bool ng_antiflicker_enabled = true;
     bool ng_dynlights_enabled = true;
     bool ng_dynlight_shadows_enabled = true;
+    int ng_dlight_shadow_max = 1;
     bool ng_shadow_blobs_enabled = true;
 
     // BSP world geometry (Phase 7b)
@@ -432,6 +435,7 @@ private:
     void update_scoreboard(); // Draw scoreboard overlay when TAB is held
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
+    void apply_nextgen_profile_preset(int profile); // Apply stock/stable/ultra preset cvars
     void apply_nextgen_cvar_toggles(); // Runtime next-gen feature toggles via cvars
 
 protected:

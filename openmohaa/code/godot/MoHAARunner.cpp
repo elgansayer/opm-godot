@@ -94,6 +94,7 @@ static Ref<ImageTexture> build_cinematic_lut_texture() {
 }
 
 extern "C" void Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
+extern "C" void Cbuf_AddText(const char *text);
 
 static int cvar_int_default(const char *name, int fallback) {
     char buf[64] = {0};
@@ -109,21 +110,149 @@ static float cvar_float_default(const char *name, float fallback) {
     return (float)atof(buf);
 }
 
+static void queue_set_cvar_int(const char *name, int value) {
+    char cmd[128];
+    std::snprintf(cmd, sizeof(cmd), "set %s %d\n", name, value);
+    Cbuf_AddText(cmd);
+}
+
+static void queue_set_cvar_float(const char *name, float value) {
+    char cmd[128];
+    std::snprintf(cmd, sizeof(cmd), "set %s %.3f\n", name, value);
+    Cbuf_AddText(cmd);
+}
+
+void MoHAARunner::apply_nextgen_profile_preset(int profile) {
+    // r_ng_profile values:
+    //  -1 = custom/manual (no auto-apply)
+    //   0 = stock look
+    //   1 = stable next-gen
+    //   2 = ultra/cinematic
+    if (profile == 0) {
+        queue_set_cvar_int("r_ng_antiflicker", 1);
+        queue_set_cvar_int("r_ng_allow_risky", 0);
+        queue_set_cvar_int("r_ng_material_depth", 0);
+        queue_set_cvar_int("r_ng_material_overdrive", 0);
+        queue_set_cvar_int("r_ng_master", 0);
+        return;
+    }
+
+    if (profile == 1) {
+        queue_set_cvar_int("r_ng_master", 1);
+        queue_set_cvar_int("r_ng_antiflicker", 1);
+        queue_set_cvar_int("r_ng_allow_risky", 0);
+        queue_set_cvar_int("r_ng_pbr", 1);
+        queue_set_cvar_int("r_ng_pbr_proc_normals", 1);
+        queue_set_cvar_int("r_ng_pbr_wet", 1);
+        queue_set_cvar_int("r_ng_material_depth", 1);
+        queue_set_cvar_int("r_ng_material_overdrive", 0);
+        queue_set_cvar_float("r_ng_material_normal_scale", 1.35f);
+        queue_set_cvar_float("r_ng_material_roughness_mul", 1.0f);
+        queue_set_cvar_float("r_ng_material_specular_mul", 1.0f);
+        queue_set_cvar_float("r_ng_material_metallic_mul", 1.0f);
+        queue_set_cvar_int("r_ng_dynlights", 1);
+        queue_set_cvar_int("r_ng_dynlight_shadows", 1);
+        queue_set_cvar_int("r_ng_dlight_shadow_max", 1);
+        queue_set_cvar_int("r_ng_shadow_blobs", 1);
+        queue_set_cvar_int("r_ng_sunlight", 1);
+        queue_set_cvar_int("r_ng_sun_shadows", 1);
+        queue_set_cvar_float("r_ng_sun_energy", 0.8f);
+        queue_set_cvar_float("r_ng_tonemap_exposure", 1.0f);
+        queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
+        queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
+        queue_set_cvar_int("r_ng_ssao", 1);
+        queue_set_cvar_int("r_ng_ssil", 0);
+        queue_set_cvar_int("r_ng_ssr", 0);
+        queue_set_cvar_int("r_ng_glow", 1);
+        queue_set_cvar_int("r_ng_volfog", 1);
+        queue_set_cvar_int("r_ng_fog", 1);
+        queue_set_cvar_int("r_ng_colorgrade", 1);
+        queue_set_cvar_int("r_ng_lut", 0);
+        queue_set_cvar_int("r_ng_refprobe", 0);
+        queue_set_cvar_int("r_ng_refprobe_update", 0);
+        queue_set_cvar_int("r_ng_volfog_reprojection", 1);
+        queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.90f);
+        return;
+    }
+
+    if (profile == 2) {
+        queue_set_cvar_int("r_ng_master", 1);
+        queue_set_cvar_int("r_ng_antiflicker", 1);
+        queue_set_cvar_int("r_ng_allow_risky", 1);
+        queue_set_cvar_int("r_ng_pbr", 1);
+        queue_set_cvar_int("r_ng_pbr_proc_normals", 1);
+        queue_set_cvar_int("r_ng_pbr_wet", 1);
+        queue_set_cvar_int("r_ng_material_depth", 1);
+        queue_set_cvar_int("r_ng_material_overdrive", 1);
+        queue_set_cvar_float("r_ng_material_normal_scale", 2.1f);
+        queue_set_cvar_float("r_ng_material_roughness_mul", 0.80f);
+        queue_set_cvar_float("r_ng_material_specular_mul", 1.35f);
+        queue_set_cvar_float("r_ng_material_metallic_mul", 1.15f);
+        queue_set_cvar_int("r_ng_dynlights", 1);
+        queue_set_cvar_int("r_ng_dynlight_shadows", 1);
+        queue_set_cvar_int("r_ng_dlight_shadow_max", 2);
+        queue_set_cvar_int("r_ng_shadow_blobs", 1);
+        queue_set_cvar_int("r_ng_sunlight", 1);
+        queue_set_cvar_int("r_ng_sun_shadows", 1);
+        queue_set_cvar_float("r_ng_sun_energy", 0.8f);
+        queue_set_cvar_float("r_ng_tonemap_exposure", 1.0f);
+        queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
+        queue_set_cvar_float("r_ng_ambient_energy", 0.55f);
+        queue_set_cvar_int("r_ng_ssao", 1);
+        queue_set_cvar_int("r_ng_ssil", 1);
+        queue_set_cvar_int("r_ng_ssr", 1);
+        queue_set_cvar_int("r_ng_glow", 1);
+        queue_set_cvar_int("r_ng_volfog", 1);
+        queue_set_cvar_int("r_ng_fog", 1);
+        queue_set_cvar_int("r_ng_colorgrade", 1);
+        queue_set_cvar_int("r_ng_lut", 1);
+        queue_set_cvar_int("r_ng_refprobe", 1);
+        queue_set_cvar_int("r_ng_refprobe_update", 0);
+        queue_set_cvar_int("r_ng_volfog_reprojection", 1);
+        queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.94f);
+    }
+}
+
 void MoHAARunner::apply_nextgen_cvar_toggles() {
+    int ng_profile = cvar_int_default("r_ng_profile", -1);
+    if (ng_profile != last_ng_profile_applied) {
+        if (ng_profile >= 0 && ng_profile <= 2) {
+            apply_nextgen_profile_preset(ng_profile);
+        }
+        last_ng_profile_applied = ng_profile;
+    }
+
     ng_master_enabled = (cvar_int_default("r_ng_master", 1) != 0);
+    ng_antiflicker_enabled = (cvar_int_default("r_ng_antiflicker", 1) != 0);
+    bool ng_allow_risky = (cvar_int_default("r_ng_allow_risky", 0) != 0);
 
     bool pbr_enabled = ng_master_enabled && (cvar_int_default("r_ng_pbr", 1) != 0);
     bool pbr_proc_normals = ng_master_enabled && (cvar_int_default("r_ng_pbr_proc_normals", 1) != 0);
     bool pbr_wet = ng_master_enabled && (cvar_int_default("r_ng_pbr_wet", 1) != 0);
+    bool pbr_depth = ng_master_enabled && (cvar_int_default("r_ng_material_depth", 1) != 0);
+    bool pbr_depth_overdrive = ng_master_enabled && (cvar_int_default("r_ng_material_overdrive", 0) != 0);
+    float pbr_depth_normal_scale = cvar_float_default("r_ng_material_normal_scale", 1.35f);
+    float pbr_depth_roughness_mul = cvar_float_default("r_ng_material_roughness_mul", 1.0f);
+    float pbr_depth_specular_mul = cvar_float_default("r_ng_material_specular_mul", 1.0f);
+    float pbr_depth_metallic_mul = cvar_float_default("r_ng_material_metallic_mul", 1.0f);
 
 #ifdef HAS_PBR_MODULE
     Godot_PBR_SetEnabled(pbr_enabled);
     Godot_PBR_SetProceduralNormalsEnabled(pbr_proc_normals);
     Godot_PBR_SetWetHeuristicsEnabled(pbr_wet);
+    Godot_PBR_SetMaterialDepthEnabled(pbr_depth);
+    Godot_PBR_SetMaterialDepthOverdriveEnabled(pbr_depth_overdrive);
+    Godot_PBR_SetDepthNormalScale(pbr_depth_normal_scale);
+    Godot_PBR_SetDepthRoughnessMul(pbr_depth_roughness_mul);
+    Godot_PBR_SetDepthSpecularMul(pbr_depth_specular_mul);
+    Godot_PBR_SetDepthMetallicMul(pbr_depth_metallic_mul);
 #endif
 
     ng_dynlights_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlights", 1) != 0);
     ng_dynlight_shadows_enabled = ng_master_enabled && (cvar_int_default("r_ng_dynlight_shadows", 1) != 0);
+    ng_dlight_shadow_max = cvar_int_default("r_ng_dlight_shadow_max", 1);
+    if (ng_dlight_shadow_max < 0) ng_dlight_shadow_max = 0;
+    if (ng_dlight_shadow_max > 8) ng_dlight_shadow_max = 8;
     ng_shadow_blobs_enabled = (cvar_int_default("r_ng_shadow_blobs", 1) != 0);
 
     if (!world_env || !world_env->get_environment().is_valid()) {
@@ -180,6 +309,17 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     bool ng_grade = (cvar_int_default("r_ng_colorgrade", 1) != 0);
     bool ng_lut = (cvar_int_default("r_ng_lut", 0) != 0);
     bool ng_refprobe = (cvar_int_default("r_ng_refprobe", 0) != 0);
+    int ng_refprobe_update = cvar_int_default("r_ng_refprobe_update", 0);
+    bool ng_volfog_reprojection = (cvar_int_default("r_ng_volfog_reprojection", 1) != 0);
+    float ng_volfog_reprojection_amount = cvar_float_default("r_ng_volfog_reprojection_amount", 0.90f);
+
+    // Anti-flicker guardrail: when enabled, risky passes stay off unless explicitly allowed.
+    if (ng_antiflicker_enabled && !ng_allow_risky) {
+        ng_ssil = false;
+        ng_ssr = false;
+        ng_lut = false;
+        ng_refprobe_update = 0;
+    }
 
     env->set_ssao_enabled(ng_ssao);
     env->set_ssil_enabled(ng_ssil);
@@ -200,7 +340,17 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
 
     if (main_reflection_probe) {
         main_reflection_probe->set_visible(ng_refprobe);
+        if (ng_refprobe_update > 0) {
+            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ALWAYS);
+        } else {
+            main_reflection_probe->set_update_mode(ReflectionProbe::UPDATE_ONCE);
+        }
     }
+
+    env->set_volumetric_fog_temporal_reprojection_enabled(ng_volfog && ng_volfog_reprojection);
+    if (ng_volfog_reprojection_amount < 0.0f) ng_volfog_reprojection_amount = 0.0f;
+    if (ng_volfog_reprojection_amount > 0.99f) ng_volfog_reprojection_amount = 0.99f;
+    env->set_volumetric_fog_temporal_reprojection_amount(ng_volfog_reprojection_amount);
 
     if (sun_light) {
         sun_light->set_param(Light3D::PARAM_ENERGY, ng_sunlight ? ng_sun_energy : 0.0f);
@@ -3223,6 +3373,8 @@ void MoHAARunner::update_dlights() {
         dlight_nodes.push_back(light);
     }
 
+    int shadow_budget_remaining = ng_dlight_shadow_max;
+
     for (int i = 0; i < dl_count; i++) {
         float origin[3], intensity = 0.0f;
         float r = 1.0f, g = 1.0f, b = 1.0f;
@@ -3251,6 +3403,13 @@ void MoHAARunner::update_dlights() {
             }
         }
         hero_shadow = hero_shadow && ng_dynlight_shadows_enabled;
+        if (hero_shadow) {
+            if (shadow_budget_remaining > 0) {
+                shadow_budget_remaining--;
+            } else {
+                hero_shadow = false;
+            }
+        }
         light->set_shadow(hero_shadow);
         if (hero_shadow) {
             light->set_param(Light3D::PARAM_SHADOW_BIAS, 0.05f);
@@ -5058,14 +5217,13 @@ void MoHAARunner::update_2d_overlay() {
                     // to suffer from failed shader lookups or subtle transparency interpretation.
                     // This explicitly catches "mohdm1" through "mohdm7" (and similar levels)
                     // appearing in map preview widgets.
-                    if (sname && strstr(sname, "mohdm") && strstr(sname, "dmloading")) {
-                         UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview: ") + String(sname));
-                         draw_blend = BLEND_ALPHA_INV;
-                    }
-                    else if (sname && strncmp(sname, "mohdm", 5) == 0 && strlen(sname) < 10) {
-                         // Also catch straightforward "mohdm1", "mohdm2" without directory prefix
-                         UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview shader: ") + String(sname));
-                         draw_blend = BLEND_ALPHA_INV;
+                    if (sname && (strstr(sname, "mohdm") || strstr(sname, "obj_"))) {
+                         if (strstr(sname, "dmloading") || 
+                             (strncmp(sname, "mohdm", 5) == 0 && strlen(sname) < 10) ||
+                             (strncmp(sname, "obj_", 4) == 0 && strlen(sname) < 15)) {
+                             UtilityFunctions::print(String("[MoHAA] Forcing BLEND_ALPHA_INV for scoreboard preview: ") + String(sname));
+                             draw_blend = BLEND_ALPHA_INV;
+                         }
                     }
                 }
                 RID target_ci = get_segment_ci(draw_blend);

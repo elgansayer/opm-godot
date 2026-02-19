@@ -48,6 +48,12 @@ bool Godot_PBR_IsEnabled();
 void Godot_PBR_SetEnabled(bool enabled);
 void Godot_PBR_SetProceduralNormalsEnabled(bool enabled);
 void Godot_PBR_SetWetHeuristicsEnabled(bool enabled);
+void Godot_PBR_SetMaterialDepthEnabled(bool enabled);
+void Godot_PBR_SetMaterialDepthOverdriveEnabled(bool enabled);
+void Godot_PBR_SetDepthNormalScale(float scale);
+void Godot_PBR_SetDepthRoughnessMul(float mul);
+void Godot_PBR_SetDepthSpecularMul(float mul);
+void Godot_PBR_SetDepthMetallicMul(float mul);
 
 /* Look up PBR textures for an engine texture path.
  * |engine_texture_path| is the qpath used by the engine, e.g.

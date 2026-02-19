@@ -31,6 +31,8 @@
 
 using namespace godot;
 
+extern "C" void Cvar_VariableStringBuffer(const char *var_name, char *buffer, int bufsize);
+
 /* ── Engine accessor declarations (cannot include engine headers) ── */
 extern "C" {
     const char *Godot_VFS_GetBasepath(void);
@@ -46,6 +48,12 @@ extern "C" {
 static bool s_pbr_enabled = true;
 static bool s_pbr_procedural_normals_enabled = true;
 static bool s_pbr_wet_heuristics_enabled = true;
+static bool s_pbr_material_depth_enabled = true;
+static bool s_pbr_material_depth_overdrive_enabled = false;
+static float s_pbr_depth_normal_scale = 1.35f;
+static float s_pbr_depth_roughness_mul = 1.0f;
+static float s_pbr_depth_specular_mul = 1.0f;
+static float s_pbr_depth_metallic_mul = 1.0f;
 
 /* Root directory for PBR assets on the real filesystem */
 static std::string s_pbr_root;
@@ -66,6 +74,12 @@ static std::unordered_map<std::string, PBRTextureSet> s_pbr_cache;
 
 /* Total discovered PBR sets */
 static int s_pbr_count = 0;
+
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
 
 /* Application counters for diagnostics */
 static int s_pbr_applied = 0;
@@ -337,6 +351,30 @@ void Godot_PBR_SetWetHeuristicsEnabled(bool enabled) {
     s_pbr_wet_heuristics_enabled = enabled;
 }
 
+void Godot_PBR_SetMaterialDepthEnabled(bool enabled) {
+    s_pbr_material_depth_enabled = enabled;
+}
+
+void Godot_PBR_SetMaterialDepthOverdriveEnabled(bool enabled) {
+    s_pbr_material_depth_overdrive_enabled = enabled;
+}
+
+void Godot_PBR_SetDepthNormalScale(float scale) {
+    s_pbr_depth_normal_scale = clampf(scale, 0.1f, 4.0f);
+}
+
+void Godot_PBR_SetDepthRoughnessMul(float mul) {
+    s_pbr_depth_roughness_mul = clampf(mul, 0.2f, 3.0f);
+}
+
+void Godot_PBR_SetDepthSpecularMul(float mul) {
+    s_pbr_depth_specular_mul = clampf(mul, 0.2f, 3.0f);
+}
+
+void Godot_PBR_SetDepthMetallicMul(float mul) {
+    s_pbr_depth_metallic_mul = clampf(mul, 0.2f, 3.0f);
+}
+
 const PBRTextureSet *Godot_PBR_Find(const char *engine_texture_path) {
     if (!s_pbr_enabled || !engine_texture_path || !engine_texture_path[0]) {
         return nullptr;
@@ -464,10 +502,16 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
     }
 
     /* Apply normal map */
-    if (pbr->normal.is_valid()) {
+    const float depth_overdrive_normal_mul = s_pbr_material_depth_overdrive_enabled ? 1.8f : 1.0f;
+    const float depth_overdrive_spec_mul = s_pbr_material_depth_overdrive_enabled ? 1.30f : 1.0f;
+    const float depth_overdrive_rough_mul = s_pbr_material_depth_overdrive_enabled ? 0.72f : 1.0f;
+    const float depth_overdrive_metal_mul = s_pbr_material_depth_overdrive_enabled ? 1.20f : 1.0f;
+
+    if (pbr->normal.is_valid() && s_pbr_material_depth_enabled) {
         mat->set_feature(BaseMaterial3D::FEATURE_NORMAL_MAPPING, true);
         mat->set_texture(BaseMaterial3D::TEXTURE_NORMAL, pbr->normal);
-        mat->set_normal_scale(1.35f);
+        float normal_scale = s_pbr_depth_normal_scale * depth_overdrive_normal_mul;
+        mat->set_normal_scale(clampf(normal_scale, 0.1f, 6.0f));
     }
 
     /* Apply roughness map */
@@ -477,30 +521,60 @@ bool Godot_PBR_ApplyToMaterial(Ref<StandardMaterial3D> &mat,
         mat->set_roughness_texture_channel(BaseMaterial3D::TEXTURE_CHANNEL_GRAYSCALE);
     } else {
         /* No roughness texture — use a reasonable default */
-        mat->set_roughness(0.8f);
+        float rough = 0.8f;
+        if (s_pbr_material_depth_enabled) {
+            rough *= s_pbr_depth_roughness_mul * depth_overdrive_rough_mul;
+        }
+        mat->set_roughness(clampf(rough, 0.03f, 1.0f));
     }
 
     /* ── Metallic / specular heuristics ── */
     if (pbr->is_metallic) {
-        mat->set_metallic(0.7f);
-        mat->set_specular(0.8f);
+        float metallic = 0.7f;
+        float specular = 0.8f;
+        if (s_pbr_material_depth_enabled) {
+            metallic *= s_pbr_depth_metallic_mul * depth_overdrive_metal_mul;
+            specular *= s_pbr_depth_specular_mul * depth_overdrive_spec_mul;
+        }
+        mat->set_metallic(clampf(metallic, 0.0f, 1.0f));
+        mat->set_specular(clampf(specular, 0.0f, 1.0f));
         if (!pbr->roughness.is_valid()) {
-            mat->set_roughness(0.35f);  /* Metals are smoother */
+            float rough = 0.35f;
+            if (s_pbr_material_depth_enabled) {
+                rough *= s_pbr_depth_roughness_mul * depth_overdrive_rough_mul;
+            }
+            mat->set_roughness(clampf(rough, 0.03f, 1.0f));
         }
     } else {
         mat->set_metallic(0.0f);
-        mat->set_specular(0.5f);
+        float specular = 0.5f;
+        if (s_pbr_material_depth_enabled) {
+            specular *= s_pbr_depth_specular_mul * depth_overdrive_spec_mul;
+        }
+        mat->set_specular(clampf(specular, 0.0f, 1.0f));
     }
 
     /* Wet materials: strong highlights, smoother micro-surface.
      * Keeps metallic at 0 while boosting reflective response. */
     if (s_pbr_wet_heuristics_enabled && pbr->is_wet) {
         mat->set_metallic(0.0f);
-        mat->set_specular(0.9f);
+        float wet_spec = 0.9f;
+        if (s_pbr_material_depth_enabled) {
+            wet_spec *= s_pbr_depth_specular_mul * depth_overdrive_spec_mul;
+        }
+        mat->set_specular(clampf(wet_spec, 0.0f, 1.0f));
         if (pbr->roughness.is_valid()) {
-            mat->set_roughness(0.22f);
+            float rough = 0.22f;
+            if (s_pbr_material_depth_enabled) {
+                rough *= s_pbr_depth_roughness_mul * depth_overdrive_rough_mul;
+            }
+            mat->set_roughness(clampf(rough, 0.02f, 1.0f));
         } else {
-            mat->set_roughness(0.28f);
+            float rough = 0.28f;
+            if (s_pbr_material_depth_enabled) {
+                rough *= s_pbr_depth_roughness_mul * depth_overdrive_rough_mul;
+            }
+            mat->set_roughness(clampf(rough, 0.02f, 1.0f));
         }
     }
 
