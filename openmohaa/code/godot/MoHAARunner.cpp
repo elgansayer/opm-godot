@@ -132,8 +132,7 @@ static void register_nextgen_cvars() {
     Cvar_Get("r_ng_tonemap_white",     "4.0", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_ambient_energy",    "0.85", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_ssao",             "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_ssil",             "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_ssr",              "1", CVAR_ARCHIVE_FLAG);
+    // SSIL/SSR permanently disabled — Godot 4.x temporal accumulation causes green flash artefacts
     Cvar_Get("r_ng_glow",             "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog",           "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog_reprojection", "1", CVAR_ARCHIVE_FLAG);
@@ -221,8 +220,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
         queue_set_cvar_float("r_ng_ambient_energy", 0.85f);
         queue_set_cvar_int("r_ng_ssao", 1);
-        queue_set_cvar_int("r_ng_ssil", 1);
-        queue_set_cvar_int("r_ng_ssr", 0);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -258,8 +255,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_float("r_ng_tonemap_white", 4.0f);
         queue_set_cvar_float("r_ng_ambient_energy", 0.85f);
         queue_set_cvar_int("r_ng_ssao", 1);
-        queue_set_cvar_int("r_ng_ssil", 1);
-        queue_set_cvar_int("r_ng_ssr", 1);
         queue_set_cvar_int("r_ng_glow", 1);
         queue_set_cvar_int("r_ng_volfog", 1);
         queue_set_cvar_int("r_ng_fog", 1);
@@ -325,8 +320,7 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
 
     Ref<Environment> env = world_env->get_environment();
 
-    bool ng_ssil = (cvar_int_default("r_ng_ssil", 1) != 0);
-    bool ng_ssr  = (cvar_int_default("r_ng_ssr",  1) != 0);
+    // SSIL/SSR permanently disabled — Godot 4.x temporal accumulation causes green flash artefacts
 
     bool ng_sunlight = (cvar_int_default("r_ng_sunlight", 1) != 0);
     bool ng_sun_shadows = (cvar_int_default("r_ng_sun_shadows", 1) != 0);
@@ -350,8 +344,8 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     float ng_volfog_reprojection_amount = cvar_float_default("r_ng_volfog_reprojection_amount", 0.90f);
 
     env->set_ssao_enabled(ng_ssao);
-    env->set_ssil_enabled(ng_ssil);
-    env->set_ssr_enabled(ng_ssr);
+    env->set_ssil_enabled(false);
+    env->set_ssr_enabled(false);
     env->set_glow_enabled(ng_glow);
     env->set_volumetric_fog_enabled(ng_volfog);
     env->set_fog_enabled(ng_fog);
@@ -1465,17 +1459,9 @@ void MoHAARunner::check_world_load() {
                 env->set_ssao_sharpness(0.8);
                 env->set_ssao_direct_light_affect(0.1);
 
-                // ── SSIL quality parameters ──
-                env->set_ssil_radius(1.5);
-                env->set_ssil_intensity(1.0);
-                env->set_ssil_sharpness(0.9);
-                env->set_ssil_normal_rejection(1.0);
-
-                // ── SSR quality parameters ──
-                env->set_ssr_max_steps(64);
-                env->set_ssr_fade_in(0.15);
-                env->set_ssr_fade_out(2.0);
-                env->set_ssr_depth_tolerance(0.2);
+                // SSIL/SSR permanently disabled — green flash artefacts
+                env->set_ssil_enabled(false);
+                env->set_ssr_enabled(false);
 
                 // ── Bloom / Glow quality parameters ──
                 env->set_glow_intensity(0.8);
