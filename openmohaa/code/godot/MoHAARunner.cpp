@@ -135,8 +135,8 @@ static void register_nextgen_cvars() {
     // SSIL/SSR permanently disabled — Godot 4.x temporal accumulation causes green flash artefacts
     Cvar_Get("r_ng_glow",             "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_volfog",           "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_volfog_reprojection", "1", CVAR_ARCHIVE_FLAG);
-    Cvar_Get("r_ng_volfog_reprojection_amount", "0.94", CVAR_ARCHIVE_FLAG);
+    // Volumetric fog temporal reprojection permanently disabled — same green flash
+    // artefact as TAA/SSIL/SSR (Godot 4.x temporal accumulation bug)
     Cvar_Get("r_ng_fog",              "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_colorgrade",       "1", CVAR_ARCHIVE_FLAG);
     Cvar_Get("r_ng_lut",              "1", CVAR_ARCHIVE_FLAG);
@@ -227,8 +227,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_lut", 0);
         queue_set_cvar_int("r_ng_refprobe", 0);
         queue_set_cvar_int("r_ng_refprobe_update", 0);
-        queue_set_cvar_int("r_ng_volfog_reprojection", 1);
-        queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.90f);
         queue_set_cvar_int("r_ng_rim_light", 1);
         queue_set_cvar_float("r_ng_rim_light_amount", 0.35f);
         return;
@@ -262,8 +260,6 @@ void MoHAARunner::apply_nextgen_profile_preset(int profile) {
         queue_set_cvar_int("r_ng_lut", 1);
         queue_set_cvar_int("r_ng_refprobe", 1);
         queue_set_cvar_int("r_ng_refprobe_update", 0);
-        queue_set_cvar_int("r_ng_volfog_reprojection", 1);
-        queue_set_cvar_float("r_ng_volfog_reprojection_amount", 0.94f);
         queue_set_cvar_int("r_ng_rim_light", 1);
         queue_set_cvar_float("r_ng_rim_light_amount", 0.5f);
     }
@@ -340,8 +336,6 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
     bool ng_lut = (cvar_int_default("r_ng_lut", 0) != 0);
     bool ng_refprobe = (cvar_int_default("r_ng_refprobe", 0) != 0);
     int ng_refprobe_update = cvar_int_default("r_ng_refprobe_update", 0);
-    bool ng_volfog_reprojection = (cvar_int_default("r_ng_volfog_reprojection", 1) != 0);
-    float ng_volfog_reprojection_amount = cvar_float_default("r_ng_volfog_reprojection_amount", 0.90f);
 
     env->set_ssao_enabled(ng_ssao);
     env->set_ssil_enabled(false);
@@ -369,10 +363,8 @@ void MoHAARunner::apply_nextgen_cvar_toggles() {
         }
     }
 
-    env->set_volumetric_fog_temporal_reprojection_enabled(ng_volfog && ng_volfog_reprojection);
-    if (ng_volfog_reprojection_amount < 0.0f) ng_volfog_reprojection_amount = 0.0f;
-    if (ng_volfog_reprojection_amount > 0.99f) ng_volfog_reprojection_amount = 0.99f;
-    env->set_volumetric_fog_temporal_reprojection_amount(ng_volfog_reprojection_amount);
+    env->set_volumetric_fog_temporal_reprojection_enabled(false);
+    // Temporal reprojection permanently disabled — same green flash bug as TAA/SSIL/SSR
 
     if (sun_light) {
         sun_light->set_param(Light3D::PARAM_ENERGY, ng_sunlight ? ng_sun_energy : 0.0f);
@@ -1488,7 +1480,7 @@ void MoHAARunner::check_world_load() {
                 env->set_volumetric_fog_anisotropy(0.6);
                 env->set_volumetric_fog_length(100.0);
                 env->set_volumetric_fog_detail_spread(2.0);
-                env->set_volumetric_fog_gi_inject(1.0);
+                env->set_volumetric_fog_gi_inject(0.0);  // no VoxelGI/SDFGI in scene
                 env->set_volumetric_fog_ambient_inject(0.0);
                 env->set_volumetric_fog_sky_affect(0.5);
 
@@ -4788,13 +4780,14 @@ void MoHAARunner::update_2d_overlay() {
         opaque_mix_shader.instantiate();
         opaque_mix_shader->set_code(
             "shader_type canvas_item;\n"
+            "render_mode blend_disabled;\n"
             "void fragment() {\n"
             "    vec4 tex = texture(TEXTURE, UV);\n"
-            "    // Ignore texture alpha (replicates GL_BLEND disabled for\n"
-            "    // GLS_DEFAULT/SHADER_OPAQUE), but preserve COLOR.a from\n"
-            "    // SetColor so hover/UI highlights with alpha < 1 still\n"
-            "    // composite correctly on the canvas.\n"
-            "    COLOR = vec4(tex.rgb * COLOR.rgb, COLOR.a);\n"
+            "    // GL_BLEND disabled (GLS_DEFAULT / SHADER_OPAQUE).\n"
+            "    // blend_disabled writes directly to framebuffer — no\n"
+            "    // alpha compositing, so the 3D scene behind can never\n"
+            "    // bleed through.  Texture alpha is ignored.\n"
+            "    COLOR = vec4(tex.rgb * COLOR.rgb, 1.0);\n"
             "}\n"
         );
         opaque_mix_material.instantiate();
@@ -5195,6 +5188,11 @@ void MoHAARunner::update_2d_overlay() {
                 if (draw_col.a < 0.001f) continue;
 
                 /* Choose blend mode based on shader transparency.
+                 * NOTE: BLEND_OPAQUE uses render_mode blend_disabled
+                 * (no alpha compositing at all).  UI elements that
+                 * need partial transparency (draw_col.a < 1.0, e.g.
+                 * hover highlights via SetColor) are downgraded to
+                 * BLEND_MIX after the blend mode is determined.
                  * - SHADER_MULTIPLICATIVE: blendFunc filter (dst*src)
                  * - SHADER_MULTIPLICATIVE_INV: dst*(1-src)
                  * - SHADER_ADDITIVE: blendFunc add (src+dst)
@@ -5217,19 +5215,15 @@ void MoHAARunner::update_2d_overlay() {
                             draw_blend = BLEND_ALPHA_INV;
                         } else if (sp2->transparency == SHADER_OPAQUE) {
                             /* Real renderer: GLS_DEFAULT → GL_BLEND disabled →
-                             * texture alpha irrelevant.  BLEND_OPAQUE shader
-                             * discards tex.a but keeps COLOR.a (SetColor alpha)
-                             * so hover highlights still work.
+                             * texture alpha irrelevant.  BLEND_OPAQUE uses
+                             * render_mode blend_disabled to write pixels directly
+                             * to the framebuffer with no alpha compositing, so
+                             * the 3D scene behind can never bleed through.
                              *
-                             * NOTE: Do NOT scan individual stage blendFunc here.
-                             * Multi-stage blending (e.g. $whiteimage base + texture
-                             * with GL_ONE_MINUS_SRC_ALPHA GL_SRC_ALPHA) is a
-                             * multi-pass rendering operation that only the real
-                             * renderer's RB_IterateStagesGeneric can execute.
-                             * Our 2D overlay draws a single texture in one call,
-                             * so applying per-stage blendFunc would produce wrong
-                             * results (e.g. cg_scoreboardpic "mohdm1" matching
-                             * the BSP world shader and rendering transparent). */
+                             * UI highlights (hover buttons) that need partial
+                             * transparency set draw_col.a < 1.0 via SetColor.
+                             * These are downgraded to BLEND_MIX below so they
+                             * still alpha-composite correctly on the canvas. */
                             draw_blend = BLEND_OPAQUE;
                         }
                     } else {
@@ -5262,6 +5256,15 @@ void MoHAARunner::update_2d_overlay() {
                             String(" has_def=") + String(sp_log ? "YES" : "NO") +
                             String(" col_a=") + String::num(draw_col.a, 3));
                     }
+                }
+
+                // BLEND_OPAQUE uses render_mode blend_disabled (fully
+                // opaque, no alpha compositing).  UI elements that need
+                // partial transparency (hover highlights with SetColor
+                // alpha < 1.0) must fall back to standard blend_mix so
+                // they still composite correctly on the canvas.
+                if (draw_blend == BLEND_OPAQUE && draw_col.a < 0.99f) {
+                    draw_blend = BLEND_MIX;
                 }
 
                 RID target_ci = get_segment_ci(draw_blend);
@@ -5485,10 +5488,13 @@ void MoHAARunner::update_2d_overlay() {
                             }
                         }
                     }
+                    // Same BLEND_OPAQUE downgrade as StretchPic path
+                    if (draw_blend == BLEND_OPAQUE && draw_col.a < 0.99f) {
+                        draw_blend = BLEND_MIX;
+                    }
                     RID target_ci = get_segment_ci(draw_blend);
 
                     RID tex_rid = tex->get_rid();
-                    rs->canvas_item_add_polygon(target_ci, points, colors_arr, uvs, tex_rid);
                     saw_textured_draw = true;
                 }
             }

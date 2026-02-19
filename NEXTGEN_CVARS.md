@@ -39,8 +39,6 @@ All defaults are set to maximum quality (ultra). Use profiles or individual cvar
 - `r_ng_ssao` (0/1, default 1) — Screen-space ambient occlusion.
 - `r_ng_glow` (0/1, default 1) — Bloom/glow.
 - `r_ng_volfog` (0/1, default 1) — Volumetric fog.
-- `r_ng_volfog_reprojection` (0/1, default 1) — Volumetric fog temporal reprojection.
-- `r_ng_volfog_reprojection_amount` (float, default 0.90) — Reprojection amount. Range: 0.70–0.98.
 - `r_ng_fog` (0/1, default 1) — Distance/depth fog.
 - `r_ng_colorgrade` (0/1, default 1) — Colour adjustment pipeline.
 - `r_ng_lut` (0/1, default 0) — LUT-based colour correction.
@@ -62,6 +60,8 @@ All defaults are set to maximum quality (ultra). Use profiles or individual cvar
 - `r_ng_allow_risky` — was an override for the guardrail; no longer needed
 - `r_ng_ssil` — removed (Godot 4.x temporal accumulation causes green flash)
 - `r_ng_ssr` — removed (Godot 4.x temporal accumulation causes green flash)
+- `r_ng_volfog_reprojection` — removed (Godot 4.x temporal accumulation causes green flash)
+- `r_ng_volfog_reprojection_amount` — removed (tied to reprojection)
 
 ## Recommended command blocks
 
