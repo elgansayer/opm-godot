@@ -20,6 +20,11 @@
 #include "godot_shader_material.h"
 #include "godot_terrain_normal.h"
 
+#if __has_include("godot_pbr.h")
+#include "godot_pbr.h"
+#define HAS_PBR_MODULE 1
+#endif
+
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/mesh_instance3d.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
@@ -734,15 +739,30 @@ static void load_lightmaps(const uint8_t *lm_data, int lm_len) {
         uint8_t *dst = rgba.ptrw();
 
         for (int p = 0; p < LIGHTMAP_SIZE * LIGHTMAP_SIZE; p++) {
-            // The real renderer applies R_ColorShiftLightingBytes (<< 1)
-            // here, but compensates during the multitexture combine via
-            // hardware overbright bits (GL_RGB_SCALE).  Our unshaded
-            // StandardMaterial3D pipeline has no such compensation, so we
-            // store raw lightmap values.  Net result matches the real
-            // renderer's final output: texture × lightmap (no 2× boost).
-            dst[p * 4 + 0] = src[p * 3 + 0];
-            dst[p * 4 + 1] = src[p * 3 + 1];
-            dst[p * 4 + 2] = src[p * 3 + 2];
+            // The real renderer applies R_ColorShiftLightingBytes (<< overbrightShift)
+            // here.  On modern systems (no hardware gamma, windowed):
+            //   overbrightBits = 0
+            //   overbrightShift = r_mapOverBrightBits - overbrightBits = 1 - 0 = 1
+            // So the shift is << 1 (×2) with hue-preserving clamping.
+            // This bakes the overbright scaling directly into the lightmap texture.
+            int r = src[p * 3 + 0] << 1;
+            int g = src[p * 3 + 1] << 1;
+            int b = src[p * 3 + 2] << 1;
+
+            // Hue-preserving clamp (same as R_ColorShiftLightingBytes in tr_bsp.c)
+            int max_val = r;
+            if (g > max_val) max_val = g;
+            if (b > max_val) max_val = b;
+
+            if (max_val > 255) {
+                r = (r * 255) / max_val;
+                g = (g * 255) / max_val;
+                b = (b * 255) / max_val;
+            }
+
+            dst[p * 4 + 0] = r;
+            dst[p * 4 + 1] = g;
+            dst[p * 4 + 2] = b;
             dst[p * 4 + 3] = 255;
         }
 
@@ -948,11 +968,11 @@ static Ref<ArrayMesh> batches_to_array_mesh(
              * shader definition explicitly says "cull none". */
             mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
 
-            /* BSP world surfaces are lit exclusively by their lightmap
+            /* BSP world surfaces are lit exclusively by their baked lightmap
              * (or vertex colours for nolightmap surfaces).  The real
-             * renderer never applies dynamic scene lights to BSP geometry.
-             * Unshaded prevents Godot's DirectionalLight / ambient from
-             * adding extra illumination (which caused double-lighting). */
+             * OpenMOHAA renderer never applies dynamic scene lights to BSP
+             * geometry.  UNSHADED prevents Godot from adding any dynamic
+             * illumination (which would double-light the scene). */
             mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
 
             bool has_texture = false;
@@ -1018,6 +1038,10 @@ static Ref<ArrayMesh> batches_to_array_mesh(
 
             if (batch.nolightmap) {
                 mat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+                /* Nolightmap surfaces are fullbright (sky, lava, special FX).
+                 * Revert to UNSHADED so they don't receive dynamic shadows
+                 * or respond to the directional light. */
+                mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
             }
 
             if (!s_debug_white_lightmaps &&
@@ -1033,6 +1057,14 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                                  s_lightmaps[batch.lightmap_num]);
                 mat->set_feature(BaseMaterial3D::FEATURE_DETAIL, true);
             }
+
+#ifdef HAS_PBR_MODULE
+            // PBR enhancement: if HD PBR textures exist for this surface's shader,
+            // apply normal map, roughness, and switch to lit rendering.
+            if (Godot_PBR_IsEnabled() && batch.shader_name) {
+                Godot_PBR_ApplyToMaterial(mat, batch.shader_name);
+            }
+#endif
 
             surface_mat = mat;
         }

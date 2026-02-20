@@ -18,6 +18,7 @@
 #include <godot_cpp/classes/quad_mesh.hpp>
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/base_material3d.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/color.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -25,6 +26,11 @@
 
 #include <cmath>
 #include <cstdlib>
+
+extern "C" {
+    int Godot_Renderer_RegisterShader(const char *name);
+}
+extern godot::Ref<godot::ImageTexture> Godot_GetShaderTexture(int shader_handle);
 
 using namespace godot;
 
@@ -172,15 +178,27 @@ static Ref<StandardMaterial3D> create_particle_material(const float colour[4]) {
 /* ===================================================================
  *  Create a decal material (face-aligned, unshaded).
  * ================================================================ */
-static Ref<StandardMaterial3D> create_decal_material(void) {
+static Ref<StandardMaterial3D> create_decal_material(const char *texture_path) {
     Ref<StandardMaterial3D> mat;
     mat.instantiate();
     mat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
     mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-    mat->set_albedo(Color(0.15f, 0.15f, 0.15f, 0.8f));
+    mat->set_albedo(Color(0.8f, 0.8f, 0.8f, 0.8f)); // Brighter base, let texture do the work
     mat->set_flag(BaseMaterial3D::FLAG_DISABLE_DEPTH_TEST, false);
     mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
     mat->set_render_priority(1);
+
+    if (texture_path && texture_path[0]) {
+        // Find or register the shader for this decal texture to use the renderer's texture loading
+        int shader_handle = Godot_Renderer_RegisterShader(texture_path);
+        if (shader_handle > 0) {
+            Ref<ImageTexture> tex = Godot_GetShaderTexture(shader_handle);
+            if (tex.is_valid()) {
+                mat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+            }
+        }
+    }
+
     return mat;
 }
 
@@ -307,7 +325,7 @@ void Godot_Impact_Spawn(ImpactSurfaceType type,
                 qm->set_size(Vector2(dsize, dsize));
             }
 
-            Ref<StandardMaterial3D> dmat = create_decal_material();
+            Ref<StandardMaterial3D> dmat = create_decal_material(tmpl.decal_texture);
             d.node->set_surface_override_material(0, dmat);
 
             /* Position slightly offset from surface to avoid z-fighting */

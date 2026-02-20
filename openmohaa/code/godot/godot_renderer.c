@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <math.h>
 
+/* Forward declarations used before their definitions. */
+const char *Godot_Renderer_GetShaderRemap( const char *shaderName );
+
 /* -------------------------------------------------------------------
  *  Globals
  * ---------------------------------------------------------------- */
@@ -2024,6 +2027,7 @@ static int GR_ProbeImageDimensions( const char *basepath, int *out_w, int *out_h
 static void GR_CacheShaderDimensions( qhandle_t hShader )
 {
     const char *name;
+    const char *remapped;
     char resolved[MAX_QPATH];
     int w = 0, h = 0;
 
@@ -2031,6 +2035,13 @@ static void GR_CacheShaderDimensions( qhandle_t hShader )
     if ( gr_shaderWidths[hShader] != GR_DIM_UNKNOWN ) return;
 
     name = gr_shaders[hShader].name;
+
+    /* Resolve through shader remap table so that the dimensions match
+     * the texture that get_shader_texture() will actually load. */
+    remapped = Godot_Renderer_GetShaderRemap( name );
+    if ( remapped && remapped[0] ) {
+        name = remapped;
+    }
 
     /* Step 1: Resolve through .shader definition — the stage `map` directive
      * holds the actual texture path, which may differ from the shader name.
@@ -2120,17 +2131,29 @@ static int GR_CountTextureMemory( void )
  *  Misc
  * ---------------------------------------------------------------- */
 
+static void GR_InvalidateDimensionsForShader( const char *shaderName )
+{
+    /* Invalidate cached dimensions for any handle whose name matches
+     * so that GR_GetShaderWidth/Height will re-probe the file. */
+    for ( int i = 1; i < gr_numShaders; i++ ) {
+        if ( Q_stricmp( gr_shaders[i].name, shaderName ) == 0 ) {
+            gr_shaderWidths[i]  = GR_DIM_UNKNOWN;
+            gr_shaderHeights[i] = GR_DIM_UNKNOWN;
+        }
+    }
+}
+
 static void GR_RemapShader( const char *oldShader, const char *newShader,
                             const char *offsetTime )
 {
     if ( !oldShader || !newShader ) return;
 
-    /* Check if already remapped — update in place */
     for ( int i = 0; i < gr_numShaderRemaps; i++ ) {
-        if ( strcmp( gr_shaderRemaps[i].oldName, oldShader ) == 0 ) {
+        if ( Q_stricmp( gr_shaderRemaps[i].oldName, oldShader ) == 0 ) {
             strncpy( gr_shaderRemaps[i].newName, newShader, MAX_QPATH - 1 );
             gr_shaderRemaps[i].newName[MAX_QPATH - 1] = '\0';
             gr_shaderRemaps[i].timeOffset = offsetTime ? atoi( offsetTime ) : 0;
+            GR_InvalidateDimensionsForShader( oldShader );
             return;
         }
     }
@@ -2142,6 +2165,7 @@ static void GR_RemapShader( const char *oldShader, const char *newShader,
     strncpy( r->newName, newShader, MAX_QPATH - 1 );
     r->newName[MAX_QPATH - 1] = '\0';
     r->timeOffset = offsetTime ? atoi( offsetTime ) : 0;
+    GR_InvalidateDimensionsForShader( oldShader );
 }
 
 static qboolean GR_GetEntityToken( char *buffer, int size )
@@ -2759,7 +2783,7 @@ const char *Godot_Renderer_GetShaderRemap( const char *shaderName )
 {
     if ( !shaderName ) return NULL;
     for ( int i = 0; i < gr_numShaderRemaps; i++ ) {
-        if ( strcmp( gr_shaderRemaps[i].oldName, shaderName ) == 0 ) {
+        if ( Q_stricmp( gr_shaderRemaps[i].oldName, shaderName ) == 0 ) {
             return gr_shaderRemaps[i].newName;
         }
     }

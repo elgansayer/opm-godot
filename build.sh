@@ -20,5 +20,5 @@ scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes "$@"
 
 # Deploy artifacts
 mkdir -p "$PROJECT_BIN_DIR" "$CGAME_DEPLOY_DIR"
-command cp -f bin/libopenmohaa.so "$PROJECT_BIN_DIR/libopenmohaa.so"
-command cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so"
+\cp -f bin/libopenmohaa.so "$PROJECT_BIN_DIR/libopenmohaa.so" || exit 1
+\cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so" || exit 1

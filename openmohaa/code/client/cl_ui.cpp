@@ -1886,30 +1886,23 @@ void UI_Update(void)
         frame = uWinMan.getFrame();
         view3d->Display(frame, 1.0);
 
-        if (ui_hud && !view3d->LetterboxActive()) {
-            // draw the health hud
-            if (hud_health) {
-                hud_health->ForceShow();
-                frame = uWinMan.getFrame();
-                hud_health->GetContainerWidget()->Display(frame, 1.0);
-            }
-
-            // draw the ammo hud
-            if (hud_ammo) {
-                hud_ammo->ForceShow();
-                frame = uWinMan.getFrame();
-                hud_ammo->GetContainerWidget()->Display(frame, 1.0);
-            }
-
-            // draw the compass hud
-            if (hud_compass) {
-                hud_compass->ForceShow();
-                frame = uWinMan.getFrame();
-                hud_compass->GetContainerWidget()->Display(frame, 1.0);
-            }
+        /* Skip menu / console / loading-screen logic — jump straight
+         * to the HUD update section so crosshair, weapons bar, ammo,
+         * compass, scoreboard, and uWinMan.UpdateViews() all run.
+         *
+         * We still need to show the message boxes and mini-console
+         * that are normally set up between here and the HUD section. */
+        if (fakk_console && mini_console) {
+            mini_console->setRealShow(ui_minicon->integer ? (fakk_console->getShow() ^ 1) : false);
         }
-
-        return;
+        if (gmbox) {
+            gmbox->setRealShow(true);
+        }
+        if (dmbox) {
+            dmbox->setRealShow(true);
+        }
+        currentMenu = NULL;
+        goto godot_hud_update;
     }
 
     if (fakk_console) {
@@ -2019,6 +2012,7 @@ void UI_Update(void)
         }
     }
 
+godot_hud_update:
     // Hide the HUD when necessary
     if (!ui_hud || clc.state != CA_ACTIVE || view3d->LetterboxActive() || (currentMenu && currentMenu->isFullscreen())
         || server_loading || ((cl.snap.ps.pm_flags & PMF_NO_HUD) || (cl.snap.ps.pm_flags & PMF_INTERMISSION))) {

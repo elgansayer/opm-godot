@@ -145,6 +145,11 @@
 #define HAS_DRAW_DISTANCE_MODULE 1
 #endif
 
+#if __has_include("godot_pbr.h")
+#include "godot_pbr.h"
+#define HAS_PBR_MODULE 1
+#endif
+
 using namespace godot;
 
 // ── Game flow state machine (Phase 261) ──
@@ -417,7 +422,6 @@ private:
     void update_2d_overlay(); // Read 2D draw commands and queue redraw
     void update_hud_models(); // Render HUD model previews (Phase 148)
     void update_scoreboard(); // Draw scoreboard overlay when TAB is held
-    Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
 
 protected:
@@ -426,6 +430,8 @@ protected:
 public:
     MoHAARunner();
     ~MoHAARunner();
+
+    Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
 
     void _ready() override;
     void _process(double delta) override;
