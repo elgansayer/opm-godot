@@ -2410,3 +2410,26 @@ Replaced the non-functional `canvas_item_set_custom_rect()` approach with proper
 - `code/godot/MoHAARunner.h` — Added `scissor_items` vector for scissor canvas item cleanup
 - `code/godot/godot_renderer.c` — `GR_ImageExists()` checks shader table before VFS
 - `project/Main.gd` — `dev_mode = false` default, `--dev` flag, cleaned up timer callback
+
+## Phase 146: Flare Surface Rendering ✅
+
+- [x] **Task 146.1:** Added `cluster` field to `BSPFlare` struct in `godot_bsp_mesh.h`.
+- [x] **Task 146.2:** Populated flare cluster index in `godot_bsp_mesh.cpp` using `Godot_BSP_PointCluster`.
+- [x] **Task 146.3:** Implemented `load_flares()` in `MoHAARunner.cpp`:
+  - Groups collected flares by `(cluster, shader)`.
+  - Creates `MultiMeshInstance3D` nodes for efficient rendering.
+  - Sets `billboard_mode = ENABLED`, `shading_mode = UNSHADED`, and `blend_mode = ADD` (default).
+  - Parents flare nodes to the corresponding PVS cluster node for visibility culling.
+- [x] **Task 146.4:** Called `load_flares()` in `check_world_load()` after static model loading.
+
+### Key technical details (Phase 146):
+- Flares are rendered as 1.0m quads using `MultiMeshInstance3D`.
+- Uses vertex colors from the BSP surface.
+- Supports shader properties (texture, blend mode) via `apply_shader_props_to_material`.
+- PVS culling works automatically by parenting to `Cluster_N` nodes.
+
+### Files modified (Phase 146):
+- `code/godot/godot_bsp_mesh.h` — added cluster field to BSPFlare
+- `code/godot/godot_bsp_mesh.cpp` — calculate cluster for flares
+- `code/godot/MoHAARunner.h` — declare load_flares
+- `code/godot/MoHAARunner.cpp` — implement load_flares

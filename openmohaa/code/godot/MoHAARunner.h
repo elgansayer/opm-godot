@@ -414,6 +414,7 @@ private:
     void update_hud_models(); // Render HUD model previews (Phase 148)
     void update_scoreboard(); // Draw scoreboard overlay when TAB is held
     Ref<ImageTexture> get_shader_texture(int shader_handle); // Lazily load shader textures
+    void load_flares(); // Load flare surfaces (Phase 74)
     void load_skybox();  // Load skybox cubemap from BSP sky shader (Phase 12)
 
 protected:
