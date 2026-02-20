@@ -1225,6 +1225,15 @@ static UIRect2D getDefaultGMBoxRectangle(void)
 {
     UIRect2D dmRect = getDefaultDMBoxRectangle();
     float    height = uid.vidHeight * ui_compass_scale->value * 0.25f;
+
+#ifdef GODOT_GDEXTENSION
+    // Godot locks UI virtual resolution to 640x480 which causes the default scale math
+    // (~66px) to overlap the 128x128 compass. Ensure it clears the compass bounding box.
+    if ((uid.vidHeight == 480 || uid.bHighResScaling) && height < 140.0f * uid.scaleRes[1]) {
+        height = 140.0f * uid.scaleRes[1];
+    }
+#endif
+
     float    y      = dmRect.size.height + dmRect.pos.y;
 
     if (height < y) {
@@ -1245,6 +1254,14 @@ static UIRect2D getDefaultDMBoxRectangle(void)
     float screenWidth = getScreenWidth();
 
     width = screenWidth * uid.scaleRes[0] * ui_compass_scale->value * 0.2f;
+
+#ifdef GODOT_GDEXTENSION
+    // Godot locks UI virtual resolution to 640x480 which causes the default scale math
+    // (~70px) to overlap the 128x128 compass. Ensure it clears the compass bounding box.
+    if ((uid.vidWidth == 640 || uid.bHighResScaling) && width < 140.0f * uid.scaleRes[0]) {
+        width = 140.0f * uid.scaleRes[0];
+    }
+#endif
 
     return UIRect2D(width, 0, (screenWidth - (width + 192.0f)) * uid.scaleRes[0], 120.0f * uid.scaleRes[1]);
 }
