@@ -477,3 +477,29 @@ ImpactSurfaceType Godot_Impact_SurfaceFromFlags(int surfaceFlags) {
     if (surfaceFlags & 0x40000)   return IMPACT_GRILL;    /* SURF_GRILL   */
     return IMPACT_DEFAULT;
 }
+
+extern "C" void Godot_Impact_Spawn_C(int surfaceFlags, const float *pos, const float *normal) {
+    if (!pos || !normal) return;
+    ImpactSurfaceType type = Godot_Impact_SurfaceFromFlags(surfaceFlags);
+
+    // Convert coordinate system: id Tech 3 (Z-up, inches) -> Godot (Y-up, metres)
+    // godot.x = -id.y
+    // godot.y = id.z
+    // godot.z = -id.x
+    static constexpr float SCALE = 1.0f / 39.37f;
+
+    Vector3 p(
+        -pos[1] * SCALE,
+         pos[2] * SCALE,
+        -pos[0] * SCALE
+    );
+
+    // Normal vector (direction only, no scale)
+    Vector3 n(
+        -normal[1],
+         normal[2],
+        -normal[0]
+    );
+
+    Godot_Impact_Spawn(type, p, n);
+}

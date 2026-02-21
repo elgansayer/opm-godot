@@ -570,6 +570,9 @@ MoHAARunner::~MoHAARunner() {
 #ifdef HAS_FRUSTUM_CULL_MODULE
     Godot_FrustumCull_Shutdown();
 #endif
+#ifdef HAS_IMPACT_EFFECTS_MODULE
+    Godot_Impact_Shutdown();
+#endif
 
     /* Free scoreboard map preview child canvas item. */
     if (sb_map_preview_ci.is_valid()) {
@@ -981,6 +984,9 @@ void MoHAARunner::check_world_load() {
 #ifdef HAS_PBR_MODULE
             Godot_PBR_Shutdown();
 #endif
+#ifdef HAS_IMPACT_EFFECTS_MODULE
+            Godot_Impact_Shutdown();
+#endif
             Godot_SoundOcclusion_SetEnabled(0);   // Disable occlusion when BSP unloaded
             pvs_current_cluster = -1;             // Reset PVS state
             pvs_log_count = 0;
@@ -1055,6 +1061,9 @@ void MoHAARunner::check_world_load() {
         // ── Module hooks for world load (defensive) ──
 #ifdef HAS_WEATHER_MODULE
         Godot_Weather_Init(game_world);
+#endif
+#ifdef HAS_IMPACT_EFFECTS_MODULE
+        Godot_Impact_Init(game_world);
 #endif
         // Enable sound occlusion now that BSP collision data is available
         Godot_SoundOcclusion_SetEnabled(1);
@@ -6145,6 +6154,9 @@ void MoHAARunner::_ready() {
 #ifdef HAS_DRAW_DISTANCE_MODULE
     Godot_DrawDistance_Init();
 #endif
+#ifdef HAS_IMPACT_EFFECTS_MODULE
+    Godot_Impact_Init(game_world);
+#endif
 
     UtilityFunctions::print("[MoHAA] Engine initialised.");
 }
@@ -6445,6 +6457,9 @@ void MoHAARunner::_process(double delta) {
 #endif
 #ifdef HAS_DEBUG_RENDER_MODULE
     Godot_DebugRender_Update(delta);
+#endif
+#ifdef HAS_IMPACT_EFFECTS_MODULE
+    Godot_Impact_Update(delta);
 #endif
 
     // ── Phase 60/61: Evict stale mesh and material cache entries ──

@@ -145,6 +145,11 @@
 #define HAS_DRAW_DISTANCE_MODULE 1
 #endif
 
+#if __has_include("godot_impact_effects.h")
+#include "godot_impact_effects.h"
+#define HAS_IMPACT_EFFECTS_MODULE 1
+#endif
+
 #if __has_include("godot_pbr.h")
 #include "godot_pbr.h"
 #define HAS_PBR_MODULE 1

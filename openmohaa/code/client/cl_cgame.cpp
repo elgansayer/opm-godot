@@ -691,6 +691,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 #ifdef GODOT_GDEXTENSION
 	cgi->AddMuzzleFlash					= re.AddMuzzleFlash;
 	cgi->AddShellCasing					= re.AddShellCasing;
+	cgi->AddImpact						= re.AddImpact;
 #endif
 
 	cgi->S_StartSound					= S_StartSound;

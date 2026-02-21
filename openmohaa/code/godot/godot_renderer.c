@@ -2593,6 +2593,7 @@ static void GR_Set2DInitialShaderTime( float startTime )
 
 extern void Godot_MuzzleFlash_Spawn_C(float *pos, float *dir, float intensity);
 extern void Godot_ShellCasing_Eject_C(float *pos, float *vel, int type);
+extern void Godot_Impact_Spawn_C(int surfaceFlags, const float *pos, const float *normal);
 
 static void GR_AddMuzzleFlash( const vec3_t origin, const vec3_t dir, float intensity )
 {
@@ -2602,6 +2603,11 @@ static void GR_AddMuzzleFlash( const vec3_t origin, const vec3_t dir, float inte
 static void GR_AddShellCasing( const vec3_t origin, const vec3_t velocity, int type )
 {
     Godot_ShellCasing_Eject_C( (float*)origin, (float*)velocity, type );
+}
+
+static void GR_AddImpact( int surfaceFlags, const vec3_t origin, const vec3_t normal )
+{
+    Godot_Impact_Spawn_C( surfaceFlags, (const float*)origin, (const float*)normal );
 }
 
 /* ===================================================================
@@ -3457,6 +3463,7 @@ refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
 #ifdef GODOT_GDEXTENSION
     re.AddMuzzleFlash      = GR_AddMuzzleFlash;
     re.AddShellCasing      = GR_AddShellCasing;
+    re.AddImpact           = GR_AddImpact;
 #endif
 
     /* Phase 149: Register ter_restart command — the original renderer registers this

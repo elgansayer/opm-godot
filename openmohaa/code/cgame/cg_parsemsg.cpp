@@ -316,6 +316,10 @@ static void CG_MakeBulletHole(
         );
     }
 
+#ifdef GODOT_GDEXTENSION
+    cgi.AddImpact(trace.surfaceFlags, trace.endpos, trace.plane.normal);
+#endif
+
     CG_MakeBulletHoleType(vFrom, i_vNorm, iLarge, iEffect, fRadius, bMakeSound);
 }
 

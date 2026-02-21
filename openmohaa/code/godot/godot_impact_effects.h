@@ -99,6 +99,18 @@ void Godot_Impact_Shutdown(void);
  */
 ImpactSurfaceType Godot_Impact_SurfaceFromFlags(int surfaceFlags);
 
+extern "C" {
 #endif /* __cplusplus */
+
+/*
+ * C-compatible spawn function.
+ * Coordinates are expected in Godot space (metres, Y-up).
+ * Caller must convert from id-space if needed.
+ */
+void Godot_Impact_Spawn_C(int surfaceFlags, const float *pos, const float *normal);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* GODOT_IMPACT_EFFECTS_H */
