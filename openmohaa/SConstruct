@@ -283,6 +283,10 @@ def should_exclude(filepath):
     if fp.endswith("godot_shader_props.cpp"):
         return True
 
+    # Dead code — surface effect lookup tables are never called
+    if fp.endswith("godot_surface_effects.cpp"):
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)
@@ -306,6 +310,7 @@ elif env["platform"] == "web":
     env.Append(CCFLAGS=["-sSUPPORT_LONGJMP='emscripten'"])
     env.Append(LINKFLAGS=["-sUSE_ZLIB=1"])
     env.Append(LINKFLAGS=["-sSUPPORT_LONGJMP='emscripten'"])
+    env.Append(LINKFLAGS=["-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=['$$emscripten_longjmp','$$emscripten_throw_longjmp']"])
     env.Append(LINKFLAGS=["-sDISABLE_EXCEPTION_CATCHING=0"])
     env.Append(LINKFLAGS=["-Wl,--allow-multiple-definition"])
 elif env["platform"] == "macos":
@@ -437,7 +442,6 @@ cgame_sources_raw += [
 cgame_sources_raw += [
     "code/qcommon/q_math.c",
     "code/qcommon/q_shared.c",
-    "code/godot/godot_surface_effects.cpp",
 ]
 
 cgame_sources = [cgame_path(s) for s in cgame_sources_raw]

@@ -1,20 +1,20 @@
 /*
  * godot_frustum_cull.cpp — Camera frustum culling helpers.
  *
- * Phase 258: Extracts the six frustum planes from a Camera3D's combined
- * view-projection matrix and provides AABB / sphere visibility tests.
+ * Uses Camera3D::get_frustum() to obtain the six frustum planes,
+ * then provides AABB / sphere visibility tests using p-vertex method.
  */
 
 #include "godot_frustum_cull.h"
 
-#include <godot_cpp/variant/projection.hpp>
-#include <godot_cpp/variant/transform3d.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
 
 using namespace godot;
 
 /* ── Internal state ── */
 
-static Plane s_planes[6];   /* L, R, B, T, Near, Far */
+static Plane s_planes[6];
+static int   s_num_planes = 0;
 static bool  s_valid = false;
 static int   s_tested = 0;
 static int   s_culled = 0;
@@ -28,6 +28,7 @@ void Godot_FrustumCull_Init(void)
     for (int i = 0; i < 6; i++) {
         s_planes[i] = Plane();
     }
+    s_num_planes = 0;
     s_valid  = false;
     s_tested = 0;
     s_culled = 0;
@@ -36,42 +37,17 @@ void Godot_FrustumCull_Init(void)
 void Godot_FrustumCull_Shutdown(void)
 {
     s_valid  = false;
+    s_num_planes = 0;
     s_tested = 0;
     s_culled = 0;
 }
 
 /* ===================================================================
- *  Frustum plane extraction
- *
- *  Given the combined view-projection matrix M (column-major as Godot
- *  stores it), the six frustum planes are:
- *
- *    Left   = row3 + row0
- *    Right  = row3 - row0
- *    Bottom = row3 + row1
- *    Top    = row3 - row1
- *    Near   = row3 + row2
- *    Far    = row3 - row2
- *
- *  Each "row" is extracted from the columns of the Projection matrix.
- *  Planes are normalised so that distance tests return true metric
- *  signed distances.
+ *  Frustum plane extraction — delegates to Camera3D::get_frustum()
  * ================================================================ */
-
-static inline Plane make_plane(real_t a, real_t b, real_t c, real_t d)
-{
-    Vector3 n(a, b, c);
-    real_t  len = n.length();
-    if (len > 1e-6f) {
-        real_t inv = 1.0f / len;
-        return Plane(n * inv, d * inv);
-    }
-    return Plane(Vector3(0, 1, 0), 0);
-}
 
 void Godot_FrustumCull_UpdateCamera(Camera3D *camera)
 {
-    /* Reset per-frame stats. */
     s_tested = 0;
     s_culled = 0;
 
@@ -80,90 +56,14 @@ void Godot_FrustumCull_UpdateCamera(Camera3D *camera)
         return;
     }
 
-    /*
-     * Build the combined view-projection matrix.
-     *
-     * Godot's Projection (4×4) is column-major.  We access columns via
-     * operator[], where each column is a Vector4.
-     *
-     * Camera3D::get_camera_projection() returns the projection matrix.
-     * The view matrix is the inverse of the camera's global transform.
-     */
-    Projection proj  = camera->get_camera_projection();
-    Transform3D view = camera->get_global_transform().affine_inverse();
+    TypedArray<Plane> planes = camera->get_frustum();
+    s_num_planes = (planes.size() > 6) ? 6 : (int)planes.size();
 
-    /*
-     * Convert the Transform3D (3×4) to a Projection (4×4).
-     * Godot's Projection stores columns: columns[0..3], each Vector4.
-     */
-    Projection view_mat;
-    view_mat.columns[0] = Vector4(view.basis[0][0], view.basis[1][0], view.basis[2][0], 0.0f);
-    view_mat.columns[1] = Vector4(view.basis[0][1], view.basis[1][1], view.basis[2][1], 0.0f);
-    view_mat.columns[2] = Vector4(view.basis[0][2], view.basis[1][2], view.basis[2][2], 0.0f);
-    view_mat.columns[3] = Vector4(view.origin.x, view.origin.y, view.origin.z, 1.0f);
-
-    /* Multiply: vp = proj * view_mat.  Projection * Projection is defined. */
-    Projection vp = proj * view_mat;
-
-    /*
-     * Extract planes.  Godot Projection columns[c] is a Vector4 with
-     * components x,y,z,w.  We need "rows" of the 4×4 matrix.
-     *
-     * Row i component j = columns[j][i].
-     */
-    #define M(row, col) vp.columns[col][row]
-
-    /* Left:   row3 + row0 */
-    s_planes[0] = make_plane(M(3,0) + M(0,0),
-                             M(3,1) + M(0,1),
-                             M(3,2) + M(0,2),
-                             M(3,3) + M(0,3));
-    /* Right:  row3 - row0 */
-    s_planes[1] = make_plane(M(3,0) - M(0,0),
-                             M(3,1) - M(0,1),
-                             M(3,2) - M(0,2),
-                             M(3,3) - M(0,3));
-    /* Bottom: row3 + row1 */
-    s_planes[2] = make_plane(M(3,0) + M(1,0),
-                             M(3,1) + M(1,1),
-                             M(3,2) + M(1,2),
-                             M(3,3) + M(1,3));
-    /* Top:    row3 - row1 */
-    s_planes[3] = make_plane(M(3,0) - M(1,0),
-                             M(3,1) - M(1,1),
-                             M(3,2) - M(1,2),
-                             M(3,3) - M(1,3));
-    /* Near:   row3 + row2 */
-    s_planes[4] = make_plane(M(3,0) + M(2,0),
-                             M(3,1) + M(2,1),
-                             M(3,2) + M(2,2),
-                             M(3,3) + M(2,3));
-    /* Far:    row3 - row2 */
-    s_planes[5] = make_plane(M(3,0) - M(2,0),
-                             M(3,1) - M(2,1),
-                             M(3,2) - M(2,2),
-                             M(3,3) - M(2,3));
-
-    #undef M
-
-    s_valid = true;
-
-    /* Sanity: a point slightly in front of the camera MUST be inside the
-     * frustum.  If it fails, the frustum planes are degenerate (zero-size
-     * viewport, headless mode, etc.) — mark invalid so callers default to
-     * "visible".
-     */
-    {
-        Vector3 cam_pos = camera->get_global_position();
-        Vector3 cam_fwd = -camera->get_global_transform().basis.get_column(2);
-        Vector3 test_pt = cam_pos + cam_fwd * 1.0f;
-        for (int i = 0; i < 6; i++) {
-            if (s_planes[i].distance_to(test_pt) < -0.5f) {
-                s_valid = false;
-                break;
-            }
-        }
+    for (int i = 0; i < s_num_planes; i++) {
+        s_planes[i] = (Plane)planes[i];
     }
+
+    s_valid = (s_num_planes >= 6);
 }
 
 /* ===================================================================
@@ -186,7 +86,7 @@ bool Godot_FrustumCull_TestAABB(const AABB &bounds)
     Vector3 min_pt = bounds.position;
     Vector3 max_pt = bounds.position + bounds.size;
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < s_num_planes; i++) {
         const Vector3 &n = s_planes[i].normal;
         real_t         d = s_planes[i].d;
 
@@ -222,7 +122,7 @@ bool Godot_FrustumCull_TestSphere(const Vector3 &center, float radius)
         return true;
     }
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < s_num_planes; i++) {
         if (s_planes[i].distance_to(center) < -radius) {
             s_culled++;
             return false;

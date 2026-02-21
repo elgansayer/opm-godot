@@ -19,15 +19,14 @@
 
 #include "godot_ubersound.h"
 
-#include <cstring>
 #include <cstdlib>
-#include <cstdio>
+#include <cstring>
 #include <vector>
 #include <string>
 #include <unordered_map>
 
 /* ------------------------------------------------------------------ */
-/*  C accessors for VFS (avoids engine header collisions)             */
+/*  C accessors for VFS + engine tokeniser                            */
 /* ------------------------------------------------------------------ */
 
 extern "C" {
@@ -36,6 +35,12 @@ extern "C" {
     char **Godot_VFS_ListFiles(const char *directory, const char *extension,
                                int *out_count);
     void  Godot_VFS_FreeFileList(char **list);
+
+    /* Engine tokeniser from q_shared.c — handles comments, quoted strings,
+     * escape sequences, and all id Tech 3 / MOHAA edge cases. */
+    char *COM_ParseExt(char **data_p, int allowLineBreak);
+    void  SkipRestOfLine(char **data);
+    int   Q_stricmp(const char *s1, const char *s2);
 }
 
 /* ================================================================== */
@@ -75,47 +80,7 @@ static unsigned int ubersound_rand(void)
 }
 
 /* ================================================================== */
-/*  Token parser — simple whitespace-delimited tokeniser               */
-/* ================================================================== */
-
-static const char *skip_whitespace(const char *p)
-{
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\r')) p++;
-    return p;
-}
-
-/*
- * Parse the next whitespace-delimited token.
- * Returns a pointer past the token, or NULL if end-of-line / end-of-string.
- */
-static const char *parse_token(const char *p, char *out, int out_len)
-{
-    p = skip_whitespace(p);
-    if (!*p || *p == '\n' || *p == '/' ) return nullptr;
-
-    /* Handle quoted strings */
-    if (*p == '"') {
-        p++;
-        int i = 0;
-        while (*p && *p != '"' && *p != '\n' && i < out_len - 1) {
-            out[i++] = *p++;
-        }
-        out[i] = '\0';
-        if (*p == '"') p++;
-        return p;
-    }
-
-    int i = 0;
-    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n'
-           && i < out_len - 1) {
-        out[i++] = *p++;
-    }
-    out[i] = '\0';
-    return p;
-}
-
-/* ================================================================== */
-/*  Parse a single .scr file                                           */
+/*  Parse a single .scr file using the engine's COM_ParseExt          */
 /* ================================================================== */
 
 static void parse_scr_file(const char *filepath)
@@ -124,7 +89,7 @@ static void parse_scr_file(const char *filepath)
     long  len = Godot_VFS_ReadFile(filepath, &buf);
     if (len <= 0 || !buf) return;
 
-    /* Ensure null-terminated */
+    /* COM_ParseExt works on a mutable char* and advances the pointer */
     char *text = (char *)malloc((size_t)len + 1);
     if (!text) {
         Godot_VFS_FreeFile(buf);
@@ -134,58 +99,39 @@ static void parse_scr_file(const char *filepath)
     text[len] = '\0';
     Godot_VFS_FreeFile(buf);
 
-    const char *p = text;
-    char token[512];
-    char alias_name[512];
-    char sound_path[512];
+    char *p = text;
+    char *tok;
 
-    while (*p) {
-        /* Skip blank lines and comments */
-        p = skip_whitespace(p);
-        if (!*p) break;
-        if (*p == '\n') { p++; continue; }
-        if (*p == '/' && *(p + 1) == '/') {
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
-            continue;
-        }
+    /* COM_ParseExt(p, qtrue) returns next token, skipping comments and
+     * whitespace (including newlines when allowLineBreak=1).
+     * COM_ParseExt(p, qfalse) stops at newlines, returning "" at EOL.
+     * Returns "" (not NULL) when no more tokens. */
 
-        /* Read command token */
-        const char *next = parse_token(p, token, sizeof(token));
-        if (!next) { /* skip to next line */
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
-            continue;
-        }
-        p = next;
+    while (p && *p) {
+        /* Read command token — allow line breaks to skip blank lines */
+        tok = COM_ParseExt(&p, 1 /* allowLineBreak */);
+        if (!tok || !tok[0]) break;
 
         /* We only care about "alias" and "aliascache" commands */
-        bool is_alias = (strcasecmp(token, "alias") == 0 ||
-                         strcasecmp(token, "aliascache") == 0);
-        if (!is_alias) {
-            /* Skip the rest of the line */
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
+        if (Q_stricmp(tok, "alias") != 0 &&
+            Q_stricmp(tok, "aliascache") != 0) {
+            SkipRestOfLine(&p);
             continue;
         }
 
-        /* Parse alias name */
-        next = parse_token(p, alias_name, sizeof(alias_name));
-        if (!next) {
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
-            continue;
-        }
-        p = next;
+        /* Parse alias name (same line — no line break) */
+        tok = COM_ParseExt(&p, 0 /* no line break */);
+        if (!tok[0]) continue;
+        char alias_name[512];
+        strncpy(alias_name, tok, sizeof(alias_name) - 1);
+        alias_name[sizeof(alias_name) - 1] = '\0';
 
         /* Parse sound file path */
-        next = parse_token(p, sound_path, sizeof(sound_path));
-        if (!next) {
-            while (*p && *p != '\n') p++;
-            if (*p == '\n') p++;
-            continue;
-        }
-        p = next;
+        tok = COM_ParseExt(&p, 0);
+        if (!tok[0]) continue;
+        char sound_path[512];
+        strncpy(sound_path, tok, sizeof(sound_path) - 1);
+        sound_path[sizeof(sound_path) - 1] = '\0';
 
         /* Build the entry with defaults */
         UbersoundEntry entry;
@@ -198,52 +144,44 @@ static void parse_scr_file(const char *filepath)
         entry.subtitle = false;
 
         /* Parse optional parameters on the same line */
-        while (*p && *p != '\n') {
-            next = parse_token(p, token, sizeof(token));
-            if (!next) break;
-            p = next;
+        for (;;) {
+            tok = COM_ParseExt(&p, 0);
+            if (!tok[0]) break;
 
-            if (strcasecmp(token, "soundparms") == 0) {
+            if (Q_stricmp(tok, "soundparms") == 0) {
                 /* soundparms <vol> <minDist> <maxDist> <pitch> [channel] */
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.volume  = (float)atof(val); p = next; }
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.minDist = (float)atof(val); p = next; }
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.maxDist = (float)atof(val); p = next; }
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.pitch   = (float)atof(val); p = next; }
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.channel = atoi(val); p = next; }
-            } else if (strcasecmp(token, "volume") == 0) {
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.volume = (float)atof(val); p = next; }
-            } else if (strcasecmp(token, "mindist") == 0 ||
-                       strcasecmp(token, "dist") == 0) {
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.minDist = (float)atof(val); p = next; }
-            } else if (strcasecmp(token, "maxdist") == 0) {
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.maxDist = (float)atof(val); p = next; }
-            } else if (strcasecmp(token, "pitch") == 0) {
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.pitch = (float)atof(val); p = next; }
-            } else if (strcasecmp(token, "channel") == 0) {
-                char val[64];
-                next = parse_token(p, val, sizeof(val));
-                if (next) { entry.channel = atoi(val); p = next; }
-            } else if (strcasecmp(token, "subtitle") == 0 ||
-                       strcasecmp(token, "dialog") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.volume  = (float)atof(tok);
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.minDist = (float)atof(tok);
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.maxDist = (float)atof(tok);
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.pitch   = (float)atof(tok);
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.channel = atoi(tok);
+            } else if (Q_stricmp(tok, "volume") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.volume = (float)atof(tok);
+            } else if (Q_stricmp(tok, "mindist") == 0 ||
+                       Q_stricmp(tok, "dist") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.minDist = (float)atof(tok);
+            } else if (Q_stricmp(tok, "maxdist") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.maxDist = (float)atof(tok);
+            } else if (Q_stricmp(tok, "pitch") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.pitch = (float)atof(tok);
+            } else if (Q_stricmp(tok, "channel") == 0) {
+                tok = COM_ParseExt(&p, 0);
+                if (tok[0]) entry.channel = atoi(tok);
+            } else if (Q_stricmp(tok, "subtitle") == 0 ||
+                       Q_stricmp(tok, "dialog") == 0) {
                 entry.subtitle = true;
             }
             /* Skip other unknown tokens silently */
         }
-        if (*p == '\n') p++;
 
         /* Insert into the alias map */
         std::string key(alias_name);
