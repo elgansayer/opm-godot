@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa/openmohaa"
+OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa"
 PROJECT_BIN_DIR="$SCRIPT_DIR/project/bin"
 CGAME_DEPLOY_DIR="$HOME/.local/share/openmohaa/main"
 
