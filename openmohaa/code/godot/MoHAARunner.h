@@ -115,11 +115,6 @@
 #define HAS_UBERSOUND_MODULE 1
 #endif
 
-#if __has_include("godot_speaker_entities.h")
-#include "godot_speaker_entities.h"
-#define HAS_SPEAKER_ENTITIES_MODULE 1
-#endif
-
 #if __has_include("godot_sound_occlusion.h")
 #include "godot_sound_occlusion.h"
 #define HAS_SOUND_OCCLUSION_MODULE 1

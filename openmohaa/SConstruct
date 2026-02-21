@@ -293,6 +293,11 @@ def should_exclude(filepath):
                     "godot_anim_blend.cpp")):
         return True
 
+    # Dead code — speaker entities module never initialised (Init/LoadFromEntities
+    # never called); engine's S_AddLoopingSound pipeline handles ambient sounds
+    if fp.endswith("godot_speaker_entities.cpp"):
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)

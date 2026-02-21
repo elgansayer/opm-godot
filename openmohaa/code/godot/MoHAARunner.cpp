@@ -556,9 +556,6 @@ MoHAARunner::~MoHAARunner() {
     }
 
     // ── Module shutdown hooks (defensive) ──
-#ifdef HAS_SPEAKER_ENTITIES_MODULE
-    Godot_Speakers_Shutdown();
-#endif
 #ifdef HAS_UBERSOUND_MODULE
     Godot_Ubersound_Shutdown();
 #endif
@@ -973,9 +970,6 @@ void MoHAARunner::check_world_load() {
 #endif
 #ifdef HAS_SHADER_MATERIAL_MODULE
             Godot_Shader_ClearCache();
-#endif
-#ifdef HAS_SPEAKER_ENTITIES_MODULE
-            Godot_Speakers_Shutdown();
 #endif
 #ifdef HAS_WEATHER_MODULE
             Godot_Weather_Shutdown();
@@ -6628,11 +6622,6 @@ void MoHAARunner::_process(double delta) {
 
     // ── Update audio from captured sound events (Phase 8) ──
     update_audio(delta);
-
-    // ── Phase 47: Update speaker entity sounds ──
-#ifdef HAS_SPEAKER_ENTITIES_MODULE
-    Godot_Speakers_Update((float)delta);
-#endif
 
     // ── Update cinematic video display (Phase 11) ──
     update_cinematic();
