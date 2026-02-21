@@ -26,7 +26,11 @@ const char *Godot_Renderer_GetShaderRemap( const char *shaderName );
  *  Globals
  * ---------------------------------------------------------------- */
 
-static refimport_t ri;                /* engine → renderer callbacks */
+/* Engine → renderer callbacks.
+ * Non-static so the real renderer data modules (tr_shader.c, tr_image.c,
+ * tr_bsp.c, etc.) can use ri.Printf, ri.FS_ReadFile, ri.TIKI_* through
+ * the extern declaration in tr_local.h. */
+refimport_t ri;                /* engine → renderer callbacks */
 
 /* -------------------------------------------------------------------
  *  Model table (Phase 7f — TIKI model registration)

@@ -50,6 +50,7 @@ env.Append(CPPPATH=[
     "code/gamespy",
     "code/qcommon",
     "code/renderercommon",
+    "code/renderergl1",
     "code/server",
     "code/script",
     "code/skeletor",
@@ -170,6 +171,34 @@ def add_sources(directory):
 for d in src_dirs:
     add_sources(d)
 
+# ── Renderer data modules (selective — GL draw-path files excluded) ──
+# These provide real shader parsing, image loading, BSP loading, model
+# management, etc.  GL upload/draw calls are guarded with
+# #ifndef GODOT_GDEXTENSION.  Stub rendering functions for un-compiled
+# modules live in tr_godot_gl_stubs.c.
+renderer_sources = [
+    # GL stubs FIRST — -z muldefs picks the first definition
+    "code/renderergl1/tr_godot_gl_stubs.c",
+    # Data management modules
+    "code/renderergl1/tr_init.c",
+    "code/renderergl1/tr_shader.c",
+    "code/renderergl1/tr_image.c",
+    "code/renderergl1/tr_bsp.c",
+    "code/renderergl1/tr_model.cpp",
+    "code/renderergl1/tr_staticmodels.cpp",
+    "code/renderergl1/tr_font.cpp",
+    "code/renderergl1/tr_curve.c",
+    "code/renderergl1/tr_marks.c",
+    "code/renderergl1/tr_marks_permanent.c",
+    "code/renderergl1/tr_terrain.c",
+    "code/renderergl1/tr_scene.c",
+    "code/renderergl1/tr_sprite.c",
+    "code/renderergl1/tr_util.cpp",
+    # renderercommon: noise generator (used by tr_init.c R_NoiseInit)
+    "code/renderercommon/tr_noise.c",
+]
+sources.extend(renderer_sources)
+
 env.Append(CPPPATH=["code/parser/generated"])
 
 # ── Exclusion filters ──
@@ -264,7 +293,7 @@ elif env["platform"] == "windows":
 if env["platform"] == "linux":
     env.Append(LIBS=["z", "dl"])  # zlib, dlopen
 elif env["platform"] == "macos":
-    env.Append(LIBS=["z", "dl"])  # zlib, dlopen (macOS POSIX)
+    env.Append(LIBS=["z", "dl"])  # zlib, dlopen
 elif env["platform"] == "windows":
     env.Append(LIBS=["zlib", "ws2_32", "winmm"])  # zlib, winsock, multimedia
 
