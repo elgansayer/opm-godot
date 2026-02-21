@@ -4,4 +4,4 @@
 	branch = 4.2
 [submodule "openmohaa/openmohaa"]
 	path = openmohaa/openmohaa
-	url = git@github.com:elgansayer/openmohaa-private.git
+	url = git@github.com:elgansayer/openmohaa-godot.git
