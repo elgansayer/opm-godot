@@ -89,64 +89,9 @@ int Godot_BSP_GetFlareCount();
 /// Returns nullptr if index is out of range.
 const BSPFlare *Godot_BSP_GetFlare(int index);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* Phase 65: Check if a BSP surface has a lightmap (nolightmap flag check) */
-int Godot_BSP_SurfaceHasLightmap(int surface_index);
-
-/* Phase 18: Entity token parser */
-int Godot_BSP_GetEntityToken(char *buffer, int bufferSize);
-void Godot_BSP_ResetEntityTokenParse(void);
-
-/* Phase 47: Raw entity string accessor (for speaker entity parsing) */
-const char *Godot_BSP_GetEntityString(void);
-
-/* Phase 19: Inline model bounds */
-void Godot_BSP_GetInlineModelBounds(int index, float *mins, float *maxs);
-
-/* Phase 20: Map version */
-int Godot_BSP_GetMapVersion(void);
-
-/* Phase 28: Lightgrid sampling */
-int Godot_BSP_LightForPoint(const float point[3], float ambientLight[3],
-                            float directedLight[3], float lightDir[3]);
-
-/* Phase 31: PVS visibility */
-int Godot_BSP_InPVS(const float p1[3], const float p2[3]);
-
-/* PVS cluster queries */
-int Godot_BSP_PointLeaf(const float pt[3]);
-int Godot_BSP_PointCluster(const float pt[3]);
-int Godot_BSP_ClusterVisible(int source, int target);
-int Godot_BSP_GetNumClusters(void);
-
-/// Mark-fragment query: clip a decal polygon against the world BSP.
-/// Output arrays (fragFirstPoint, fragNumPoints, fragIIndex) must
-/// each be at least maxFragments entries.
-/// Returns the number of fragments produced.
-int Godot_BSP_MarkFragments(
-    int numPoints, const float points[][3], const float projection[3],
-    int maxPoints, float *pointBuffer,
-    int maxFragments,
-    int *fragFirstPoint, int *fragNumPoints, int *fragIIndex,
-    float fRadiusSquared);
-
-/// Mark-fragment query for an inline brush model (door/mover).
-/// vAngles/vOrigin describe the model's current pose.
-int Godot_BSP_MarkFragmentsForInlineModel(
-    int bmodelIndex,
-    const float vAngles[3], const float vOrigin[3],
-    int numPoints, const float points[][3], const float projection[3],
-    int maxPoints, float *pointBuffer,
-    int maxFragments,
-    int *fragFirstPoint, int *fragNumPoints, int *fragIIndex,
-    float fRadiusSquared);
-
-#ifdef __cplusplus
-}
-#endif
+/* C API functions (entity tokens, PVS, lightgrid, marks, etc.)
+ * are now in renderergl1/godot_bsp_accessors.c */
+#include "godot_bsp_accessors.h"
 
 /* PVS cluster mesh accessors (C++ only — return Godot types) */
 #ifdef __cplusplus

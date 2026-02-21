@@ -159,7 +159,7 @@ elif env["platform"] == "macos":
     sys_sources.append("code/sys/win_localization.cpp")
     sys_sources.append("code/sys/win_bounds.cpp")
 elif env["platform"] == "web":
-    env.Append(CPPDEFINES=["__EMSCRIPTEN__"])
+    env.Append(CPPDEFINES=["__EMSCRIPTEN__", "_LINUX", "__linux__"])
     env.Append(CFLAGS=["-Wno-incompatible-pointer-types"])
     env.Append(CXXFLAGS=["-fexceptions", "-frtti"])
 
@@ -207,6 +207,8 @@ renderer_sources = [
     "code/renderercommon/tr_image_pvr.c",
     # Accessor bridge: reads real shader_t data → GodotShaderProps structs
     "code/renderergl1/godot_shader_accessors.c",
+    # Accessor bridge: reads tr.world BSP data for Godot-side queries
+    "code/renderergl1/godot_bsp_accessors.c",
 ]
 sources.extend(renderer_sources)
 
@@ -305,6 +307,7 @@ elif env["platform"] == "web":
     env.Append(LINKFLAGS=["-sUSE_ZLIB=1"])
     env.Append(LINKFLAGS=["-sSUPPORT_LONGJMP='emscripten'"])
     env.Append(LINKFLAGS=["-sDISABLE_EXCEPTION_CATCHING=0"])
+    env.Append(LINKFLAGS=["-Wl,--allow-multiple-definition"])
 elif env["platform"] == "macos":
     # macOS Mach-O linker uses -undefined dynamic_lookup instead of -z muldefs
     env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])
