@@ -1,202 +1,60 @@
 /*
- * godot_ubersound.cpp — Ubersound / sound alias parser for the OpenMoHAA
- * GDExtension.
+ * godot_ubersound.cpp — Sound alias accessor for the OpenMoHAA GDExtension.
  *
- * Parses ubersound .scr files from the VFS to build a sound-alias lookup
- * table.  Each alias maps a logical name to one or more concrete WAV/MP3
- * filenames plus optional parameters (volume, distance, pitch, channel,
- * subtitle flag).
- *
- * The ubersound .scr format (simplified):
- *   aliascache <alias_name> <sound_file> [soundparms <vol> <minDist> <maxDist> <pitch> <channel>]
- *   alias      <alias_name> <sound_file> [soundparms ...]
- *
- * When multiple entries share the same alias name, they form a random
- * group — Godot_Ubersound_Resolve picks one at random.
+ * Thin wrapper around the engine's global alias system (code/qcommon/alias.c).
+ * The cgame module loads ubersound .scr files at map load via
+ * CG_RegisterSounds() → CG_Command_ProcessFile() → cgi.Alias_Add(), which
+ * populates the global Aliases list.  This module simply queries that list
+ * using Alias_FindRandom() / Alias_Find() / Alias_GetGlobalList() — no
+ * parsing, no parallel data structures.
  *
  * Phase 45 — Audio Completeness.
  */
 
 #include "godot_ubersound.h"
 
-#include <cstdlib>
 #include <cstring>
-#include <vector>
-#include <string>
-#include <unordered_map>
 
 /* ------------------------------------------------------------------ */
-/*  C accessors for VFS + engine tokeniser                            */
+/*  Engine alias API — declared via extern "C" to avoid header        */
+/*  conflicts between engine headers and godot-cpp.                   */
+/*  Definitions live in code/qcommon/alias.c (linked into main .so).  */
 /* ------------------------------------------------------------------ */
+
+/* Mirror the engine's AliasListNode_t (from alias.h) without including
+ * it — the struct layout must match exactly. */
+struct AliasListNode_s {
+    char  alias_name[40];
+    char  real_name[128];
+    float weight;
+
+    unsigned char        stop_flag;
+    struct AliasListNode_s *next;
+
+    float pitch;
+    float volume;
+    float pitchMod;
+    float volumeMod;
+    float dist;
+    float maxDist;
+    int   channel;
+    int   streamed;
+    int   forcesubtitle;   /* qboolean = int */
+    char *subtitle;
+};
+
+struct AliasList_s {
+    char                    name[40];
+    int                     dirty;     /* qboolean = int */
+    int                     num_in_list;
+    struct AliasListNode_s **sorted_list;
+    struct AliasListNode_s  *data_list;
+};
 
 extern "C" {
-    long  Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
-    void  Godot_VFS_FreeFile(void *buffer);
-    char **Godot_VFS_ListFiles(const char *directory, const char *extension,
-                               int *out_count);
-    void  Godot_VFS_FreeFileList(char **list);
-
-    /* Engine tokeniser from q_shared.c — handles comments, quoted strings,
-     * escape sequences, and all id Tech 3 / MOHAA edge cases. */
-    char *COM_ParseExt(char **data_p, int allowLineBreak);
-    void  SkipRestOfLine(char **data);
-    int   Q_stricmp(const char *s1, const char *s2);
-}
-
-/* ================================================================== */
-/*  Internal data structures                                           */
-/* ================================================================== */
-
-/* One concrete sound variant inside an alias group. */
-struct UbersoundEntry {
-    std::string path;       /* e.g. "sound/weapons/m1_fire1.wav" */
-    float       volume;     /* 0 = use default */
-    float       minDist;    /* 0 = use default */
-    float       maxDist;    /* 0 = use default */
-    float       pitch;      /* 0 = use default (1.0) */
-    int         channel;    /* -1 = not specified */
-    bool        subtitle;   /* true if flagged for subtitle display */
-};
-
-/* Alias group — one or more entries sharing the same logical name. */
-struct UbersoundAlias {
-    std::string                name;
-    std::vector<UbersoundEntry> entries;
-};
-
-/* ================================================================== */
-/*  Module state                                                       */
-/* ================================================================== */
-
-static std::unordered_map<std::string, UbersoundAlias> s_aliases;
-static bool s_loaded = false;
-static unsigned int s_random_seed = 1;
-
-/* Simple deterministic PRNG (avoids pulling in <random>) */
-static unsigned int ubersound_rand(void)
-{
-    s_random_seed = s_random_seed * 1103515245u + 12345u;
-    return (s_random_seed >> 16) & 0x7FFF;
-}
-
-/* ================================================================== */
-/*  Parse a single .scr file using the engine's COM_ParseExt          */
-/* ================================================================== */
-
-static void parse_scr_file(const char *filepath)
-{
-    void *buf = nullptr;
-    long  len = Godot_VFS_ReadFile(filepath, &buf);
-    if (len <= 0 || !buf) return;
-
-    /* COM_ParseExt works on a mutable char* and advances the pointer */
-    char *text = (char *)malloc((size_t)len + 1);
-    if (!text) {
-        Godot_VFS_FreeFile(buf);
-        return;
-    }
-    memcpy(text, buf, (size_t)len);
-    text[len] = '\0';
-    Godot_VFS_FreeFile(buf);
-
-    char *p = text;
-    char *tok;
-
-    /* COM_ParseExt(p, qtrue) returns next token, skipping comments and
-     * whitespace (including newlines when allowLineBreak=1).
-     * COM_ParseExt(p, qfalse) stops at newlines, returning "" at EOL.
-     * Returns "" (not NULL) when no more tokens. */
-
-    while (p && *p) {
-        /* Read command token — allow line breaks to skip blank lines */
-        tok = COM_ParseExt(&p, 1 /* allowLineBreak */);
-        if (!tok || !tok[0]) break;
-
-        /* We only care about "alias" and "aliascache" commands */
-        if (Q_stricmp(tok, "alias") != 0 &&
-            Q_stricmp(tok, "aliascache") != 0) {
-            SkipRestOfLine(&p);
-            continue;
-        }
-
-        /* Parse alias name (same line — no line break) */
-        tok = COM_ParseExt(&p, 0 /* no line break */);
-        if (!tok[0]) continue;
-        char alias_name[512];
-        strncpy(alias_name, tok, sizeof(alias_name) - 1);
-        alias_name[sizeof(alias_name) - 1] = '\0';
-
-        /* Parse sound file path */
-        tok = COM_ParseExt(&p, 0);
-        if (!tok[0]) continue;
-        char sound_path[512];
-        strncpy(sound_path, tok, sizeof(sound_path) - 1);
-        sound_path[sizeof(sound_path) - 1] = '\0';
-
-        /* Build the entry with defaults */
-        UbersoundEntry entry;
-        entry.path    = sound_path;
-        entry.volume  = 0.0f;
-        entry.minDist = 0.0f;
-        entry.maxDist = 0.0f;
-        entry.pitch   = 0.0f;
-        entry.channel = -1;
-        entry.subtitle = false;
-
-        /* Parse optional parameters on the same line */
-        for (;;) {
-            tok = COM_ParseExt(&p, 0);
-            if (!tok[0]) break;
-
-            if (Q_stricmp(tok, "soundparms") == 0) {
-                /* soundparms <vol> <minDist> <maxDist> <pitch> [channel] */
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.volume  = (float)atof(tok);
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.minDist = (float)atof(tok);
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.maxDist = (float)atof(tok);
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.pitch   = (float)atof(tok);
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.channel = atoi(tok);
-            } else if (Q_stricmp(tok, "volume") == 0) {
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.volume = (float)atof(tok);
-            } else if (Q_stricmp(tok, "mindist") == 0 ||
-                       Q_stricmp(tok, "dist") == 0) {
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.minDist = (float)atof(tok);
-            } else if (Q_stricmp(tok, "maxdist") == 0) {
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.maxDist = (float)atof(tok);
-            } else if (Q_stricmp(tok, "pitch") == 0) {
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.pitch = (float)atof(tok);
-            } else if (Q_stricmp(tok, "channel") == 0) {
-                tok = COM_ParseExt(&p, 0);
-                if (tok[0]) entry.channel = atoi(tok);
-            } else if (Q_stricmp(tok, "subtitle") == 0 ||
-                       Q_stricmp(tok, "dialog") == 0) {
-                entry.subtitle = true;
-            }
-            /* Skip other unknown tokens silently */
-        }
-
-        /* Insert into the alias map */
-        std::string key(alias_name);
-        auto it = s_aliases.find(key);
-        if (it == s_aliases.end()) {
-            UbersoundAlias alias;
-            alias.name = key;
-            alias.entries.push_back(entry);
-            s_aliases[key] = std::move(alias);
-        } else {
-            it->second.entries.push_back(entry);
-        }
-    }
-
-    free(text);
+    const char            *Alias_Find(const char *alias);
+    const char            *Alias_FindRandom(const char *alias, struct AliasListNode_s **ret);
+    struct AliasList_s    *Alias_GetGlobalList(void);
 }
 
 /* ================================================================== */
@@ -205,36 +63,15 @@ static void parse_scr_file(const char *filepath)
 
 extern "C" void Godot_Ubersound_Init(void)
 {
-    if (s_loaded) return;
-
-    s_aliases.clear();
-    s_random_seed = 42;
-
-    /* Scan the ubersound/ directory for .scr files */
-    int file_count = 0;
-    char **files = Godot_VFS_ListFiles("ubersound", ".scr", &file_count);
-    if (files && file_count > 0) {
-        for (int i = 0; i < file_count; i++) {
-            if (!files[i] || !files[i][0]) continue;
-
-            char fullpath[512];
-            snprintf(fullpath, sizeof(fullpath), "ubersound/%s", files[i]);
-            parse_scr_file(fullpath);
-        }
-        Godot_VFS_FreeFileList(files);
-    }
-
-    /* Also try the standard ubersound.scr and uberdialog.scr in sound/ */
-    parse_scr_file("sound/ubersound.scr");
-    parse_scr_file("sound/uberdialog.scr");
-
-    s_loaded = true;
+    /* No-op — aliases are loaded by cgame at map load via cgi.Alias_Add().
+     * The engine's global Aliases list is populated before any Resolve()
+     * calls reach us. */
 }
 
 extern "C" void Godot_Ubersound_Shutdown(void)
 {
-    s_aliases.clear();
-    s_loaded = false;
+    /* No-op — alias memory is owned by the engine (Z_Malloc'd).
+     * Alias_Clear() is called by the engine during map change. */
 }
 
 extern "C" int Godot_Ubersound_Resolve(const char *alias,
@@ -246,46 +83,49 @@ extern "C" int Godot_Ubersound_Resolve(const char *alias,
                                        int   *out_channel)
 {
     if (!alias || !alias[0]) return 0;
-    if (!s_loaded) return 0;
 
-    auto it = s_aliases.find(std::string(alias));
-    if (it == s_aliases.end()) return 0;
-
-    const UbersoundAlias &a = it->second;
-    if (a.entries.empty()) return 0;
-
-    /* Pick a random entry from the group */
-    size_t idx = 0;
-    if (a.entries.size() > 1) {
-        idx = ubersound_rand() % a.entries.size();
-    }
-    const UbersoundEntry &e = a.entries[idx];
+    struct AliasListNode_s *node = nullptr;
+    const char *real_name = Alias_FindRandom(alias, &node);
+    if (!real_name || !real_name[0]) return 0;
 
     if (out_path && out_len > 0) {
-        strncpy(out_path, e.path.c_str(), (size_t)(out_len - 1));
+        strncpy(out_path, real_name, (size_t)(out_len - 1));
         out_path[out_len - 1] = '\0';
     }
-    if (out_volume)  *out_volume  = e.volume;
-    if (out_mindist) *out_mindist = e.minDist;
-    if (out_maxdist) *out_maxdist = e.maxDist;
-    if (out_pitch)   *out_pitch   = e.pitch;
-    if (out_channel) *out_channel = e.channel;
+
+    if (node) {
+        if (out_volume)  *out_volume  = node->volume;
+        if (out_mindist) *out_mindist = node->dist;
+        if (out_maxdist) *out_maxdist = node->maxDist;
+        if (out_pitch)   *out_pitch   = node->pitch;
+        if (out_channel) *out_channel = node->channel;
+    } else {
+        if (out_volume)  *out_volume  = 0.0f;
+        if (out_mindist) *out_mindist = 0.0f;
+        if (out_maxdist) *out_maxdist = 0.0f;
+        if (out_pitch)   *out_pitch   = 0.0f;
+        if (out_channel) *out_channel = -1;
+    }
 
     return 1;
 }
 
 extern "C" int Godot_Ubersound_GetAliasCount(void)
 {
-    return (int)s_aliases.size();
+    struct AliasList_s *list = Alias_GetGlobalList();
+    if (!list) return 0;
+    return list->num_in_list;
 }
 
 extern "C" int Godot_Ubersound_IsLoaded(void)
 {
-    return s_loaded ? 1 : 0;
+    struct AliasList_s *list = Alias_GetGlobalList();
+    return (list && list->num_in_list > 0) ? 1 : 0;
 }
 
 extern "C" int Godot_Ubersound_HasAlias(const char *alias)
 {
-    if (!alias || !alias[0] || !s_loaded) return 0;
-    return (s_aliases.find(std::string(alias)) != s_aliases.end()) ? 1 : 0;
+    if (!alias || !alias[0]) return 0;
+    const char *result = Alias_Find(alias);
+    return (result && result[0]) ? 1 : 0;
 }

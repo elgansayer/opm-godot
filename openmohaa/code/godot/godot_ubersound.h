@@ -1,15 +1,10 @@
 /*
- * godot_ubersound.h — Ubersound / sound alias parser for the OpenMoHAA
- * GDExtension.
+ * godot_ubersound.h — Sound alias accessor for the OpenMoHAA GDExtension.
  *
- * MOHAA defines sound aliases in ubersound.scr and uberdialog.scr files
- * (inside pk3 archives under the sound/ directory).  An alias maps a
- * logical sound name to one or more real filenames, with optional
- * parameters (volume, distance, pitch, channel, random selection).
- *
- * This module parses those files and provides a lookup function that
- * resolves an alias to a concrete filename, handling random selection
- * from alias groups (e.g. multiple footstep variants).
+ * Thin wrapper around the engine's global alias system (code/qcommon/alias.c).
+ * The cgame module loads ubersound .scr files at map load, populating the
+ * global Aliases list.  This module queries that list via Alias_FindRandom()
+ * and Alias_Find() — no parsing, no parallel data structures.
  *
  * Phase 45 — Audio Completeness.
  */

@@ -287,6 +287,12 @@ def should_exclude(filepath):
     if fp.endswith("godot_surface_effects.cpp"):
         return True
 
+    # Dead code — animation event/blend modules are never called;
+    # cgame already handles anim events via CG_ClientCommands → cgi.S_StartSound
+    if fp.endswith(("godot_animation_events.cpp", "godot_animation_event_accessors.cpp",
+                    "godot_anim_blend.cpp")):
+        return True
+
     # Client sound / backend exclusions
     if "code/client/" in fp:
         basename = os.path.basename(fp)
@@ -306,13 +312,20 @@ if env["platform"] == "linux":
 elif env["platform"] == "web":
     env["CCFLAGS"] = [flag for flag in env.get("CCFLAGS", []) if "SUPPORT_LONGJMP='wasm'" not in str(flag)]
     env["LINKFLAGS"] = [flag for flag in env.get("LINKFLAGS", []) if "SUPPORT_LONGJMP='wasm'" not in str(flag)]
-    env.Append(CCFLAGS=["-sUSE_ZLIB=1"])
     env.Append(CCFLAGS=["-sSUPPORT_LONGJMP='emscripten'"])
-    env.Append(LINKFLAGS=["-sUSE_ZLIB=1"])
     env.Append(LINKFLAGS=["-sSUPPORT_LONGJMP='emscripten'"])
     env.Append(LINKFLAGS=["-sDEFAULT_LIBRARY_FUNCS_TO_INCLUDE=['$$emscripten_longjmp','$$emscripten_throw_longjmp']"])
     env.Append(LINKFLAGS=["-sDISABLE_EXCEPTION_CATCHING=0"])
     env.Append(LINKFLAGS=["-Wl,--allow-multiple-definition"])
+    env.Append(CPPPATH=["code/thirdparty/zlib-1.3.1"])
+    sources.extend([
+        "code/thirdparty/zlib-1.3.1/adler32.c",
+        "code/thirdparty/zlib-1.3.1/crc32.c",
+        "code/thirdparty/zlib-1.3.1/inffast.c",
+        "code/thirdparty/zlib-1.3.1/inflate.c",
+        "code/thirdparty/zlib-1.3.1/inftrees.c",
+        "code/thirdparty/zlib-1.3.1/zutil.c",
+    ])
 elif env["platform"] == "macos":
     # macOS Mach-O linker uses -undefined dynamic_lookup instead of -z muldefs
     env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])

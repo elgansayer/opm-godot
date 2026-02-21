@@ -4441,7 +4441,13 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
             UtilityFunctions::print(dbg);
             UtilityFunctions::print(String("[MoHAA][2D] FALLING BACK to $whiteimage for ") + String(name ? name : "NULL"));
         }
-        return get_shader_texture(Godot_Renderer_RegisterShader("$whiteimage"));
+        Ref<ImageTexture> fallback_tex = get_shader_texture(Godot_Renderer_RegisterShader("$whiteimage"));
+        if (!fallback_tex.is_null()) {
+            shader_textures[shader_handle] = fallback_tex;
+            shader_texture_has_alpha[shader_handle] = false;
+            s_shader_texture_loaded_names[shader_handle] = name ? name : "";
+        }
+        return fallback_tex;
     }
 
     if (!tex.is_null()) {
@@ -5379,8 +5385,7 @@ void MoHAARunner::setup_audio() {
     // ── Phase 45: Initialise ubersound alias system ──
 #ifdef HAS_UBERSOUND_MODULE
     Godot_Ubersound_Init();
-    UtilityFunctions::print(String("[MoHAA] Ubersound initialised: ") +
-                            String::num_int64(Godot_Ubersound_GetAliasCount()) + " aliases.");
+    UtilityFunctions::print("[MoHAA] Ubersound accessor ready (aliases loaded by cgame at map load).");
 #endif
 
     // ── Phase 48: Enable sound occlusion ──
@@ -6381,11 +6386,18 @@ void MoHAARunner::_process(double delta) {
     {
         bool engine_wants_gui = Godot_Client_GetGuiMouse() != 0;
         bool should_capture = !engine_wants_gui;
-        if (should_capture != mouse_captured) {
-            mouse_captured = should_capture;
+        bool allow_capture = true;
+#ifdef __EMSCRIPTEN__
+        // Browser pointer lock requires a user gesture. Automatic capture
+        // from the per-frame engine state can throw and break frame flow.
+        allow_capture = false;
+#endif
+        bool applied_capture = should_capture && allow_capture;
+        if (applied_capture != mouse_captured) {
+            mouse_captured = applied_capture;
             Input *input = Input::get_singleton();
             if (input) {
-                if (should_capture) {
+                if (applied_capture) {
                     input->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
                 } else {
                     input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
@@ -6854,11 +6866,17 @@ godot::String MoHAARunner::vfs_get_gamedir() const {
 // ──────────────────────────────────────────────
 
 void MoHAARunner::set_mouse_captured(bool p_captured) {
-    mouse_captured = p_captured;
+    bool requested_capture = p_captured;
+#ifdef __EMSCRIPTEN__
+    // On web, only capture after explicit in-canvas user gesture; avoid
+    // forcing pointer lock from scripts because browsers may reject it.
+    requested_capture = false;
+#endif
+    mouse_captured = requested_capture;
     Input *input = Input::get_singleton();
     if (!input) return;
 
-    if (p_captured) {
+    if (requested_capture) {
         input->set_mouse_mode(Input::MOUSE_MODE_CAPTURED);
     } else {
         input->set_mouse_mode(Input::MOUSE_MODE_VISIBLE);
