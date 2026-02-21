@@ -42,6 +42,8 @@ func _ready():
 
 	if runner:
 		var startup_args = "+set dedicated %d +set developer %d" % [1 if launch_dedicated else 0, 1 if dev_mode else 0]
+		if OS.has_feature("web"):
+			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath ."
 		runner.set_startup_args(startup_args)
 		runner.name = "MoHAARunnerInstance"
 		add_child(runner)

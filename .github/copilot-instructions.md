@@ -20,17 +20,18 @@ opm-godot/                    ← Git root
 │   │   │   ├── MoHAARunner.cpp/.h        ← Godot Node: Com_Init/Com_Frame, error recovery, 3D scene, HUD, audio, entities
 │   │   │   ├── register_types.cpp        ← GDExtension entry point; calls Com_Shutdown() in module terminator
 │   │   │   ├── stubs.cpp                 ← ~100 no-op stubs for Sys_Get*API, UI, VM, misc
-│   │   │   ├── godot_renderer.c          ← Stub refexport_t (~80 functions) + entity/poly/swipe/2D capture buffers
+│   │   │   ├── godot_renderer.c          ← Stub refexport_t (~80 functions) + entity/poly/swipe/2D capture buffers; calls R_Init() to bootstrap real shader/image/model subsystems
 │   │   │   ├── godot_sound.c             ← Sound event capture: S_*/MUSIC_* with queue + accessor API
 │   │   │   ├── godot_input.c             ← IN_Init/Shutdown/Frame stubs (actual input via godot_input_bridge)
 │   │   │   ├── godot_input_bridge.c      ← Godot key/mouse → engine SE_KEY/SE_MOUSE/SE_CHAR injection
 │   │   │   ├── godot_bsp_mesh.cpp/.h     ← BSP parser: world mesh, terrain, lightmaps, mark fragments, entity tokens
-│   │   │   ├── godot_shader_props.cpp/.h ← .shader file parser: transparency, blend, cull, tcMod, skybox
+│   │   │   ├── godot_shader_props.h      ← Shared struct/enum definitions for shader properties (C/C++ compatible typedefs)
 │   │   │   ├── godot_skel_model.cpp/.h   ← TIKI skeletal mesh builder (ArrayMesh from SKD/SKC/SKB)
 │   │   │   ├── godot_skel_model_accessors.cpp ← C++ accessor for TIKI data (dtiki_t, skelHeaderGame_t)
 │   │   │   ├── godot_client_accessors.cpp     ← Client state: keyCatchers, guiMouse, paused, SetGameInputMode
 │   │   │   ├── godot_server_accessors.c       ← Server state: sv.state, svs.mapName, svs.iNumClients
 │   │   │   └── godot_vfs_accessors.c          ← VFS read helper for Godot-side file loading
+│   │   ├── renderergl1/      ← Real renderer source (compiled into main .so); includes godot_shader_accessors.c bridge
 │   │   ├── qcommon/          ← Core engine (cvars, commands, VFS, memory, net)
 │   │   ├── server/           ← Dedicated/listen server
 │   │   ├── client/           ← Client state, prediction, keys, screen
@@ -153,7 +154,7 @@ Our stub renderer (`godot_renderer.c`) provides no-op implementations of `refexp
 | Real renderer function | What it computes | Our stub must... |
 |------------------------|------------------|------------------|
 | `R_InitStaticModels()` | Bind-pose vertices, shader registration | Provide accessor for `TIKI_GetSkelAnimFrame` + bone transforms; register shaders via `GR_RegisterShader` |
-| `R_FindShader()` | Shader script → texture path resolution | `GR_RegisterShader` + `Godot_ShaderProps_Find` for stage map lookup |
+| `R_FindShader()` | Shader script → texture path resolution | **Real `R_FindShader()` is called** — `godot_shader_accessors.c` reads from real `shader_t` structs |
 | `RE_RegisterModel()` | TIKI loading, model table population | `GR_RegisterModelInternal()` — already done |
 | `R_LoadWorldMap()` / `RE_LoadWorldMap()` | BSP parsing, lightmap upload, surface shader assignment | `godot_bsp_mesh.cpp` BSP parser — already done |
 
@@ -175,6 +176,7 @@ These are real bugs that were shipped and required multiple fix iterations. Lear
 | Wrong/missing textures on static models | `get_shader_texture()` used the shader name directly as a file path (e.g. `textures/mohdm1/wall_brick`). But MOHAA shader names are abstract identifiers — the actual texture path is in the `.shader` definition's stage `map` directive (e.g. `textures/mohdm1/wall_brick_d.tga`). | **Always trace `R_FindShader()`'s resolution pipeline.** Shader name ≠ texture file path. Must look up shader definition stages. |
 | `Godot_Renderer_RegisterShader` didn't exist | The stub renderer had `GR_RegisterShader` (internal, called by engine paths like `RE_RegisterShaderNoMip`) but no public accessor for Godot-side code to register shaders. Static model loading needed to register TIKI surface shaders but had no API to do so. | **When adding Godot-side features that need renderer services, check whether the accessor API exists.** If not, implement it — don't work around it. |
 | Custom `.shader` tokeniser missed definitions | `godot_shader_props.cpp` used hand-written `read_token()`, `skip_ws()`, `skip_line()` that didn't handle `//` comments, `/* */` blocks, or quoted strings identically to the engine. Shader definitions were silently mis-parsed or skipped, causing wrong textures. | **Never write custom parsing/tokenising functions.** The engine's `COM_ParseExt()`, `SkipRestOfLine()`, `COM_Compress()` are linked and handle all edge cases. Declare them via `extern "C"` and use them directly. |
+| 1700-line custom shader parser was unnecessary | `godot_shader_props.cpp` reimplemented `.shader` file parsing to build `GodotShaderProps` structs. But the real renderer's `R_Init()` → `R_StartupShaders()` already parses all `.shader` files into `shader_t` structs with all stage data, blend modes, cull, tcMod, etc. The entire custom parser was replaced with a ~650-line accessor (`godot_shader_accessors.c`) that reads from the real `shader_t` data. | **Never rewrite an engine subsystem parser.** If the engine already parses data (shaders, models, configs), initialise that subsystem and read from its output structs via an accessor. The real code handles edge cases, MOHAA extensions, and conditional blocks that a rewrite will inevitably miss. |
 | `surfaceParm trans` forced alpha blending on opaque surfaces | `godot_shader_props.cpp` treated `surfaceParm trans` as a runtime transparency flag, setting `SHADER_ALPHA_BLEND`. This prevented the post-parse stage blendFunc analysis from running (it only ran when `transparency == SHADER_OPAQUE`). Result: any shader with `surfaceParm trans` (walls, buildings, floors — very common in MOHAA) rendered as alpha-blended, causing see-through surfaces. | **`surfaceParm` keywords are BSP compiler flags (Q3MAP), NOT runtime rendering directives.** Transparency is determined solely by stage `blendFunc`. See the Q3A Shader Manual reference below. |
 | Default `CULL_DISABLED` on entity/static model materials | Entity skeletal models and static TIKI models defaulted to `CULL_DISABLED` (show both sides). Most models lack `.shader` definitions, so `apply_shader_props_to_material()` never overrode the default. Back faces were visible, causing see-through/ghostly appearance. | **MOHAA's renderer default is `CT_FRONT_SIDED` = Godot `CULL_BACK`.** Always default materials to `CULL_BACK`. Only set `CULL_DISABLED` when the shader definition explicitly says `cull none`/`cull twosided`. |
 
@@ -257,7 +259,7 @@ Our Godot-side renderer flattens multi-stage shaders into a single `StandardMate
 
 **Additional reference:** https://graphics.stanford.edu/courses/cs448-00-spring/q3ashader_manual.pdf (MOHAATools-provided manual)
 
-MOHAA extends the Q3A shader system with ~70+ additional keywords. The real renderer parses these in `renderergl1/tr_shader.c`. Our `godot_shader_props.cpp` parser handles a subset; unrecognised keywords are safely skipped (via `SkipRestOfLine`).
+MOHAA extends the Q3A shader system with ~70+ additional keywords. The real renderer parses these in `renderergl1/tr_shader.c`. Since `R_Init()` is called from `GR_BeginRegistration()`, the real parser handles **all** MOHAA extensions. The `godot_shader_accessors.c` bridge reads the parsed results from `shader_t` structs — no Godot-side shader text parsing is needed.
 
 ### Conditional shader blocks (`#if` / `#if_not` / `#else` / `#endif`)
 
@@ -281,7 +283,7 @@ textures/foo/bar
 ```
 **Conditions:** `separate_env` (true if `r_textureDetails != 0`), literal `0`/`false`, literal `1`/`true`. `#if_not` inverts the result.
 
-**Our parser:** Currently treats the condition as `false` — skips to `#else` branch (or `#endif` if no `#else`). This is the safe default matching engine behaviour with `r_textureDetails == 0`.
+**Real renderer behaviour:** The real parser (`tr_shader.c`) evaluates these conditions at shader parse time based on current cvar values. Since `R_Init()` is called, all conditional blocks are resolved by the engine — the `godot_shader_accessors.c` bridge reads the final resolved `shader_t` state.
 
 ### MOHAA-specific general (top-level) directives
 
@@ -366,11 +368,12 @@ R_FindShader(name, lightmapIndex, mipRawImage, picmip, wrapx, wrapy)
   5. Return shader_t* (never NULL — returns defaultShader on failure)
 ```
 
-**Our Godot-side equivalent must mirror steps 2–4:**
-- `GR_RegisterShader(name)` → assigns handle in `gr_shaders[]`
-- `Godot_ShaderProps_Find(name)` → step 2 (shader definition lookup)
-- `stages[].map` → step 3b (actual texture path)
-- VFS load with extension probing → step 4a (image loading)
+**How our Godot-side code accesses this data:**
+Since `R_Init()` is called from `GR_BeginRegistration()`, the real `R_FindShader()` is available and populates real `shader_t` structs. The `godot_shader_accessors.c` bridge calls `R_FindShader()` / `R_FindShaderByName()` and converts the resulting `shader_t` into a `GodotShaderProps` struct that the Godot side can read.
+
+- `Godot_ShaderProps_Find(name)` → calls `R_FindShaderByName` (cheap lookup), then `R_FindShader` on demand → converts `shader_t` → `GodotShaderProps`
+- Texture paths come from `shader_t->unfoggedStages[i]->bundle[0].image[0]->imgName` — the real resolved path, not the shader name
+- Blend mode, cull, sort, tcMod, rgbGen, alphaGen — all read from the real parsed `shader_t` stage data
 
 ### What `R_InitStaticModels()` actually does (tr_staticmodels.cpp:40)
 Called once per map load after BSP parsing. Our code must replicate its effects:
@@ -451,9 +454,26 @@ Engine headers (`server.h`, `g_local.h`) cannot be included in godot-cpp C++ tra
 | `godot_vfs_accessors.c` | C | `Godot_VFS_ReadFile`, `Godot_VFS_FreeFile` |
 | `godot_input_bridge.c` | C | Key/mouse → `Com_QueueEvent(SE_KEY/SE_MOUSE/SE_CHAR)` |
 | `godot_skel_model_accessors.cpp` | C++ | TIKI mesh extraction, bone preparation, CPU skinning |
+| `godot_shader_accessors.c` | C (in `renderergl1/`) | Bridges real `shader_t` → `GodotShaderProps`; uses `R_FindShader()` |
 
 ### Adding stubs for unresolved symbols
 When linking pulls in new client/UI/renderer symbols, add a no-op stub in `stubs.cpp` with the correct signature. Check `code/null/null_client.c` for reference signatures.
+
+### Real renderer initialisation — R_Init() from GR_BeginRegistration
+`GR_BeginRegistration()` (in `godot_renderer.c`) calls `R_Init()` once on first invocation. This bootstraps the **real** renderer subsystems — shader text parsing (`R_StartupShaders`), image loading (`R_InitImages`), model table (`R_ModelInit`), font loading (`R_LoadFont`) — without any OpenGL calls (all GL paths are guarded by `#ifdef GODOT_GDEXTENSION` stubs or `qgl` NULL function pointers).
+
+This means the real `trGlobals_t tr` is populated: `tr.shaders[]`, `tr.numShaders`, `tr.images[]`, `tr.numImages`, `tr.models[]`. The `godot_shader_accessors.c` bridge reads from these real data structures instead of re-parsing `.shader` files.
+
+**Key principle:** If the engine already has a subsystem that parses/loads data (shaders, models, images, fonts), initialise it via `R_Init()` and read from its output — never rewrite the parser on the Godot side.
+
+### Shader accessor bridge — godot_shader_accessors.c
+`code/renderergl1/godot_shader_accessors.c` implements the `Godot_ShaderProps_*` API by reading from real `shader_t` structs:
+- `Godot_ShaderProps_Load()` — pre-populates a hash cache from `tr.shaders[]`
+- `Godot_ShaderProps_Find(name)` — cache lookup → `R_FindShaderByName()` / `R_FindShader()` on demand → converts `shader_t` → `GodotShaderProps`
+- `Godot_ShaderProps_GetSkyEnv()` — scans `tr.shaders[]` for `isSky` flag
+- `Godot_ShaderProps_GetTextureMap()` — returns first non-lightmap stage texture path
+
+The struct definitions live in `code/godot/godot_shader_props.h` (shared between C and C++ via `typedef`). The old `godot_shader_props.cpp` (1700-line custom parser) is **excluded from the build** in `SConstruct`.
 
 ### Renderer stub architecture
 `godot_renderer.c` provides the full `refexport_t` function table (returned by `GetRefAPI()`). It captures engine render calls into buffers that `MoHAARunner.cpp` reads each frame:
@@ -574,4 +594,6 @@ Two targets built by default:
 1. **Main GDExtension .so** — all engine code + godot/ glue. Links: `-lz`, `-ldl`, `-z muldefs`, `-Bsymbolic-functions`
 2. **cgame.so** — client game module with `-fvisibility=hidden`. Variant dir: `build/cgame/`
 
-Source exclusion filters remove sound backends (DMA, OpenAL, Miles), SDL/OpenGL files, GameSpy samples, and old parser duplicates.
+Source exclusion filters remove sound backends (DMA, OpenAL, Miles), SDL/OpenGL files, GameSpy samples, old parser duplicates, and `godot_shader_props.cpp` (replaced by the `godot_shader_accessors.c` bridge that reads real `shader_t` data).
+
+**Architecture rule for renderer modules:** The `renderergl1/` source files are compiled into the main `.so`. All OpenGL calls are guarded by `#ifdef GODOT_GDEXTENSION` or use `qgl` NULL function pointers (defined in `tr_godot_gl_stubs.c`). This means the renderer's **data management** code (shader parsing, image loading, model registration) runs correctly — only the actual GL draw calls are stubbed out. New Godot-side code that needs renderer data should read from the real `trGlobals_t tr` structs via accessor files in `renderergl1/`, never by reimplementing the parser.
