@@ -507,10 +507,30 @@ static void GR_Shutdown( qboolean destroyWindow )
     gr_frameNumber     = 0;
 }
 
+/* Defined in tr_init.c — bootstraps the real renderer's shader parser,
+ * image system, model tables, font loader, and function tables.
+ * GL calls inside R_Init are guarded with #ifndef GODOT_GDEXTENSION.
+ * Sky/marks init are no-ops via -z muldefs stub priority. */
+extern void R_Init( void );
+
+static int gr_realRendererInited = 0;
+
 static void GR_BeginRegistration( glconfig_t *config )
 {
     int i;
     ri.Printf( PRINT_ALL, "[GodotRenderer] BeginRegistration\n" );
+
+    /* Bootstrap the real renderer subsystems (shader text parser, image
+     * system, model tables, function tables, fonts).  Only needed once —
+     * subsequent map loads reuse the parsed shader text database.
+     * R_Init() clears tr/backEnd/tess, registers cvars, allocates
+     * backEndData, parses all .shader files, and loads built-in images.
+     * All GL calls are guarded (#ifndef GODOT_GDEXTENSION) or stubbed. */
+    if ( !gr_realRendererInited ) {
+        ri.Printf( PRINT_ALL, "[GodotRenderer] Calling R_Init() to bootstrap real shader/image/model subsystems\n" );
+        R_Init();
+        gr_realRendererInited = 1;
+    }
 
     /* (Re-)initialise the model table */
     GR_ModelInit();

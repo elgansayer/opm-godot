@@ -196,6 +196,8 @@ renderer_sources = [
     "code/renderergl1/tr_util.cpp",
     # renderercommon: noise generator (used by tr_init.c R_NoiseInit)
     "code/renderercommon/tr_noise.c",
+    # Accessor bridge: reads real shader_t data → GodotShaderProps structs
+    "code/renderergl1/godot_shader_accessors.c",
 ]
 sources.extend(renderer_sources)
 
@@ -264,6 +266,10 @@ def should_exclude(filepath):
     # Exclude test_*.cpp stubs from code/godot/ — they contain mock
     # implementations that shadow real functions via -z muldefs.
     if "code/godot/" in fp and os.path.basename(fp).startswith("test_"):
+        return True
+
+    # Replaced by godot_shader_accessors.c which reads real shader_t data
+    if fp.endswith("godot_shader_props.cpp"):
         return True
 
     # Client sound / backend exclusions

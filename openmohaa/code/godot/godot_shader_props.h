@@ -18,8 +18,12 @@
 #ifndef GODOT_SHADER_PROPS_H
 #define GODOT_SHADER_PROPS_H
 
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+
 /* ── Transparency classification ── */
-enum GodotShaderTransparency {
+typedef enum GodotShaderTransparency {
     SHADER_OPAQUE = 0,
     SHADER_ALPHA_TEST,       /* alphaFunc GT0/LT128/GE128 → ALPHA_SCISSOR */
     SHADER_ALPHA_BLEND,      /* blendFunc blend / GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA → TRANSPARENCY_ALPHA */
@@ -27,14 +31,14 @@ enum GodotShaderTransparency {
     SHADER_MULTIPLICATIVE,   /* blendFunc filter / GL_DST_COLOR GL_ZERO → BLEND_MODE_MUL */
     SHADER_MULTIPLICATIVE_INV, /* GL_ZERO GL_ONE_MINUS_SRC_COLOR → dst*(1-src) */
     SHADER_ALPHA_BLEND_INV,  /* GL_ONE_MINUS_SRC_ALPHA GL_SRC_ALPHA → src*(1-a)+dst*a (inverted alpha) */
-};
+} GodotShaderTransparency;
 
 /* ── Cull mode ── */
-enum GodotShaderCull {
+typedef enum GodotShaderCull {
     SHADER_CULL_BACK  = 0,   /* default: back-face culling */
     SHADER_CULL_FRONT = 1,   /* cull front */
     SHADER_CULL_NONE  = 2,   /* cull none / cull twosided / cull disable */
-};
+} GodotShaderCull;
 
 /* ── Phase 66–72: Per-stage enums and structs ── */
 
@@ -43,7 +47,7 @@ enum GodotShaderCull {
 #define MOHAA_SHADER_STAGE_MAX_ANIM_FRAMES 8
 
 /* GL blend factors as used in Q3 .shader blendFunc directives */
-enum MohaaBlendFactor {
+typedef enum MohaaBlendFactor {
     BLEND_ONE = 0,
     BLEND_ZERO,
     BLEND_SRC_ALPHA,
@@ -54,19 +58,19 @@ enum MohaaBlendFactor {
     BLEND_ONE_MINUS_SRC_COLOR,
     BLEND_DST_ALPHA,
     BLEND_ONE_MINUS_DST_ALPHA,
-};
+} MohaaBlendFactor;
 
 /* Wave function types for rgbGen wave / alphaGen wave / tcMod stretch */
-enum MohaaWaveFunc {
+typedef enum MohaaWaveFunc {
     WAVE_SIN = 0,
     WAVE_TRIANGLE,
     WAVE_SQUARE,
     WAVE_SAWTOOTH,
     WAVE_INVERSE_SAWTOOTH,
-};
+} MohaaWaveFunc;
 
 /* Per-stage rgbGen type */
-enum MohaaStageRgbGen {
+typedef enum MohaaStageRgbGen {
     STAGE_RGBGEN_IDENTITY = 0,
     STAGE_RGBGEN_IDENTITY_LIGHTING,
     STAGE_RGBGEN_VERTEX,
@@ -75,10 +79,10 @@ enum MohaaStageRgbGen {
     STAGE_RGBGEN_ONE_MINUS_ENTITY,
     STAGE_RGBGEN_LIGHTING_DIFFUSE,
     STAGE_RGBGEN_CONST,
-};
+} MohaaStageRgbGen;
 
 /* Per-stage alphaGen type */
-enum MohaaStageAlphaGen {
+typedef enum MohaaStageAlphaGen {
     STAGE_ALPHAGEN_IDENTITY = 0,
     STAGE_ALPHAGEN_VERTEX,
     STAGE_ALPHAGEN_WAVE,
@@ -86,18 +90,18 @@ enum MohaaStageAlphaGen {
     STAGE_ALPHAGEN_ONE_MINUS_ENTITY,
     STAGE_ALPHAGEN_PORTAL,
     STAGE_ALPHAGEN_CONST,
-};
+} MohaaStageAlphaGen;
 
 /* Per-stage tcGen type */
-enum MohaaStageTcGen {
+typedef enum MohaaStageTcGen {
     STAGE_TCGEN_BASE = 0,
     STAGE_TCGEN_LIGHTMAP,
     STAGE_TCGEN_ENVIRONMENT,
     STAGE_TCGEN_VECTOR,
-};
+} MohaaStageTcGen;
 
 /* Per-stage tcMod type */
-enum MohaaStageTcModType {
+typedef enum MohaaStageTcModType {
     TCMOD_NONE = 0,
     TCMOD_SCROLL,
     TCMOD_ROTATE,
@@ -112,34 +116,34 @@ enum MohaaStageTcModType {
     TCMOD_ENTITY_TRANSLATE,
     TCMOD_PARALLAX,
     TCMOD_MACRO,
-};
+} MohaaStageTcModType;
 
-enum MohaaStageTcModFlags {
+typedef enum MohaaStageTcModFlags {
     TCMOD_FLAG_FROMENTITY_S         = 1 << 0,
     TCMOD_FLAG_FROMENTITY_T         = 1 << 1,
     TCMOD_FLAG_FROMENTITY_ROT_SPEED = 1 << 2,
     TCMOD_FLAG_FROMENTITY_ROT_START = 1 << 3,
-};
+} MohaaStageTcModFlags;
 
 /* Wave function parameters (shared by rgbGen wave, alphaGen wave, tcMod stretch) */
-struct MohaaWaveParams {
+typedef struct MohaaWaveParams {
     MohaaWaveFunc func;
     float base;
     float amplitude;
     float phase;
     float frequency;
-};
+} MohaaWaveParams;
 
 /* Single tcMod directive within a stage */
-struct MohaaStageTcMod {
+typedef struct MohaaStageTcMod {
     MohaaStageTcModType type;
     float params[8];   /* type-dependent payload */
     unsigned int flags; /* MohaaStageTcModFlags */
     MohaaWaveParams wave; /* only for TCMOD_STRETCH */
-};
+} MohaaStageTcMod;
 
 /* Per-stage shader data — one stage = one { } block inside a shader definition */
-struct MohaaShaderStage {
+typedef struct MohaaShaderStage {
     bool active;                    /* false when ifCvar/ifCvarnot disables this stage */
     char map[64];                    /* texture path or "$lightmap" */
     MohaaBlendFactor blendSrc;      /* GL blend source factor */
@@ -177,10 +181,10 @@ struct MohaaShaderStage {
     bool depthWriteExplicit;         /* true if depthwrite/nodepthwrite was specified */
     bool depthWriteEnabled;          /* true = force depth write; false = disable depth write */
     bool noDepthTest;                /* true = disable depth testing (noDepthTest) */
-};
+} MohaaShaderStage;
 
 /* ── Per-shader properties ── */
-struct GodotShaderProps {
+typedef struct GodotShaderProps {
     GodotShaderTransparency transparency;
     float alpha_threshold;   /* for SHADER_ALPHA_TEST: 0.01 (GT0), 0.5 (GE128/LT128) */
     GodotShaderCull cull;
@@ -266,9 +270,13 @@ struct GodotShaderProps {
     /* Phase 66–72: Per-stage shader data (all stages parsed) */
     MohaaShaderStage stages[MOHAA_SHADER_STAGE_MAX];
     int stage_count;             /* number of parsed stages (== num_stages) */
-};
+} GodotShaderProps;
 
 /* ── API ── */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  * Parse all .shader files listed in scripts/shaderlist.txt and build
@@ -298,10 +306,6 @@ int Godot_ShaderProps_Count();
  * or nullptr if no sky shader was parsed.  E.g. "env/m5l2".
  */
 const char *Godot_ShaderProps_GetSkyEnv();
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /*
  * C-linkage helper: look up a shader's first non-lightmap stage `map`
