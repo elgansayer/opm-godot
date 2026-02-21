@@ -19,6 +19,7 @@ int  Godot_Renderer_GetEntity(int index,
 void Godot_Renderer_GetEntitySprite(int index,
                                     float *radius, float *rotation,
                                     int *customShader);
+int  Godot_Model_GetShaderHandle(int hModel);
 
 /* RT_SPRITE enum value from renderercommon/tr_types.h */
 #define RT_SPRITE_VALUE 2
@@ -60,7 +61,8 @@ int Godot_VFX_GetSpriteCount(void)
  *
  *   origin       — [3] floats, id Tech 3 coordinates (inches)
  *   radius       — sprite half-size (inches)
- *   shaderHandle — resolved shader handle (customShader if set, else hModel)
+ *   shaderHandle — resolved shader handle (customShader if set, else
+ *                  resolved from model→shader chain via the model table)
  *   rotation     — rotation angle in degrees
  *   rgba         — [4] bytes, colour tint
  */
@@ -69,18 +71,19 @@ void Godot_VFX_GetSprite(int idx,
                          float *radius,
                          int   *shaderHandle,
                          float *rotation,
-                         unsigned char *rgba)
+                         unsigned char *rgba,
+                         float *scale)
 {
     if (idx < 0 || idx >= vfx_sprite_count) return;
 
     int entIdx = vfx_sprite_indices[idx];
 
     /* Fetch common entity data (origin, rgba) */
-    float axis[9], scale;
+    float axis[9], scaleVal;
     int hModel, entityNumber, renderfx;
     unsigned char tmpRgba[4];
 
-    Godot_Renderer_GetEntity(entIdx, origin, axis, &scale,
+    Godot_Renderer_GetEntity(entIdx, origin, axis, &scaleVal,
                              &hModel, &entityNumber,
                              tmpRgba, &renderfx);
 
@@ -99,5 +102,22 @@ void Godot_VFX_GetSprite(int idx,
 
     if (radius)       *radius       = tmpRadius;
     if (rotation)     *rotation     = tmpRotation;
-    if (shaderHandle) *shaderHandle = (customShader > 0) ? customShader : hModel;
+    if (scale)        *scale        = scaleVal;
+
+    /* Resolve the shader handle:
+     *  1. customShader (explicit per-entity override) — highest priority
+     *  2. Model's associated shader (hModel → gr_models[].shaderHandle)
+     *     For GR_MOD_SPRITE models, shaderHandle is set at registration
+     *     time from the .spr filename stripped of extension.
+     *  3. Fallback to raw hModel (last resort) */
+    if (shaderHandle) {
+        if (customShader > 0) {
+            *shaderHandle = customShader;
+        } else if (hModel > 0) {
+            int modelShader = Godot_Model_GetShaderHandle(hModel);
+            *shaderHandle = (modelShader > 0) ? modelShader : hModel;
+        } else {
+            *shaderHandle = 0;
+        }
+    }
 }

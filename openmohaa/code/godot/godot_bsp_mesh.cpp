@@ -878,7 +878,31 @@ static Ref<ArrayMesh> batches_to_array_mesh(
         const GodotShaderProps *sp = batch.shader_name
             ? Godot_ShaderProps_Find(batch.shader_name) : nullptr;
 
-        if (sp && sp->stage_count > 0) {
+        /* Check whether the shader definition includes a lightmap stage.
+         * MOHAA terrain (and some surfaces) rely on the engine's rendering
+         * code to apply lightmap modulation via TMU1, so their .shader
+         * definitions don't include $lightmap or nextBundle $lightmap.
+         * If the batch has a valid lightmap but the shader doesn't reference
+         * one, skip the ShaderMaterial path and fall through to the
+         * StandardMaterial3D fallback which handles lightmaps via the
+         * detail texture mechanism. */
+        bool shader_has_lm = false;
+        if (sp) {
+            for (int si = 0; si < sp->stage_count; si++) {
+                if (sp->stages[si].isLightmap || sp->stages[si].hasNextBundleLightmap) {
+                    shader_has_lm = true;
+                    break;
+                }
+            }
+        }
+        bool batch_has_lm = !batch.nolightmap &&
+                            batch.lightmap_num >= 0 &&
+                            batch.lightmap_num < (int)s_lightmaps.size() &&
+                            s_lightmaps[batch.lightmap_num].is_valid();
+        bool skip_shader_for_lm = (sp && sp->stage_count > 0 &&
+                                   batch_has_lm && !shader_has_lm);
+
+        if (sp && sp->stage_count > 0 && !skip_shader_for_lm) {
             /* ── ShaderMaterial path (multi-stage .shader) ── */
             Ref<ShaderMaterial> smat = Godot_Shader_BuildMaterial(sp);
             if (smat.is_valid()) {
@@ -1710,10 +1734,30 @@ godot::Node3D *Godot_BSP_LoadWorld(const char *bsp_path) {
             //   [0][1] = NW (col=0,row=8)
             //   [1][0] = SE (col=8,row=0)
             //   [1][1] = NE (col=8,row=8)
-            float s00 = patch->texCoord[0][0][0], t00 = patch->texCoord[0][0][1];
-            float s01 = patch->texCoord[0][1][0], t01 = patch->texCoord[0][1][1];
-            float s10 = patch->texCoord[1][0][0], t10 = patch->texCoord[1][0][1];
-            float s11 = patch->texCoord[1][1][0], t11 = patch->texCoord[1][1][1];
+            //
+            // The original engine (tr_terrain.c) normalises these by
+            // subtracting floor(min(corners)) so values start near zero.
+            // This prevents floating-point precision loss at large UV
+            // offsets.  texture repeat handles the integer wrap.
+            float raw_s00 = patch->texCoord[0][0][0], raw_t00 = patch->texCoord[0][0][1];
+            float raw_s01 = patch->texCoord[0][1][0], raw_t01 = patch->texCoord[0][1][1];
+            float raw_s10 = patch->texCoord[1][0][0], raw_t10 = patch->texCoord[1][0][1];
+            float raw_s11 = patch->texCoord[1][1][0], raw_t11 = patch->texCoord[1][1][1];
+
+            // Compute sMin: floor of minimum S across all four corners
+            float sMin_a = (raw_s00 < raw_s01) ? raw_s00 : raw_s01;
+            float sMin_b = (raw_s10 < raw_s11) ? raw_s10 : raw_s11;
+            float sMin = floorf((sMin_a < sMin_b) ? sMin_a : sMin_b);
+
+            // Compute tMin: floor of minimum T across all four corners
+            float tMin_a = (raw_t00 < raw_t01) ? raw_t00 : raw_t01;
+            float tMin_b = (raw_t10 < raw_t11) ? raw_t10 : raw_t11;
+            float tMin = floorf((tMin_a < tMin_b) ? tMin_a : tMin_b);
+
+            float s00 = raw_s00 - sMin, t00 = raw_t00 - tMin;
+            float s01 = raw_s01 - sMin, t01 = raw_t01 - tMin;
+            float s10 = raw_s10 - sMin, t10 = raw_t10 - tMin;
+            float s11 = raw_s11 - sMin, t11 = raw_t11 - tMin;
 
             // Lightmap UV parameters
             float lm_s_norm = ((float)patch->lm_s + 0.5f) / 128.0f;

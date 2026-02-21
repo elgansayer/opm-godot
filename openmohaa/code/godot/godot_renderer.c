@@ -38,6 +38,8 @@ static refimport_t ri;                /* engine → renderer callbacks */
 
 #define GR_MAX_MODELS  1024
 
+static qhandle_t GR_RegisterShader( const char *name );
+
 typedef enum {
     GR_MOD_BAD,
     GR_MOD_BRUSH,
@@ -51,6 +53,7 @@ typedef struct {
     int           index;
     qboolean      serveronly;
     dtiki_t      *tiki;       /* only set for GR_MOD_TIKI */
+    int           shaderHandle;
 } gr_model_t;
 
 static gr_model_t gr_models[GR_MAX_MODELS];
@@ -122,8 +125,16 @@ static qhandle_t GR_RegisterModelInternal( const char *name, qboolean bBeginTiki
                 return mod->index;
             }
         } else if ( !Q_stricmp( ext, "spr" ) ) {
-            /* Sprites: mark as valid but no geometry yet */
+            /* Sprites: The shader name is the sprite filename without the .spr extension. */
+            char shadername[256];
+            COM_StripExtension( name, shadername, sizeof(shadername) );
+
             mod->type = GR_MOD_SPRITE;
+            mod->shaderHandle = GR_RegisterShader( shadername );
+            
+            ri.Printf( PRINT_DEVELOPER,
+                "[GodotRenderer] RegisterModel SPRITE: %s -> shader '%s' (handle #%d)\n",
+                name, shadername, mod->shaderHandle );
             return mod->index;
         }
     }
@@ -822,6 +833,27 @@ static void GR_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
                 re->axis[0][0], re->axis[0][1], re->axis[0][2],
                 re->scale, (void *)re->tiki, (int)re->hModel,
                 (int)re->reType );
+        }
+    }
+
+    /* Diagnostic: log RT_SPRITE entities to trace shader/texture assignment */
+    {
+        static int sprite_diag_count = 0;
+        if ( sprite_diag_count < 50 && (int)re->reType == 2 /* RT_SPRITE */ ) {
+            sprite_diag_count++;
+            ri.Printf( PRINT_ALL,
+                "[SPRITE-ADD] reType=%d hModel=%d customShader=%d "
+                "radius=%.2f rotation=%.2f "
+                "rgba=(%d,%d,%d,%d) "
+                "origin=(%.1f,%.1f,%.1f) "
+                "entNum=%d renderfx=0x%x skinNum=%d customSkin=%d\n",
+                (int)re->reType, (int)re->hModel, (int)re->customShader,
+                re->radius, re->rotation,
+                re->shaderRGBA[0], re->shaderRGBA[1],
+                re->shaderRGBA[2], re->shaderRGBA[3],
+                re->origin[0], re->origin[1], re->origin[2],
+                re->entityNumber, re->renderfx,
+                re->skinNum, (int)re->customSkin );
         }
     }
 }
@@ -2778,6 +2810,15 @@ float Godot_Model_GetRadius( int hModel )
     return GR_ModelRadius( (qhandle_t)hModel );
 }
 
+int Godot_Model_GetSpriteShader( int hModel )
+{
+    if ( hModel < 0 || hModel >= gr_numModels ) return 0;
+    if ( gr_models[hModel].type == GR_MOD_SPRITE ) {
+        return gr_models[hModel].shaderHandle;
+    }
+    return 0;
+}
+
 /* Phase 26: Shader remap query — check if a shader name has been remapped */
 const char *Godot_Renderer_GetShaderRemap( const char *shaderName )
 {
@@ -3086,6 +3127,14 @@ const char *Godot_Model_GetName( int hModel )
 {
     if ( hModel < 0 || hModel >= gr_numModels ) return NULL;
     return gr_models[hModel].name;
+}
+
+/* Return the shader handle associated with a model (GR_MOD_SPRITE stores
+ * a shader handle at registration time).  Returns 0 if not found. */
+int Godot_Model_GetShaderHandle( int hModel )
+{
+    if ( hModel < 1 || hModel >= gr_numModels ) return 0;
+    return gr_models[hModel].shaderHandle;
 }
 
 /* Register a model by name (TIKI, brush, or sprite) and return its handle.

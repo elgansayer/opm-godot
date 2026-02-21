@@ -29,7 +29,7 @@ extern "C" {
 int  Godot_VFX_GetSpriteCount(void);
 void Godot_VFX_GetSprite(int idx, float *origin, float *radius,
                          int *shaderHandle, float *rotation,
-                         unsigned char *rgba);
+                         unsigned char *rgba, float *scale);
 
 #ifdef __cplusplus
 }

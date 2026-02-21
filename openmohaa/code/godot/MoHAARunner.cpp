@@ -275,10 +275,12 @@ extern "C" {
     // Phase 268: Entity lighting origin — from godot_renderer.c
     void  Godot_Renderer_GetEntityLightingOrigin(int index, float *out);
 
-    // Shadow blob accessors — from godot_renderer.c
+    // Model/Shadow accessors
     float Godot_Renderer_GetEntityShadowPlane(int index);
     float Godot_Model_GetRadius(int hModel);
+    int   Godot_Model_GetSpriteShader(int hModel);
 
+    // Render commands and polygons
     // Phase 148: HUD model render request accessors — from godot_renderer.c
     int   Godot_Renderer_GetHudModelCount(void);
     int   Godot_Renderer_GetHudModel(int index,
@@ -984,6 +986,7 @@ void MoHAARunner::check_world_load() {
             Godot_SoundOcclusion_SetEnabled(0);   // Disable occlusion when BSP unloaded
             pvs_current_cluster = -1;             // Reset PVS state
             pvs_log_count = 0;
+            Godot_VFX_Clear();  // Flush VFX caches — shader handles are invalidated by BeginRegistration
             UtilityFunctions::print("[MoHAA] BSP world unloaded.");
         }
         return;
@@ -1252,7 +1255,13 @@ static void apply_shader_props_to_material(Ref<StandardMaterial3D> &mat,
     if (!shader_name || !shader_name[0]) return;
 
     const GodotShaderProps *sp = Godot_ShaderProps_Find(shader_name);
-    if (!sp) return;
+    if (!sp) {
+        if (shader_name && strstr(shader_name, "bh_wood")) {
+            UtilityFunctions::print(String("[MoHAA][3D] ShaderProps NULL for ") + String(shader_name) + ", FORCING TRANSPARENCY_ALPHA!");
+            mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+        }
+        return;
+    }
 
     switch (sp->transparency) {
         case SHADER_ALPHA_TEST:
@@ -1929,18 +1938,23 @@ void MoHAARunner::update_entities() {
                 mi->set_visible(false);
                 continue;
             }
+            // Engine radius is already the half-extent (see RB_SurfaceSprite:
+            // VectorScale(axis, radius, left/up) → quad spans -radius to +radius).
+            // We build vertices at ±half, so half = radius converted to metres.
 
-            // Use customShader if set, else hModel as shader handle
-            int spriteShader = (customShader > 0) ? customShader : hModel;
+            // Use customShader if set, else extract the registered shader from the sprite model handle
+            int spriteShader = (customShader > 0) ? customShader : Godot_Model_GetSpriteShader(hModel);
 
             float half = radius * MOHAA_UNIT_SCALE;
 
             // Build a simple quad (2 triangles) — billboard handled by material
             PackedVector3Array gPos;
             PackedVector2Array gUV;
+            PackedColorArray   gCol;
             PackedInt32Array   gIdx;
             gPos.resize(4);
             gUV.resize(4);
+            gCol.resize(4);
             gIdx.resize(6);
 
             gPos.set(0, Vector3(-half, -half, 0.0f));
@@ -1951,6 +1965,14 @@ void MoHAARunner::update_entities() {
             gUV.set(1, Vector2(1, 1));
             gUV.set(2, Vector2(1, 0));
             gUV.set(3, Vector2(0, 0));
+
+            Color entCol(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                         rgba[2] / 255.0f, rgba[3] / 255.0f);
+            gCol.set(0, entCol);
+            gCol.set(1, entCol);
+            gCol.set(2, entCol);
+            gCol.set(3, entCol);
+
             gIdx.set(0, 0); gIdx.set(1, 1); gIdx.set(2, 2);
             gIdx.set(3, 0); gIdx.set(4, 2); gIdx.set(5, 3);
 
@@ -1958,6 +1980,7 @@ void MoHAARunner::update_entities() {
             arrays.resize(Mesh::ARRAY_MAX);
             arrays[Mesh::ARRAY_VERTEX] = gPos;
             arrays[Mesh::ARRAY_TEX_UV] = gUV;
+            arrays[Mesh::ARRAY_COLOR]  = gCol;
             arrays[Mesh::ARRAY_INDEX]  = gIdx;
 
             Ref<ArrayMesh> smesh;
@@ -1974,15 +1997,89 @@ void MoHAARunner::update_entities() {
                 smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
                 smat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
                 smat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                smat->set_flag(BaseMaterial3D::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
                 smat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
                 smat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
 
+                bool shader_props_found = false;
                 if (spriteShader > 0) {
                     const char *sn = Godot_Renderer_GetShaderName(spriteShader);
                     if (sn && sn[0]) {
-                        apply_shader_props_to_material(smat, sn);
+                        const GodotShaderProps *sp = Godot_ShaderProps_Find(sn);
+                        if (sp) {
+                            shader_props_found = true;
+                            apply_shader_props_to_material(smat, sn);
+
+                            // Re-enforce sprite-specific settings that
+                            // apply_shader_props_to_material may override:
+                            // - cull: shader default SHADER_CULL_BACK → CULL_BACK,
+                            //   but billboard sprites must show both sides.
+                            // - billboard: must stay BILLBOARD_ENABLED.
+                            // - depth: sprites should not write depth.
+                            // - shading: sprites are fullbright/unshaded.
+                            smat->set_billboard_mode(BaseMaterial3D::BILLBOARD_ENABLED);
+                            smat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                            smat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
+                            smat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
+
+                            // If the shader was classified as OPAQUE (no blendFunc
+                            // on first non-lightmap stage, or stage parse missed it),
+                            // sprites still need transparency. Infer from texture
+                            // alpha: no alpha → additive (fire/flash), has alpha →
+                            // standard alpha blend (smoke/blood).
+                            if (sp->transparency == SHADER_OPAQUE) {
+                                Ref<ImageTexture> tex = get_shader_texture(spriteShader);
+                                if (tex.is_valid()) {
+                                    smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                                }
+                                auto ha_it = shader_texture_has_alpha.find(spriteShader);
+                                bool tex_has_alpha = (ha_it != shader_texture_has_alpha.end()) && ha_it->second;
+                                if (!tex_has_alpha) {
+                                    smat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                                }
+                            }
+                        }
                     }
                 }
+
+                // When no .shader definition is found, determine blend mode
+                // from the texture's alpha channel. In MOHAA, sprite effects
+                // without alpha (fire, flash, corona, sparks) use additive
+                // blending (blendFunc add) — black pixels add nothing,
+                // making quad edges invisible. Sprites WITH alpha (smoke,
+                // blood) use standard alpha blending.
+                if (!shader_props_found && spriteShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(spriteShader);
+                    if (tex.is_valid()) {
+                        smat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
+                    auto ha_it = shader_texture_has_alpha.find(spriteShader);
+                    bool tex_has_alpha = (ha_it != shader_texture_has_alpha.end()) && ha_it->second;
+                    if (!tex_has_alpha) {
+                        // No alpha channel → additive blend (fire/flash/corona)
+                        smat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                    }
+                }
+                
+                static std::unordered_set<int> logged_active_sprites;
+                if (logged_active_sprites.find(spriteShader) == logged_active_sprites.end()) {
+                    const char *sn = (spriteShader > 0) ? Godot_Renderer_GetShaderName(spriteShader) : "(none)";
+                    const GodotShaderProps *sp_diag = (sn && sn[0]) ? Godot_ShaderProps_Find(sn) : nullptr;
+                    auto ha_it = shader_texture_has_alpha.find(spriteShader);
+                    bool tex_alpha = (ha_it != shader_texture_has_alpha.end()) && ha_it->second;
+                    const char *transp_names[] = {"OPAQUE","ALPHA_TEST","ALPHA_BLEND","ADDITIVE","MULTIPLICATIVE","MULT_INV","ALPHA_INV"};
+                    const char *blend_names[] = {"MIX","ADD","SUB","MUL"};
+                    int tn = sp_diag ? sp_diag->transparency : -1;
+                    int bn = (int)smat->get_blend_mode();
+                    UtilityFunctions::print(String("[MoHAA][SPRITE-MAT] shader=#") + String::num_int64(spriteShader) +
+                        String(" name='") + String(sn ? sn : "(null)") + String("'") +
+                        String(" props=") + String(sp_diag ? "YES" : "NO") +
+                        String(" shader_transp=") + String(tn >= 0 && tn < 7 ? transp_names[tn] : "?") +
+                        String(" godot_blend=") + String(bn >= 0 && bn < 4 ? blend_names[bn] : "?") +
+                        String(" tex_alpha=") + String(tex_alpha ? "yes" : "no"));
+                    logged_active_sprites.insert(spriteShader);
+                }
+                
                 s_sprite_mat_cache[spriteShader] = smat;
                 sp_it = s_sprite_mat_cache.find(spriteShader);
             }
@@ -1992,6 +2089,13 @@ void MoHAARunner::update_entities() {
                 Ref<ImageTexture> tex = get_shader_texture(spriteShader);
                 if (tex.is_valid()) {
                     sp_it->second->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                } else {
+                    static std::unordered_set<int> logged_missing_sprites;
+                    if (logged_missing_sprites.find(spriteShader) == logged_missing_sprites.end()) {
+                        const char *sn = Godot_Renderer_GetShaderName(spriteShader);
+                        UtilityFunctions::print(String("[MoHAA][SPRITE-TEX-MISS] Sprite shader missing texture! Name: ") + String(sn ? sn : ""));
+                        logged_missing_sprites.insert(spriteShader);
+                    }
                 }
             }
 
@@ -2102,10 +2206,29 @@ void MoHAARunner::update_entities() {
                 bmat->set_shading_mode(BaseMaterial3D::SHADING_MODE_UNSHADED);
                 bmat->set_depth_draw_mode(BaseMaterial3D::DEPTH_DRAW_DISABLED);
 
+                bool beam_props_found = false;
                 if (beamShader > 0) {
                     const char *sn = Godot_Renderer_GetShaderName(beamShader);
                     if (sn && sn[0]) {
+                        const GodotShaderProps *sp = Godot_ShaderProps_Find(sn);
+                        if (sp) {
+                            beam_props_found = true;
+                        }
                         apply_shader_props_to_material(bmat, sn);
+                    }
+                }
+
+                // Beams without shader definitions: check texture alpha
+                // for additive blend fallback (same logic as sprites).
+                if (!beam_props_found && beamShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(beamShader);
+                    if (tex.is_valid()) {
+                        bmat->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, tex);
+                    }
+                    auto ha_it = shader_texture_has_alpha.find(beamShader);
+                    bool tex_has_alpha = (ha_it != shader_texture_has_alpha.end()) && ha_it->second;
+                    if (!tex_has_alpha) {
+                        bmat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
                     }
                 }
                 s_beam_mat_cache[beamShader] = bmat;
@@ -2240,6 +2363,21 @@ void MoHAARunner::update_entities() {
             }
         } else {
             // ── Skeletal (TIKI) model ──
+            // Diagnostic: log model type for entities that reach TIKI path
+            {
+                static std::unordered_set<int> logged_tiki_path_models;
+                if (logged_tiki_path_models.find(hModel) == logged_tiki_path_models.end()) {
+                    logged_tiki_path_models.insert(hModel);
+                    const char *modName = Godot_Model_GetName(hModel);
+                    void *tikiCheck = Godot_Model_GetTikiPtr(hModel);
+                    UtilityFunctions::print(String("[MoHAA][TIKI-PATH] Entity reaching TIKI path: hModel=") +
+                        String::num_int64(hModel) + " modType=" + String::num_int64(modType) +
+                        " hasTiki=" + String(tikiCheck ? "YES" : "NO") +
+                        " name=" + String(modName ? modName : "(null)") +
+                        " rgba=(" + String::num_int64(rgba[0]) + "," + String::num_int64(rgba[1]) + "," +
+                        String::num_int64(rgba[2]) + "," + String::num_int64(rgba[3]) + ")");
+                }
+            }
             // Try to get the cached bind-pose model (may be null for
             // dynamically registered models like FPS weapon TIKIs).
             const GodotSkelModelCache::CachedModel *cached =
@@ -2309,6 +2447,11 @@ void MoHAARunner::update_entities() {
 
                     if (!found_tex) {
                         mat->set_albedo(Color(0.6, 0.6, 0.6, 1.0));
+                        static std::unordered_set<std::string> logged_missing_tiki_tex;
+                        if (!shader_name.is_empty() && logged_missing_tiki_tex.find(shader_name.ascii().get_data()) == logged_missing_tiki_tex.end()) {
+                            UtilityFunctions::print(String("[MoHAA][TIKI-TEX-MISS] TIKI surface missing texture! Shader: ") + shader_name);
+                            logged_missing_tiki_tex.insert(shader_name.ascii().get_data());
+                        }
                     }
 
                     if (!shader_name.is_empty()) {
@@ -2481,7 +2624,7 @@ void MoHAARunner::update_entities() {
                 }  // end else (cache miss)
             }
 
-            // Use skinned mesh if available, else cached bind pose, else debug box
+            // Use skinned mesh if available, else cached bind pose, else hide
             bool mesh_changed = false;
             if (skinned_mesh.is_valid() &&
                 skinned_mesh->get_surface_count() > 0) {
@@ -2502,33 +2645,9 @@ void MoHAARunner::update_entities() {
                     mesh_changed = true;
                 }
             } else {
-                // No mesh available — small debug placeholder
-                if (!mi->get_mesh().is_valid() || mi->get_mesh()->get_class() != "BoxMesh") {
-                    Ref<BoxMesh> box;
-                    box.instantiate();
-                    box->set_size(Vector3(0.3, 0.3, 0.3));
-                    mi->set_mesh(box);
-
-                    Ref<StandardMaterial3D> mat;
-                    mat.instantiate();
-                    mat->set_albedo(Color(1.0, 0.3, 0.1, 0.7));
-                    mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
-                    mi->set_surface_override_material(0, mat);
-                    mesh_changed = true;
-
-                    // Diagnostic: log TIKI entities that have no mesh (shows as debug box)
-                    static std::unordered_set<int> logged_fallback_models;
-                    if (logged_fallback_models.find(hModel) == logged_fallback_models.end()) {
-                        const char *mn = Godot_Model_GetName(hModel);
-                        UtilityFunctions::print(
-                            String("[MoHAA][ENT-FALLBACK] TIKI entity got debug box! hModel=")
-                            + String::num_int64(hModel) + " name='"
-                            + String(mn ? mn : "(null)") + "'"
-                            + " entNum=" + String::num_int64(entityNumber)
-                            + " rfx=0x" + String::num_int64(renderfx, 16));
-                        logged_fallback_models.insert(hModel);
-                    }
-                }
+                // No mesh available — parity with OpenMOHAA: do not render
+                mi->set_visible(false);
+                continue; // Skip material application and drawing
             }
 
             // Apply cached materials (after set_mesh which clears overrides)
@@ -3175,6 +3294,15 @@ void MoHAARunner::update_polys() {
                 smat.instantiate();
                 smat->set_shader(inv_mul_poly_shader);
                 smat->set_render_priority(-1);  // polygonOffset equivalent
+
+                // Load and set the albedo texture for this shader
+                if (hShader > 0) {
+                    Ref<ImageTexture> tex = get_shader_texture(hShader);
+                    if (tex.is_valid()) {
+                        smat->set_shader_parameter("albedo_texture", tex);
+                    }
+                }
+
                 s_poly_mat_cache[poly_mat_key] = smat;
             } else {
                 // Standard or multiplicative — StandardMaterial3D
@@ -3189,55 +3317,56 @@ void MoHAARunner::update_polys() {
                 mat->set_albedo(Color(1, 1, 1, 1));
                 mat->set_uv1_scale(Vector3(1, 1, 1));
                 mat->set_uv1_offset(Vector3(0, 0, 0));
-                mat->set_alpha_scissor_threshold(0.5);
 
                 if (blend_type == 2) {
                     mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
                 }
 
+                bool poly_shader_props_found = false;
                 if (hShader > 0) {
-                    // Check texture validity to identify if this is a textureless particle effect
                     Ref<ImageTexture> tex = get_shader_texture(hShader);
-                    if (!tex.is_valid() && blend_type == 0) {
-                        // Particle fallback: no texture available
+                    if (!tex.is_valid()) {
                         const char *sn = Godot_Renderer_GetShaderName(hShader);
-                        bool is_particle_effect = false;
-                        if (sn && sn[0]) {
-                            const char* particle_keywords[] = {
-                                "tracer", "beam", "flare", "glow", "particle",
-                                "flash", "spark", "trail", nullptr
-                            };
-                            for (int kw = 0; particle_keywords[kw]; kw++) {
-                                if (strstr(sn, particle_keywords[kw])) {
-                                    is_particle_effect = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (is_particle_effect) {
-                            mat->set_albedo(Color(1.0f, 1.0f, 1.0f, 1.0f));
-                            mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
-                            static std::unordered_set<std::string> logged_fallbacks;
-                            if (sn && logged_fallbacks.find(sn) == logged_fallbacks.end()) {
-                                UtilityFunctions::print(String("[MoHAA] Particle shader fallback (no texture): ") + String(sn));
-                                logged_fallbacks.insert(sn);
-                            }
-                        } else {
-                            static std::unordered_set<std::string> logged_missing_tex;
-                            if (sn && logged_missing_tex.find(sn) == logged_missing_tex.end()) {
-                                UtilityFunctions::print(String("[MoHAA][CAUTION] Poly shader missing texture! Name: ") + String(sn));
-                                logged_missing_tex.insert(sn);
-                            }
+                        static std::unordered_set<std::string> logged_missing_tex;
+                        if (sn && logged_missing_tex.find(sn) == logged_missing_tex.end()) {
+                            UtilityFunctions::print(String("[MoHAA][CAUTION] Poly shader missing texture! Name: ") + String(sn) + " blend: " + String::num_int64(blend_type));
+                            logged_missing_tex.insert(sn);
                         }
                     }
 
                     if (blend_type == 0) {
                         const char *sn = Godot_Renderer_GetShaderName(hShader);
                         if (sn && sn[0]) {
+                            const GodotShaderProps *sp_poly = Godot_ShaderProps_Find(sn);
+                            if (sp_poly) {
+                                poly_shader_props_found = true;
+                            }
                             apply_shader_props_to_material(mat, sn);
                         }
                     }
                 }
+
+                // When no .shader definition is found for a poly, check
+                // texture alpha to determine blend mode. Polys without
+                // alpha (fire, flash, sparks) should use additive
+                // blending so black areas are invisible.
+                if (!poly_shader_props_found && blend_type == 0 && hShader > 0) {
+                    auto ha_it = shader_texture_has_alpha.find(hShader);
+                    bool tex_has_alpha = (ha_it != shader_texture_has_alpha.end()) && ha_it->second;
+                    if (!tex_has_alpha) {
+                        mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
+                    }
+                }
+                
+                // CRITICAL: Polys are generated by the C engine with absolute world-space
+                // coordinates and added to a Node3D at origin(0,0,0). If the shader definition
+                // specified an autosprite deform, apply_shader_props_to_material will
+                // enable Godot's BILLBOARD_ENABLED. This causes Godot to rotate the far-away
+                // vertices around (0,0,0), creating giant, screen-spanning distorted geometry.
+                // Since the C engine ALREADY handled the billboarding math, we MUST force
+                // it disabled here.
+                mat->set_billboard_mode(BaseMaterial3D::BILLBOARD_DISABLED);
+
                 s_poly_mat_cache[poly_mat_key] = mat;
             }
             pm_it = s_poly_mat_cache.find(poly_mat_key);
@@ -3271,6 +3400,21 @@ void MoHAARunner::update_polys() {
 
         mi->set_surface_override_material(0, pm_it->second);
         mi->set_visible(true);
+
+        static std::unordered_set<int> logged_active_poly_shaders;
+        if (hShader > 0) {
+            if (logged_active_poly_shaders.find(hShader) == logged_active_poly_shaders.end()) {
+                const char *sn = Godot_Renderer_GetShaderName(hShader);
+                UtilityFunctions::print(String("[MoHAA][POLY-ACTIVE] Poly rendering with shader handle: ") + String::num_int64(hShader) + " name: '" + String(sn ? sn : "(null)") + "'");
+                logged_active_poly_shaders.insert(hShader);
+            }
+        } else {
+            static bool logged_zero_shader = false;
+            if (!logged_zero_shader) {
+                UtilityFunctions::print(String("[MoHAA][POLY-ZERO] Poly rendering with hShader == ") + String::num_int64(hShader));
+                logged_zero_shader = true;
+            }
+        }
     }
 
     // Hide excess polys from previous frame
@@ -4049,10 +4193,14 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
                 return tex;
             }
 
-            if (is_serverback) {
-                UtilityFunctions::print(String("[MoHAA][2D] serverback decode failed shader='") +
+            // Always log decode errors globally, unconditionally!
+            static std::unordered_set<std::string> logged_errors;
+            if (logged_errors.find(path) == logged_errors.end()) {
+                UtilityFunctions::print(String("[MoHAA][TEX-ERR] Decode failed for shader='") +
                                         String(name) + String("' path='") + String(path) +
-                                        String("' err=") + String::num_int64(err));
+                                        String("' error_code=") + String::num_int64(err) +
+                                        String(" size=") + String::num_int64(len) + String(" bytes."));
+                logged_errors.insert(path);
             }
         }
 
@@ -4257,7 +4405,8 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
     // sprites/white texture, return a 1x1 white pixel.
     if (tex.is_null() && name) {
         bool is_white_shader = (strcmp(name, "white") == 0 ||
-                                strcmp(name, "*white") == 0);
+                                strcmp(name, "*white") == 0 ||
+                                strcmp(name, "$whiteimage") == 0);
         if (!is_white_shader) {
             for (int i = 0; i < num_texture_paths && !is_white_shader; i++) {
                 if (texture_paths[i] && strstr(texture_paths[i], "sprites/white"))
@@ -4283,14 +4432,16 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
             logged_missing[shader_handle] = true;
             String dbg = String("[MoHAA][2D] Missing texture for shader #") +
                          String::num_int64(shader_handle) + String(" name='") +
-                         String(name) + String("' candidates=");
+                         String(name ? name : "NULL") + String("' candidates=");
             for (int i = 0; i < num_texture_paths; i++) {
                 if (!texture_paths[i] || !texture_paths[i][0]) continue;
                 if (i > 0) dbg += String(",");
                 dbg += String(texture_paths[i]);
             }
             UtilityFunctions::print(dbg);
+            UtilityFunctions::print(String("[MoHAA][2D] FALLING BACK to $whiteimage for ") + String(name ? name : "NULL"));
         }
+        return get_shader_texture(Godot_Renderer_RegisterShader("$whiteimage"));
     }
 
     if (!tex.is_null()) {
@@ -4993,7 +5144,48 @@ void MoHAARunner::update_2d_overlay() {
                                 String(" scale=") + String::num(ui_scale_x,4) + String(",") + String::num(ui_scale_y,4));
                         }
                     }
-                    rs->canvas_item_add_texture_rect_region(target_ci, draw_rect, tex_rid, src, draw_col);
+                    // Flipped UVs (s1>s2 or t1>t2) need explicit UV
+                    // mapping — canvas_item_add_texture_rect_region does
+                    // not flip with negative src dimensions.  Use a
+                    // textured polygon with per-vertex UVs for full control.
+                    bool need_flip = (src.size.x < 0.0f || src.size.y < 0.0f);
+                    if (!need_flip) {
+                        rs->canvas_item_add_texture_rect_region(target_ci, draw_rect, tex_rid, src, draw_col, false, false);
+                    } else {
+                        // Build quad as 2-triangle polygon with explicit UVs.
+                        // The raw s1/t1/s2/t2 already encode the flip direction.
+                        float dx = draw_rect.position.x;
+                        float dy = draw_rect.position.y;
+                        float dw = draw_rect.size.x;
+                        float dh = draw_rect.size.y;
+
+                        PackedVector2Array pts;
+                        PackedVector2Array fuv;
+                        PackedColorArray   cols;
+                        PackedInt32Array   idx;
+
+                        pts.resize(4);
+                        fuv.resize(4);
+                        cols.resize(4);
+                        idx.resize(6);
+
+                        pts[0] = Vector2(dx,      dy);
+                        pts[1] = Vector2(dx + dw,  dy);
+                        pts[2] = Vector2(dx + dw,  dy + dh);
+                        pts[3] = Vector2(dx,       dy + dh);
+
+                        fuv[0] = Vector2(s1, t1);
+                        fuv[1] = Vector2(s2, t1);
+                        fuv[2] = Vector2(s2, t2);
+                        fuv[3] = Vector2(s1, t2);
+
+                        cols[0] = cols[1] = cols[2] = cols[3] = draw_col;
+
+                        idx[0] = 0; idx[1] = 1; idx[2] = 2;
+                        idx[3] = 0; idx[4] = 2; idx[5] = 3;
+
+                        rs->canvas_item_add_triangle_array(target_ci, idx, pts, cols, fuv, PackedInt32Array(), PackedFloat32Array(), tex_rid, -1);
+                    }
                 }
                 saw_textured_draw = true;
             }

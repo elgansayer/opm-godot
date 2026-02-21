@@ -550,11 +550,19 @@ void L_ClearEventList()
 
     LL_Reset(&Event::EventQueue, next, prev);
 
+#ifdef GODOT_GDEXTENSION
+    // Monolithic build: the block allocators are shared between fgame,
+    // client, and UI code.  FreeAll() would destroy ALL Event objects
+    // including those stored in UI signal connections (UConnection::m_events)
+    // which must survive across map transitions.  The while-loop above
+    // already properly deletes each queued event individually.
+#else
     Event_allocator.FreeAll();
 
 #if defined(GAME_DLL)
     AnimationEvent_allocator.FreeAll();
     ConsoleEvent_allocator.FreeAll();
+#endif
 #endif
 }
 

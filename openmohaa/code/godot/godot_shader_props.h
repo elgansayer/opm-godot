@@ -260,6 +260,9 @@ struct GodotShaderProps {
     float fog_color[3];
     float fog_distance;
 
+    /* Sprite model scaling — from "spritescale" keyword (default 1.0) */
+    float sprite_scale;
+
     /* Phase 66–72: Per-stage shader data (all stages parsed) */
     MohaaShaderStage stages[MOHAA_SHADER_STAGE_MAX];
     int stage_count;             /* number of parsed stages (== num_stages) */

@@ -25,9 +25,12 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <cmath>
 #include <cstdint>
+
+#include <godot_cpp/variant/utility_functions.hpp>
 
 using namespace godot;
 
@@ -36,10 +39,12 @@ extern "C" {
     int  Godot_VFX_GetSpriteCount(void);
     void Godot_VFX_GetSprite(int idx, float *origin, float *radius,
                              int *shaderHandle, float *rotation,
-                             unsigned char *rgba);
+                             unsigned char *rgba, float *scale);
 
     const char *Godot_Renderer_GetShaderName(int handle);
     const char *Godot_Renderer_GetShaderRemap(const char *name);
+    const char *Godot_Model_GetName(int hModel);
+    int         Godot_Model_GetShaderHandle(int hModel);
 
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
     void Godot_VFS_FreeFile(void *buffer);
@@ -61,6 +66,15 @@ static Node3D                              *vfx_parent     = nullptr;
 static MeshInstance3D                      *vfx_pool[VFX_SPRITE_POOL_SIZE] = {};
 static bool                                 vfx_initialised = false;
 static std::unordered_map<int, Ref<ImageTexture>> vfx_tex_cache;
+static std::unordered_set<int> vfx_logged_shaders;
+
+/* Cached sprite size info: image pixel dimensions + shader spritescale */
+struct VfxSpriteSize {
+    int   width        = 0;
+    int   height       = 0;
+    float sprite_scale = 1.0f;
+};
+static std::unordered_map<int, VfxSpriteSize> vfx_size_cache;
 
 /* Material cache keyed by (shaderHandle << 32 | rgba32) to avoid per-frame allocation */
 static std::unordered_map<uint64_t, Ref<StandardMaterial3D>> vfx_mat_cache;
@@ -120,26 +134,11 @@ static Ref<ImageTexture> vfx_load_from_qpath(const char *qpath)
     return Ref<ImageTexture>();
 }
 
-static Ref<ImageTexture> vfx_load_texture(int shader_handle)
+static Ref<ImageTexture> vfx_load_texture_by_name(const char *name)
 {
-    /* Check cache */
-    auto it = vfx_tex_cache.find(shader_handle);
-    if (it != vfx_tex_cache.end()) {
-        return it->second;
-    }
+    if (!name || !name[0]) return Ref<ImageTexture>();
 
-    /* Look up shader name, apply remap */
-    const char *raw_name = Godot_Renderer_GetShaderName(shader_handle);
-    const char *remapped = Godot_Renderer_GetShaderRemap(raw_name);
-    const char *name     = (remapped && remapped[0]) ? remapped : raw_name;
-    if (!name || !name[0]) {
-        vfx_tex_cache[shader_handle] = Ref<ImageTexture>();
-        return Ref<ImageTexture>();
-    }
-
-    /* Look up shader definition to find the actual texture path from stages.
-     * This mirrors R_FindShader: the shader name is an abstract identifier,
-     * the real texture path comes from the first non-lightmap stage's map. */
+    /* Look up shader definition to find the actual texture path from stages. */
     const GodotShaderProps *sp = Godot_ShaderProps_Find(name);
     Ref<ImageTexture> tex;
 
@@ -160,17 +159,120 @@ static Ref<ImageTexture> vfx_load_texture(int shader_handle)
             if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
 
             tex = vfx_load_from_qpath(stage_map);
+            if (tex.is_null()) {
+                UtilityFunctions::print(String("[VFX-TEX] WARN: stage map load failed: '") +
+                    String(stage_map) + String("' for sprite shader '") + String(name) + String("'"));
+            }
         }
+    } else {
+        UtilityFunctions::print(String("[VFX-TEX] No shader props for sprite shader '") +
+            String(name) + String("' (props=") + String(sp ? "YES" : "NO") +
+            String(" stage_count=") + String::num_int64(sp ? sp->stage_count : -1) + String(")"));
     }
 
-    /* Fallback: try using the shader name itself as a texture path
-     * (works for implicit shaders without .shader definitions) */
+    /* Fallback 1: try using the name itself as a texture path */
     if (tex.is_null()) {
         tex = vfx_load_from_qpath(name);
     }
 
+    /* Fallback 2: try common sprite/effect texture directories.
+     * Many MOHAA sprite shaders reference textures at
+     * textures/sprites/<name>.tga or textures/effects/<name>.tga. */
+    if (tex.is_null()) {
+        /* Extract basename from any path prefix in the shader name */
+        const char *basename = strrchr(name, '/');
+        basename = basename ? basename + 1 : name;
+        char path_buf[256];
+        snprintf(path_buf, sizeof(path_buf), "textures/sprites/%s", basename);
+        tex = vfx_load_from_qpath(path_buf);
+        if (tex.is_null()) {
+            snprintf(path_buf, sizeof(path_buf), "textures/effects/%s", basename);
+            tex = vfx_load_from_qpath(path_buf);
+        }
+        if (tex.is_null()) {
+            snprintf(path_buf, sizeof(path_buf), "models/fx/%s", basename);
+            tex = vfx_load_from_qpath(path_buf);
+        }
+        if (tex.is_valid()) {
+            UtilityFunctions::print(String("[VFX-TEX] Fallback found texture for '") +
+                String(name) + String("' via directory search"));
+        }
+    }
+
+    return tex;
+}
+
+static Ref<ImageTexture> vfx_load_texture(int shader_handle)
+{
+    /* Check cache */
+    auto it = vfx_tex_cache.find(shader_handle);
+    if (it != vfx_tex_cache.end()) {
+        return it->second;
+    }
+
+    Ref<ImageTexture> tex;
+
+    /* Strategy 1: Look up as a shader handle in the shader table */
+    const char *raw_name = Godot_Renderer_GetShaderName(shader_handle);
+    const char *remapped = Godot_Renderer_GetShaderRemap(raw_name);
+    const char *name     = (remapped && remapped[0]) ? remapped : raw_name;
+    if (name && name[0]) {
+        tex = vfx_load_texture_by_name(name);
+    }
+
+    /* Strategy 2: If shader table lookup failed, try as a model handle.
+     * In MOHAA, RT_SPRITE's hModel can be either a shader handle or a
+     * model handle (.spr files).  For .spr models, the model name
+     * (without .spr extension) IS the shader name. */
+    if (tex.is_null()) {
+        const char *model_name = Godot_Model_GetName(shader_handle);
+        if (model_name && model_name[0]) {
+            /* Strip .spr extension if present */
+            char stripped[256];
+            strncpy(stripped, model_name, sizeof(stripped) - 1);
+            stripped[sizeof(stripped) - 1] = '\0';
+            char *dot = strrchr(stripped, '.');
+            if (dot) *dot = '\0';
+
+            tex = vfx_load_texture_by_name(stripped);
+
+            if (tex.is_null()) {
+                /* Also try the raw model name */
+                tex = vfx_load_texture_by_name(model_name);
+            }
+        }
+    }
+
     vfx_tex_cache[shader_handle] = tex;
     return tex;
+}
+
+/* ── Sprite size lookup (image dimensions × shader spritescale) ── */
+static VfxSpriteSize vfx_get_sprite_size(int shader_handle)
+{
+    auto it = vfx_size_cache.find(shader_handle);
+    if (it != vfx_size_cache.end()) return it->second;
+
+    VfxSpriteSize sz;
+
+    /* Get image dimensions from the cached texture */
+    Ref<ImageTexture> tex = vfx_load_texture(shader_handle);
+    if (tex.is_valid()) {
+        sz.width  = tex->get_width();
+        sz.height = tex->get_height();
+    }
+
+    /* Get spritescale from shader props */
+    const char *raw_name = Godot_Renderer_GetShaderName(shader_handle);
+    const char *remapped = Godot_Renderer_GetShaderRemap(raw_name);
+    const char *lookup   = (remapped && remapped[0]) ? remapped : raw_name;
+    if (lookup && lookup[0]) {
+        const GodotShaderProps *sp = Godot_ShaderProps_Find(lookup);
+        if (sp) sz.sprite_scale = sp->sprite_scale;
+    }
+
+    vfx_size_cache[shader_handle] = sz;
+    return sz;
 }
 
 /* ── Pre-built unit quad mesh (shared by all pool slots) ── */
@@ -241,6 +343,15 @@ void Godot_VFX_Update(float delta)
     /* Scan entity buffer for sprites (rebuilds the cached index list) */
     int count = Godot_VFX_GetSpriteCount();
 
+    /* Diagnostic: log sprite count changes */
+    {
+        static int last_count = -1;
+        if (count != last_count && count > 0) {
+            UtilityFunctions::print(String("[VFX] Sprite count changed: ") + String::num_int64(count));
+            last_count = count;
+        }
+    }
+
     for (int i = 0; i < VFX_SPRITE_POOL_SIZE; i++) {
         MeshInstance3D *mi = vfx_pool[i];
         if (!mi) continue;
@@ -250,24 +361,83 @@ void Godot_VFX_Update(float delta)
             continue;
         }
 
-        /* Read sprite data */
         float origin[3]      = {0};
         float radius          = 0.0f;
         float rotation        = 0.0f;
+        float entityScale     = 1.0f;
         int   shaderHandle    = 0;
         unsigned char rgba[4] = {255, 255, 255, 255};
 
         Godot_VFX_GetSprite(i, origin, &radius, &shaderHandle,
-                            &rotation, rgba);
+                            &rotation, rgba, &entityScale);
 
-        if (radius < 0.001f) {
+        /* Diagnostic: log each new unique shader handle */
+        {
+            if (shaderHandle > 0 && vfx_logged_shaders.find(shaderHandle) == vfx_logged_shaders.end()) {
+                vfx_logged_shaders.insert(shaderHandle);
+                const char *sn = Godot_Renderer_GetShaderName(shaderHandle);
+                const char *remap = Godot_Renderer_GetShaderRemap(sn);
+                const char *lookup = (remap && remap[0]) ? remap : sn;
+                Ref<ImageTexture> tex = vfx_load_texture(shaderHandle);
+                const GodotShaderProps *sp = (lookup && lookup[0]) ? Godot_ShaderProps_Find(lookup) : nullptr;
+                const char *transp_names[] = {"OPAQUE","ALPHA_TEST","ALPHA_BLEND","ADDITIVE","MULTIPLICATIVE","MULT_INV","ALPHA_INV"};
+                const char *blend_names[] = {"MIX","ADD","SUB","MUL"};
+                int tn = sp ? sp->transparency : -1;
+                UtilityFunctions::print(String("[VFX-DIAG] New sprite shader: handle=") +
+                    String::num_int64(shaderHandle) +
+                    " name='" + String(sn ? sn : "(null)") + "'" +
+                    " remap='" + String((remap && remap[0]) ? remap : "none") + "'" +
+                    " props=" + String(sp ? "YES" : "NO") +
+                    " shader_transp=" + String(tn >= 0 && tn < 7 ? transp_names[tn] : "?") +
+                    " tex=" + String(tex.is_valid() ? "LOADED" : "MISSING") +
+                    " rgba=(" + String::num_int64(rgba[0]) + "," + String::num_int64(rgba[1]) + "," +
+                    String::num_int64(rgba[2]) + "," + String::num_int64(rgba[3]) + ")" +
+                    " radius=" + String::num(radius, 1));
+                /* Also log image dimensions and spritescale for size debugging */
+                VfxSpriteSize diag_sz = vfx_get_sprite_size(shaderHandle);
+                UtilityFunctions::print(String("[VFX-DIAG]   img=") +
+                    String::num_int64(diag_sz.width) + "x" + String::num_int64(diag_sz.height) +
+                    " spritescale=" + String::num(diag_sz.sprite_scale, 2) +
+                    " entityScale=" + String::num(entityScale, 3));
+                if (sp && sp->stage_count > 0) {
+                    for (int st = 0; st < sp->stage_count; st++) {
+                        if (sp->stages[st].map[0]) {
+                            UtilityFunctions::print(String("[VFX-DIAG]   stage[") + String::num_int64(st) +
+                                "] map='" + String(sp->stages[st].map) + "'" +
+                                " isLM=" + String(sp->stages[st].isLightmap ? "Y" : "N") +
+                                " tcGen=" + String::num_int64(sp->stages[st].tcGen));
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Sprite sizing: MOHAA's RB_DrawSprite computes half-extent as
+         *   image_pixels × 0.5 × entity.scale × shader.spritescale
+         * Full extent = image_pixels × entity.scale × spritescale (in inches).
+         * Our unit quad spans ±0.5, so scaling by full_extent gives the
+         * correct world-space size after converting inches → metres.
+         *
+         * Note: refEntity_t.radius is NOT used for sprite sizing in the real
+         * renderer (RB_DrawSprite uses only entity.scale × shader.spritescale
+         * × image pixels).  cgame sets radius to arbitrary values (4.0 for
+         * tempmodels, 0.0 for volumetric smoke) — it is purely for culling. */
+        float sprite_w = 0.0f, sprite_h = 0.0f;
+        if (shaderHandle > 0) {
+            VfxSpriteSize sz = vfx_get_sprite_size(shaderHandle);
+            if (sz.width > 0 && sz.height > 0) {
+                sprite_w = (float)sz.width  * entityScale * sz.sprite_scale * MOHAA_UNIT_SCALE;
+                sprite_h = (float)sz.height * entityScale * sz.sprite_scale * MOHAA_UNIT_SCALE;
+            }
+        }
+
+        if (sprite_w < 0.0001f || sprite_h < 0.0001f) {
             mi->set_visible(false);
             continue;
         }
 
         /* Coordinate conversion + positioning */
         Vector3 pos = id_to_godot(origin[0], origin[1], origin[2]);
-        float scaledRadius = radius * MOHAA_UNIT_SCALE;
 
         /* Cached billboard material (keyed by shader handle + RGBA) */
         uint64_t mkey = vfx_mat_key(shaderHandle, rgba);
@@ -316,17 +486,11 @@ void Godot_VFX_Update(float delta)
                                 mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_MUL);
                                 break;
                             default:
-                                break;
-                        }
-                        switch (sp->cull) {
-                            case SHADER_CULL_BACK:
-                                mat->set_cull_mode(BaseMaterial3D::CULL_BACK);
-                                break;
-                            case SHADER_CULL_FRONT:
-                                mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
-                                break;
-                            case SHADER_CULL_NONE:
-                                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
+                                /* SHADER_OPAQUE: unusual for a sprite effect.
+                                 * Default to additive (fire/flash/corona) since
+                                 * sprite quads need transparency to hide edges. */
+                                mat->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+                                mat->set_blend_mode(BaseMaterial3D::BLEND_MODE_ADD);
                                 break;
                         }
                         /* autosprite/autosprite2 deform — already billboard, but
@@ -336,18 +500,20 @@ void Godot_VFX_Update(float delta)
                         }
                     }
                 }
+
+                /* Re-enforce sprite-specific settings: cull mode must stay
+                 * CULL_DISABLED for billboard sprites (shader default
+                 * SHADER_CULL_BACK would hide back faces). */
+                mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
             }
             vfx_mat_cache[mkey] = mat;
         }
 
         mi->set_surface_override_material(0, mat);
 
-        /* Scale the unit quad by diameter (radius × 2) */
-        float diameter = scaledRadius * 2.0f;
-
-        /* Build transform: position + uniform scale */
+        /* Build transform: position + per-axis scale (width × height) */
         Basis basis;
-        basis.scale(Vector3(diameter, diameter, diameter));
+        basis.scale(Vector3(sprite_w, sprite_h, 1.0f));
         mi->set_global_transform(Transform3D(basis, pos));
 
         mi->set_visible(true);
@@ -367,6 +533,7 @@ void Godot_VFX_Shutdown(void)
 
     vfx_tex_cache.clear();
     vfx_mat_cache.clear();
+    vfx_size_cache.clear();
     vfx_unit_quad.unref();
     vfx_parent      = nullptr;
     vfx_initialised = false;
@@ -385,4 +552,6 @@ void Godot_VFX_Clear(void)
     /* Flush caches — shaders/textures may differ on the next map */
     vfx_tex_cache.clear();
     vfx_mat_cache.clear();
+    vfx_size_cache.clear();
+    vfx_logged_shaders.clear();
 }

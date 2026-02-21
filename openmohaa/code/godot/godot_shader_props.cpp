@@ -1228,22 +1228,54 @@ static void parse_shader(char **text, GodotShaderProps *props)
         {
             props->is_sky = true;
         }
+        else if (!Q_stricmp(token, "spritescale"))
+        {
+            token = COM_ParseExt(text, 0);
+            if (token[0]) {
+                props->sprite_scale = (float)atof(token);
+                if (props->sprite_scale <= 0.0f) props->sprite_scale = 1.0f;
+            }
+        }
         else if (!Q_stricmp(token, "spritegen") ||
-                 !Q_stricmp(token, "spritescale") ||
                  !Q_stricmp(token, "light") ||
                  !Q_stricmp(token, "tesssize") ||
                  !Q_stricmp(token, "clampTime"))
         {
             SkipRestOfLine(text);
         }
-        /* ── MOHAA #if / #else / #endif conditional blocks ── */
-        else if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
+        /* ── MOHAA #if / #if_not / #else / #endif conditional blocks ──
+         * Mirrors tr_shader.c:2452.  #if/#if_not and #else share the same
+         * skip-forward logic when the condition is false. */
+        else if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not") ||
+                 !Q_stricmp(token, "#else"))
         {
-            bool invert = !Q_stricmp(token, "#if_not");
-            token = COM_ParseExt(text, 0);
-            bool condition_passed = eval_shader_if_condition(token, invert);
+            bool condition_passed = false;
+
+            if (!Q_stricmp(token, "#else"))
+            {
+                /* We processed the #if branch; now need to skip #else→#endif */
+                if (in_else_block) {
+                    /* Double #else — malformed shader. Skip line and continue. */
+                    SkipRestOfLine(text);
+                    continue;
+                }
+
+                matchingendifs--;
+                if (matchingendifs < 0) matchingendifs = 0;
+                in_else_block = true;
+                /* condition_passed stays false → skip to matching #endif */
+            }
+            else
+            {
+                /* #if or #if_not */
+                bool invert = !Q_stricmp(token, "#if_not");
+                token = COM_ParseExt(text, 0);
+                condition_passed = eval_shader_if_condition(token, invert);
+            }
 
             if (!condition_passed) {
+                /* Skip forward to matching #else (for #if) or #endif (for #else).
+                 * Mirrors tr_shader.c:2500-2537. */
                 int nestedifs = 0;
                 SkipRestOfLine(text);
 
@@ -1256,47 +1288,32 @@ static void parse_shader(char **text, GodotShaderProps *props)
                         SkipRestOfLine(text);
                     } else if (!Q_stricmp(token, "#endif")) {
                         nestedifs--;
+                        if (nestedifs < 0) {
+                            /* This is our matching #endif */
+                            in_else_block = false;
+                            break;
+                        }
                     } else if (!Q_stricmp(token, "#else")) {
                         if (in_else_block) {
+                            /* We're skipping #else→#endif; #else shouldn't
+                             * appear (double #else). Break to avoid runaway
+                             * consumption. */
                             break;
                         }
                         if (!nestedifs) {
+                            /* This is the #else matching our #if.
+                             * Stop skipping — we'll process the #else branch. */
                             matchingendifs++;
                             break;
                         }
-                        nestedifs++;
+                        /* Nested #else — skip it */
+                        SkipRestOfLine(text);
                     } else {
                         SkipRestOfLine(text);
-                    }
-
-                    if (nestedifs == -1) {
-                        break;
                     }
                 }
             } else {
                 matchingendifs++;
-            }
-        }
-        else if (!Q_stricmp(token, "#else"))
-        {
-            if (in_else_block) {
-                continue;
-            }
-
-            matchingendifs--;
-            if (matchingendifs < 0) {
-                matchingendifs = 0;
-            }
-            in_else_block = true;
-
-            int nested = 1;
-            while (nested > 0) {
-                token = COM_ParseExt(text, 1);
-                if (!token[0]) break;
-                if (!Q_stricmp(token, "#if") || !Q_stricmp(token, "#if_not"))
-                    nested++;
-                else if (!Q_stricmp(token, "#endif"))
-                    nested--;
             }
         }
         else if (!Q_stricmp(token, "#endif"))
@@ -1388,6 +1405,14 @@ void Godot_ShaderProps_Load() {
          * COM_ParseExt returns a pointer to a static buffer — copy it. */
         char shader_name[256];
         Q_strncpyz(shader_name, token, sizeof(shader_name));
+        /* Temporary diagnostic: trace vsssource parsing */
+        bool _trace_vss = (Q_stricmpn(shader_name, "vss", 3) == 0 ||
+                           strstr(shader_name, "vsssource") != NULL ||
+                           strstr(shader_name, "VSSSource") != NULL);
+        if (_trace_vss) {
+            UtilityFunctions::print(String("[SHADER-TRACE] Found shader def: '") +
+                String(shader_name) + String("' (next token should be '{')"));
+        }
 
         /* Expect opening brace */
         token = COM_ParseExt(&p, 1);
@@ -1404,6 +1429,7 @@ void Godot_ShaderProps_Load() {
         props.is_portal = false;
         props.tcmod_scale_s = 1.0f;
         props.tcmod_scale_t = 1.0f;
+        props.sprite_scale = 1.0f;
         props.alphagen_const = 1.0f;
         props.rgbgen_const[0] = props.rgbgen_const[1] = props.rgbgen_const[2] = 1.0f;
 
@@ -1480,6 +1506,15 @@ void Godot_ShaderProps_Load() {
         std::string key(shader_name);
         for (auto &c : key) c = tolower((unsigned char)c);
 
+        /* Trace vsssource result */
+        if (_trace_vss) {
+            UtilityFunctions::print(String("[SHADER-TRACE] Parsed '") +
+                String(shader_name) + String("' → key='") + String(key.c_str()) +
+                String("' stages=") + String::num_int64(props.stage_count) +
+                String(" map0='") + String(props.stage_count > 0 ? props.stages[0].map : "(none)") +
+                String("' spritescale=") + String::num(props.sprite_scale, 2));
+        }
+
         /* Don't overwrite — first definition wins (matches engine behaviour) */
         if (s_shader_props.find(key) == s_shader_props.end()) {
             s_shader_props[key] = props;
@@ -1535,6 +1570,30 @@ void Godot_ShaderProps_Load() {
                             String::num_int64(numFiles) + " found), " +
                             String::num_int64(total_defs) + " definitions.");
 
+    /* Diagnostic: scan ALL keys containing "vss" to understand the
+     * exact names the parser extracted for smoke sprite shaders. */
+    {
+        int vss_count = 0;
+        for (auto &kv : s_shader_props) {
+            if (kv.first.find("vss") != std::string::npos ||
+                kv.first.find("muzsprite") != std::string::npos ||
+                kv.first.find("stonechip") != std::string::npos ||
+                kv.first.find("bh_stone_piece") != std::string::npos ||
+                kv.first.find("bh_dirt") != std::string::npos ||
+                kv.first.find("dustdrop") != std::string::npos) {
+                UtilityFunctions::print(String("[ShaderProps] VFX-KEY: '") +
+                    String(kv.first.c_str()) + String("' stages=") +
+                    String::num_int64(kv.second.stage_count) +
+                    String(" map0='") + String(kv.second.stage_count > 0 ? kv.second.stages[0].map : "(none)") +
+                    String("' transp=") + String::num_int64(kv.second.transparency) +
+                    String(" spritescale=") + String::num(kv.second.sprite_scale, 2));
+                vss_count++;
+            }
+        }
+        UtilityFunctions::print(String("[ShaderProps] VFX-KEY scan: found ") +
+            String::num_int64(vss_count) + String(" VFX-related shader keys in map."));
+    }
+
     /* Invalidate the renderer's shader dimension cache so that shaders
      * queried before shader props were available get re-resolved with
      * correct texture paths (e.g. menu UI shaders like 'multiarrow'). */
@@ -1552,9 +1611,41 @@ const GodotShaderProps *Godot_ShaderProps_Find(const char *shader_name) {
     std::string key(shader_name);
     for (auto &c : key) c = tolower((unsigned char)c);
 
+    /* 1. Exact match */
     auto it = s_shader_props.find(key);
     if (it != s_shader_props.end())
         return &it->second;
+
+    /* 2. Try common prefix patterns — shader files may define shaders with
+     *    full paths ("textures/sprites/vsssource") while callers pass just
+     *    the base name ("vsssource").  This mirrors the engine's hash table
+     *    which indexes by full path. */
+    static const char *prefixes[] = {
+        "textures/sprites/",
+        "textures/effects/",
+        "models/fx/",
+        "models/fx/muzflash/",
+        "gfx/",
+        nullptr
+    };
+    for (int i = 0; prefixes[i]; i++) {
+        std::string prefixed = std::string(prefixes[i]) + key;
+        it = s_shader_props.find(prefixed);
+        if (it != s_shader_props.end())
+            return &it->second;
+    }
+
+    /* 3. Reverse: caller passes full path, map has basename.
+     *    Try stripping the directory prefix. */
+    {
+        size_t slash = key.rfind('/');
+        if (slash != std::string::npos && slash + 1 < key.size()) {
+            std::string basename = key.substr(slash + 1);
+            it = s_shader_props.find(basename);
+            if (it != s_shader_props.end())
+                return &it->second;
+        }
+    }
 
     return nullptr;
 }
