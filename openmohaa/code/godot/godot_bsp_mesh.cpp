@@ -573,6 +573,11 @@ static Ref<ImageTexture> load_texture(const char *shader_name) {
         char path[264];
         snprintf(path, sizeof(path), "%s%s", base, extensions[e]);
 
+        // Diagnostic: log which extension window textures resolve to
+        bool is_window = (strstr(shader_name, "window") || strstr(shader_name, "wndw") ||
+                          strstr(shader_name, "environ"));
+
+
         void *raw = nullptr;
         long len = Godot_VFS_ReadFile(path, &raw);
         if (len <= 0 || !raw) continue;
@@ -597,6 +602,13 @@ static Ref<ImageTexture> load_texture(const char *shader_name) {
         if (err == OK && img->get_width() > 0 && img->get_height() > 0) {
             // Generate mipmaps for better rendering quality
             img->generate_mipmaps();
+
+            if (is_window) {
+                printf("[WINDOW-TEX] '%s' resolved to '%s' (%dx%d fmt=%d hasAlpha=%d)\n",
+                       shader_name, path, img->get_width(), img->get_height(),
+                       (int)img->get_format(),
+                       img->detect_alpha() != Image::ALPHA_NONE ? 1 : 0);
+            }
 
             Ref<ImageTexture> tex = ImageTexture::create_from_image(img);
             s_texture_cache[key] = tex;
@@ -855,6 +867,10 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                             tex_ok++;
                         } else {
                             tex_bad++;
+                            if (batch.shader_name) {
+                                printf("[BSP-TEX-FAIL] shader='%s' stage=%d map='%s'\n",
+                                       batch.shader_name, si, stage->map);
+                            }
                         }
                     }
 
@@ -881,6 +897,15 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                 }
 
                 smat->set_meta("shader_name", String(batch.shader_name));
+                // Dump generated GLSL for window shaders
+                if (batch.shader_name && (strstr(batch.shader_name, "window") ||
+                    strstr(batch.shader_name, "wndw"))) {
+                    Ref<Shader> sh = smat->get_shader();
+                    if (sh.is_valid()) {
+                        printf("[WINDOW-GLSL] shader='%s' code:\n%s\n",
+                               batch.shader_name, sh->get_code().utf8().get_data());
+                    }
+                }
                 surface_mat = smat;
             }
         } else if (!sp) {
@@ -995,6 +1020,32 @@ static Ref<ArrayMesh> batches_to_array_mesh(
 #endif
 
             surface_mat = mat;
+        }
+
+        // Diagnostic: log all non-opaque shader batches
+        if (sp && sp->transparency != SHADER_OPAQUE && batch.shader_name) {
+            static const char *trans_names[] = {
+                "OPAQUE", "ALPHA_TEST", "ALPHA_BLEND", "ADDITIVE",
+                "MULTIPLICATIVE", "MULT_INV", "ALPHA_BLEND_INV"
+            };
+            const char *tname = (sp->transparency >= 0 && sp->transparency <= 6)
+                ? trans_names[sp->transparency] : "?";
+            printf("[BSP-SHADER] '%s' trans=%s stages=%d cull=%d path=%s\n",
+                   batch.shader_name, tname, sp->stage_count, sp->cull,
+                   surface_mat.is_valid() && surface_mat->get_class() == "ShaderMaterial"
+                       ? "ShaderMat" : "StdMat3D");
+            // Dump full stage details for window/glass shaders
+            if (strstr(batch.shader_name, "window") || strstr(batch.shader_name, "wndw")) {
+                for (int si2 = 0; si2 < sp->stage_count; si2++) {
+                    const MohaaShaderStage *st = &sp->stages[si2];
+                    if (!st->active) continue;
+                    printf("[WINDOW-STAGE] %d: map='%s' isLM=%d blend=%d src=%d dst=%d "
+                           "alphaFunc=%d rgbGen=%d alphaGen=%d tcGen=%d nextBundleLM=%d\n",
+                           si2, st->map, st->isLightmap, st->hasBlendFunc,
+                           st->blendSrc, st->blendDst, st->hasAlphaFunc,
+                           st->rgbGen, st->alphaGen, st->tcGen, st->hasNextBundleLightmap);
+                }
+            }
         }
 
         mesh->surface_set_material(surface_idx, surface_mat);

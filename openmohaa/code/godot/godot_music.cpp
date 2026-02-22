@@ -181,6 +181,12 @@ static bool parse_mus_file(const char *mus_path, char *out_track,
             if (val_len >= MUSIC_MAX_PATH) val_len = MUSIC_MAX_PATH - 1;
             strncpy(track_file, src + 7, (size_t)val_len);
             track_file[val_len] = '\0';
+            /* Strip inline // comments and trailing whitespace */
+            char *comment = strstr(track_file, "//");
+            if (comment) *comment = '\0';
+            int tlen = (int)strlen(track_file);
+            while (tlen > 0 && (track_file[tlen-1] == ' ' || track_file[tlen-1] == '\t'))
+                track_file[--tlen] = '\0';
         } else if (line_len >= 12 && strncmp(src, "!normal loop", 12) == 0) {
             *out_loop = true;
         } else if (line_len > 16 && strncmp(src, "!normal volume ", 15) == 0) {
@@ -280,29 +286,49 @@ static Ref<AudioStreamMP3> load_music_from_vfs(const char *name,
     }
 
     /* ── Fallback: try direct path variants ── */
+    /* Don't attempt to load .mus script files as raw audio; they are text. */
+    const char *ext_check = strrchr(name, '.');
+    if (ext_check && strcmp(ext_check, ".mus") == 0) {
+        UtilityFunctions::print(
+            String("[GodotMusic] WARNING: Could not load music '") +
+            String(name) + String("' (.mus parse failed, no mp3 found)"));
+        return Ref<AudioStreamMP3>();
+    }
+
     char paths[4][MUSIC_MAX_PATH];
     int  path_count = 0;
 
-    /* 1. As-is */
-    strncpy(paths[path_count], name, MUSIC_MAX_PATH - 1);
-    paths[path_count][MUSIC_MAX_PATH - 1] = '\0';
+    /* Strip "sound/" or "music/" prefix for canonical name comparisons. */
+    const char *bare = name;
+    if (strncmp(bare, "sound/music/", 12) == 0) bare += 12;
+    else if (strncmp(bare, "sound/", 6) == 0)   bare += 6;
+    else if (strncmp(bare, "music/", 6) == 0)    bare += 6;
+
+    /* Strip .mp3 extension from bare name if present */
+    char bare_noext[MUSIC_MAX_PATH];
+    strncpy(bare_noext, bare, MUSIC_MAX_PATH - 1);
+    bare_noext[MUSIC_MAX_PATH - 1] = '\0';
+    char *bare_dot = strrchr(bare_noext, '.');
+    if (bare_dot && strcmp(bare_dot, ".mp3") == 0) *bare_dot = '\0';
+
+    /* 1. sound/music/<bare>.mp3 — canonical location */
+    snprintf(paths[path_count], MUSIC_MAX_PATH, "sound/music/%s.mp3", bare_noext);
     path_count++;
 
-    /* 2. "sound/music/<name>.mp3" */
-    if (strstr(name, "sound/") == nullptr && strstr(name, ".mp3") == nullptr) {
-        snprintf(paths[path_count], MUSIC_MAX_PATH, "sound/music/%s.mp3", name);
+    /* 2. sound/music/<bare> — no extension (VFS may handle extension-less) */
+    snprintf(paths[path_count], MUSIC_MAX_PATH, "sound/music/%s", bare_noext);
+    path_count++;
+
+    /* 3. music/<bare>.mp3 — alternate prefix */
+    if (strncmp(name, "sound/", 6) != 0) {
+        snprintf(paths[path_count], MUSIC_MAX_PATH, "music/%s.mp3", bare_noext);
         path_count++;
     }
 
-    /* 3. "sound/music/<name>" */
-    if (strstr(name, "sound/") == nullptr) {
-        snprintf(paths[path_count], MUSIC_MAX_PATH, "sound/music/%s", name);
-        path_count++;
-    }
-
-    /* 4. With .mp3 appended if missing */
-    if (strstr(name, ".mp3") == nullptr) {
-        snprintf(paths[path_count], MUSIC_MAX_PATH, "%s.mp3", name);
+    /* 4. Name as-is (only if it looks like an audio file, not .mus) */
+    if (strstr(name, ".mp3") != nullptr || strstr(name, ".wav") != nullptr) {
+        strncpy(paths[path_count], name, MUSIC_MAX_PATH - 1);
+        paths[path_count][MUSIC_MAX_PATH - 1] = '\0';
         path_count++;
     }
 
