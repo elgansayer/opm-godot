@@ -4,9 +4,11 @@ var runner = null
 var screenshot_pending = false
 var screenshot_timer = 0.0
 const SCREENSHOT_DELAY = 1.5  # seconds after map load to take screenshot
-var launch_map = "dm/mohdm1"
+var status_log_timer = 0.0
 var launch_dedicated = false
-var launch_menu = ""
+var launch_map = "dm/mohdm1"
+var loading_screen_force_sent = false
+var last_state_logged = -999
 
 func _ready():
 	print("Main: Script started.")
@@ -20,8 +22,7 @@ func _ready():
 	# Optional runtime args:
 	#   --dedicated       Launch dedicated server mode
 	#   --client          Force client mode
-	#   --map=<mapname>   Startup map (default: obj/obj_team4)
-	#   --menu=<name>     Push a specific UI menu after startup (e.g. multiplayerstart)
+	#   --map=<mapname>   Startup map (default: dm/mohdm1)
 	#   --nodev           Disable developer mode
 	#   --dev             Enable developer mode (console toggle with ~)
 	var user_args = OS.get_cmdline_user_args()
@@ -33,8 +34,6 @@ func _ready():
 			launch_dedicated = false
 		elif arg.begins_with("--map="):
 			launch_map = arg.substr(6)
-		elif arg.begins_with("--menu="):
-			launch_menu = arg.substr(7)
 		elif arg == "--nodev":
 			dev_mode = false
 		elif arg == "--dev":
@@ -43,15 +42,18 @@ func _ready():
 	if runner:
 		var startup_args = "+set dedicated %d +set developer %d" % [1 if launch_dedicated else 0, 1 if dev_mode else 0]
 		if OS.has_feature("web"):
-			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath ."
+			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set net_noudp 1 +set r_fullscreen 0"
+		if launch_map != "":
+			startup_args += " +map " + launch_map
 		runner.set_startup_args(startup_args)
 		runner.name = "MoHAARunnerInstance"
 		add_child(runner)
 		print("Main: MoHAARunner added to tree (dynamic).")
 		print("Main: Startup args -> ", startup_args)
-		print("Main: Startup map  -> ", launch_map)
-		if launch_menu != "":
-			print("Main: Startup menu -> ", launch_menu)
+		if launch_map != "":
+			print("Main: Startup map -> ", launch_map)
+		else:
+			print("Main: Startup map -> <none>")
 		
 		# Connect signals (Task 2.5.4)
 		runner.engine_error.connect(_on_engine_error)
@@ -59,27 +61,9 @@ func _ready():
 		runner.map_unloaded.connect(_on_map_unloaded)
 		runner.engine_shutdown_requested.connect(_on_engine_shutdown)
 		
-		# runner.execute_command("exec server.cfg")
-		
-		# Use the timer to load the startup map (if any).
-		get_tree().create_timer(0.5).timeout.connect(_on_load_timer)
+		# Fallback launch in _process once the engine is initialised.
 	else:
 		print("Main: Failed to instantiate MoHAARunner.")
-
-func _on_load_timer():
-	if runner and runner.is_engine_initialized():
-		print("Main: Engine is running.")
-		if launch_menu != "":
-			if launch_menu == "mpoptions":
-				runner.execute_command("ui_getplayermodel")
-				print("Main: Executed -> ui_getplayermodel")
-			runner.execute_command("pushmenu " + launch_menu)
-			print("Main: Executed -> pushmenu ", launch_menu)
-			get_tree().create_timer(0.75).timeout.connect(func(): take_screenshot("menu_" + launch_menu))
-		elif launch_map != "":
-			print("Main: Loading map -> ", launch_map)
-			runner.load_map(launch_map)
-
 func _on_status_check():
 	if runner and runner.is_engine_initialized():
 		print("Main: --- Server Status ---")
@@ -137,6 +121,23 @@ func _process(delta):
 		if screenshot_timer >= SCREENSHOT_DELAY:
 			screenshot_pending = false
 			take_screenshot("auto")
+
+	if runner and runner.is_engine_initialized():
+		var server_state = runner.get_server_state()
+		if server_state != last_state_logged:
+			last_state_logged = server_state
+			print("Main: server_state -> ", runner.get_server_state_string(), " (", server_state, ")")
+
+		if OS.has_feature("web") and not loading_screen_force_sent:
+			if server_state == 2:
+				runner.execute_command("finishloadingscreen")
+				loading_screen_force_sent = true
+				print("Main: Executed -> finishloadingscreen (web loading2 recovery)")
+
+		status_log_timer += delta
+		if status_log_timer >= 5.0:
+			status_log_timer = 0.0
+			print("Main: Status state=", runner.get_server_state_string(), " map_loaded=", runner.is_map_loaded(), " map=", runner.get_current_map(), " players=", runner.get_player_count(), " errCode=", runner.get_cvar_string("com_errorCode"), " errMsg=", runner.get_cvar_string("com_errorMessage"))
 
 func take_screenshot(label: String):
 	var img = get_viewport().get_texture().get_image()

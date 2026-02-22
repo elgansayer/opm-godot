@@ -223,6 +223,7 @@ extern "C" {
     int  Godot_Client_GetPaused(void);
     void Godot_Client_ForceUnpause(void);
     int  Godot_Client_IsAnyOverlayActive(void);
+    void Godot_Client_SyncGuiMouseToOverlayState(void);
     void Godot_Client_SetMousePos(int x, int y);
     int  Godot_Client_IsUIStarted(void);
     int  Godot_Client_IsMenuUp(void);
@@ -601,6 +602,7 @@ void MoHAARunner::_bind_methods() {
     godot::ClassDB::bind_method(godot::D_METHOD("get_player_count"), &MoHAARunner::get_player_count);
     godot::ClassDB::bind_method(godot::D_METHOD("get_server_state"), &MoHAARunner::get_server_state);
     godot::ClassDB::bind_method(godot::D_METHOD("get_server_state_string"), &MoHAARunner::get_server_state_string);
+    godot::ClassDB::bind_method(godot::D_METHOD("get_cvar_string", "name"), &MoHAARunner::get_cvar_string);
 
     // VFS access (Task 4.1)
     godot::ClassDB::bind_method(godot::D_METHOD("vfs_read_file", "qpath"), &MoHAARunner::vfs_read_file);
@@ -783,6 +785,7 @@ void MoHAARunner::setup_3d_scene() {
     // Render first-person weapon entities in a separate SubViewport with
     // its own depth buffer, then composite on top of the main scene.
     // This replicates id Tech 3's RF_DEPTHHACK (depth range 0–0.3).
+    bool overlay_active_now = false;
     {
         Vector2i win_size = DisplayServer::get_singleton()->window_get_size();
         if (win_size.x < 1 || win_size.y < 1) {
@@ -6368,18 +6371,45 @@ void MoHAARunner::_process(double delta) {
         return;
     }
 
+    // ── Pre-frame mouse injection (web only) ──────────────────────────────────
+    // MUST happen BEFORE Com_Frame() so that UI_Update() → ServiceEvents() sees
+    // the correct cl.mousex/cl.mousey and cl.mouseButtons this frame.
+    // We check the CURRENT keyCatcher state (not the cached value) so that the
+    // very first frame after a menu opens is handled correctly.
+    // SyncGuiMouseToOverlayState() first ensures in_guimouse matches keyCatchers.
+#ifdef __EMSCRIPTEN__
+    {
+        Godot_Client_SyncGuiMouseToOverlayState();
+        bool pre_overlay = Godot_Client_IsAnyOverlayActive() != 0;
+        // Also include in_guimouse in case it was set by a non-keycatcher path
+        if (!pre_overlay) pre_overlay = (Godot_Client_GetGuiMouse() != 0);
+        // Fall back to prev-frame value for the very first overlay frame
+        if (!pre_overlay) pre_overlay = overlay_prev_frame;
+        poll_mouse_input_web(pre_overlay);
+    }
+#endif
+
     Com_Frame();
     godot_jmpbuf_valid = false;
 
-    // ── Cursor management: read engine's in_guimouse to set Godot cursor mode ──
+    bool overlay_active_now = false;
+
+    // ── Cursor management: read engine overlay state to set Godot cursor mode ──
     // The engine manages in_guimouse internally via IN_MouseOn()/IN_MouseOff()
     // when menus open/close (UI_FocusMenuIfExists, UI_MenuEscape, etc.).
     // We simply mirror that state to Godot's cursor mode.
     // This is the ONLY place that sets mouse_captured / Godot mouse mode.
     // Placed AFTER Com_Frame() so state changes during the frame are immediate.
     {
+        // Ensure in_guimouse tracks overlay keycatchers (UI/console/message)
+        // on platforms where it can become stale.
+        Godot_Client_SyncGuiMouseToOverlayState();
+
+        bool overlay_active = Godot_Client_IsAnyOverlayActive() != 0;
+        overlay_active_now = overlay_active;
+        overlay_prev_frame = overlay_active;  // save for next frame's pre-frame poll
         bool engine_wants_gui = Godot_Client_GetGuiMouse() != 0;
-        bool should_capture = !engine_wants_gui;
+        bool should_capture = !(overlay_active || engine_wants_gui);
         bool allow_capture = true;
 #ifdef __EMSCRIPTEN__
         // Browser pointer lock requires a user gesture. Automatic capture
@@ -6400,6 +6430,11 @@ void MoHAARunner::_process(double delta) {
             Godot_ResetMousePosition();
         }
     }
+
+    // Post-frame poll: keeps button transition state in sync for events that
+    // arrive between frames (e.g. from Godot's input system on non-web builds).
+    // On web this is a no-op duplicate that ensures any lingering state is clean.
+    poll_mouse_input_web(overlay_active_now);
 
     // ── Phase 149: Apply engine cvar settings to Godot systems ──
     // Audio volume: read s_volume / s_musicvolume and apply to Godot AudioServer bus
@@ -6773,6 +6808,15 @@ godot::String MoHAARunner::get_server_state_string() const {
     }
 }
 
+godot::String MoHAARunner::get_cvar_string(const godot::String &p_name) const {
+    if (!initialized) return "";
+    godot::CharString name = p_name.utf8();
+    char buffer[1024];
+    buffer[0] = '\0';
+    Cvar_VariableStringBuffer(name.get_data(), buffer, (int)sizeof(buffer));
+    return godot::String(buffer);
+}
+
 // ──────────────────────────────────────────────
 //  VFS access (Task 4.1)
 // ──────────────────────────────────────────────
@@ -6902,6 +6946,83 @@ bool MoHAARunner::is_hud_visible() const {
 void MoHAARunner::update_input_routing() {
     // Intentionally empty — cursor sync is handled at top of _process()
     // by reading Godot_Client_GetGuiMouse().
+}
+
+void MoHAARunner::poll_mouse_input_web(bool overlay_active) {
+#ifdef __EMSCRIPTEN__
+    static int s_poll_frame = 0;
+    s_poll_frame++;
+
+    Input *input = Input::get_singleton();
+    Viewport *vp = get_viewport();
+    if (!input || !vp) {
+        if (s_poll_frame % 120 == 1)
+            fprintf(stderr, "[MoHAA-mouse] poll: no input/viewport\n");
+        return;
+    }
+
+    Vector2 pos = vp->get_mouse_position();
+
+    if (!mouse_poll_initialised) {
+        mouse_poll_prev_pos = pos;
+        for (int b = 0; b < 10; b++) {
+            mouse_poll_prev_buttons[b] = false;
+        }
+        mouse_poll_initialised = true;
+    }
+
+    // ALWAYS update position when in_guimouse is true (reliable check
+    // that bypasses any stale overlay_active parameter).
+    int gui_mouse_active = Godot_Client_GetGuiMouse();
+    bool should_poll = overlay_active || (gui_mouse_active != 0);
+
+    if (s_poll_frame % 120 == 1) {
+        int kc = Godot_Client_GetKeyCatchers();
+        update_ui_transform();
+        fprintf(stderr,
+            "[MoHAA-mouse] frame=%d overlay=%d gui_mouse=%d keyCatchers=0x%x "
+            "pos=(%.0f,%.0f) scale=(%.2f,%.2f) vid=%dx%d\n",
+            s_poll_frame, (int)overlay_active, gui_mouse_active, kc,
+            pos.x, pos.y, ui_scale_x, ui_scale_y, ui_vid_w, ui_vid_h);
+    }
+
+    if (should_poll) {
+        update_ui_transform();
+        float sx = (ui_scale_x > 0.0001f) ? ui_scale_x : 1.0f;
+        float sy = (ui_scale_y > 0.0001f) ? ui_scale_y : 1.0f;
+        int ex = (int)((pos.x - ui_offset_x) / sx);
+        int ey = (int)((pos.y - ui_offset_y) / sy);
+        if (ex < 0) ex = 0;
+        if (ey < 0) ey = 0;
+        if (ex >= ui_vid_w) ex = ui_vid_w - 1;
+        if (ey >= ui_vid_h) ey = ui_vid_h - 1;
+        Godot_Client_SetMousePos(ex, ey);
+
+        if (s_poll_frame % 120 == 1)
+            fprintf(stderr, "[MoHAA-mouse] -> engine cursor (%d, %d)\n", ex, ey);
+
+        const int tracked_buttons[] = {1, 2, 3, 8, 9};
+        for (int i = 0; i < 5; i++) {
+            int b = tracked_buttons[i];
+            bool now_pressed = input->is_mouse_button_pressed((MouseButton)b);
+            bool prev_pressed = mouse_poll_prev_buttons[b];
+            if (now_pressed != prev_pressed) {
+                Godot_InjectMouseButton(b, now_pressed ? 1 : 0);
+                mouse_poll_prev_buttons[b] = now_pressed;
+                fprintf(stderr, "[MoHAA-mouse] button %d %s\n",
+                    b, now_pressed ? "DOWN" : "UP");
+            }
+        }
+    } else {
+        for (int b = 0; b < 10; b++) {
+            mouse_poll_prev_buttons[b] = false;
+        }
+    }
+
+    mouse_poll_prev_pos = pos;
+#else
+    (void)overlay_active;
+#endif
 }
 
 // ──────────────────────────────────────────────
@@ -7485,8 +7606,92 @@ bool MoHAARunner::is_menu_active() const {
     return Godot_UI_IsMenuActive() != 0;
 }
 
+void MoHAARunner::_input(const Ref<InputEvent> &p_event) {
+    if (!initialized) return;
+
+    // Keep UI transform current for accurate viewport→engine cursor mapping.
+    update_ui_transform();
+
+    bool overlay_active = (Godot_Client_IsAnyOverlayActive() != 0) ||
+                          (Godot_Client_GetGuiMouse() != 0);
+
+    // ── Mouse motion ──
+    InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
+    if (motion_event) {
+#ifdef __EMSCRIPTEN__
+        return;
+#endif
+        if (!overlay_active) {
+            Vector2 rel = motion_event->get_relative();
+            Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
+        } else {
+            Vector2 pos = motion_event->get_position();
+            float sx = (ui_scale_x > 0.0001f) ? ui_scale_x : 1.0f;
+            float sy = (ui_scale_y > 0.0001f) ? ui_scale_y : 1.0f;
+            int ex = (int)((pos.x - ui_offset_x) / sx);
+            int ey = (int)((pos.y - ui_offset_y) / sy);
+            if (ex < 0) ex = 0;
+            if (ey < 0) ey = 0;
+            if (ex >= ui_vid_w) ex = ui_vid_w - 1;
+            if (ey >= ui_vid_h) ey = ui_vid_h - 1;
+            Godot_Client_SetMousePos(ex, ey);
+        }
+
+        Viewport *vp = get_viewport();
+        if (vp) vp->set_input_as_handled();
+        return;
+    }
+
+    // ── Mouse buttons ──
+    InputEventMouseButton *button_event = Object::cast_to<InputEventMouseButton>(p_event.ptr());
+    if (button_event) {
+        int godot_button = (int)button_event->get_button_index();
+        bool pressed = button_event->is_pressed();
+
+#ifdef __EMSCRIPTEN__
+        if (godot_button >= 4 && godot_button <= 5 && pressed) {
+            Godot_InjectMouseButton(godot_button, 1);
+            Godot_InjectMouseButton(godot_button, 0);
+        }
+        return;
+#endif
+
+        if (overlay_active) {
+            Vector2 pos = button_event->get_position();
+            float sx = (ui_scale_x > 0.0001f) ? ui_scale_x : 1.0f;
+            float sy = (ui_scale_y > 0.0001f) ? ui_scale_y : 1.0f;
+            int ex = (int)((pos.x - ui_offset_x) / sx);
+            int ey = (int)((pos.y - ui_offset_y) / sy);
+            if (ex < 0) ex = 0;
+            if (ey < 0) ey = 0;
+            if (ex >= ui_vid_w) ex = ui_vid_w - 1;
+            if (ey >= ui_vid_h) ey = ui_vid_h - 1;
+            Godot_Client_SetMousePos(ex, ey);
+        }
+
+        if (godot_button >= 1 && godot_button <= 3) {
+            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+        } else if (godot_button == 8 || godot_button == 9) {
+            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
+        } else if (godot_button >= 4 && godot_button <= 5) {
+            if (pressed) {
+                Godot_InjectMouseButton(godot_button, 1);
+                Godot_InjectMouseButton(godot_button, 0);
+            }
+        }
+
+        Viewport *vp = get_viewport();
+        if (vp) vp->set_input_as_handled();
+        return;
+    }
+}
+
 void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
     if (!initialized) return;
+
+    // Keep UI transform current for accurate viewport→engine cursor mapping,
+    // especially on web where canvas/layout scale can change dynamically.
+    update_ui_transform();
 
     // ── Keyboard events ──
     InputEventKey *key_event = Object::cast_to<InputEventKey>(p_event.ptr());
@@ -7673,56 +7878,6 @@ void MoHAARunner::_unhandled_input(const Ref<InputEvent> &p_event) {
         return;
     }
 
-    // ── Mouse motion ──
-    InputEventMouseMotion *motion_event = Object::cast_to<InputEventMouseMotion>(p_event.ptr());
-    if (motion_event) {
-        if (mouse_captured) {
-            // Game mode (in_guimouse == false): forward relative motion.
-            // The engine's CL_MouseEvent stores deltas in cl.mouseDx/Dy
-            // which CL_MouseMove uses for freelook view rotation.
-            Vector2 rel = motion_event->get_relative();
-            Godot_InjectMouseMotion((int)rel.x, (int)rel.y);
-        } else {
-            // UI/menu mode (in_guimouse == true): the engine's CL_MouseEvent
-            // accumulates SE_MOUSE deltas into cl.mousex/mousey when
-            // in_guimouse is set.  However, Godot provides absolute cursor
-            // coordinates and the delta-based accumulation drifts.  Instead,
-            // we set the engine cursor position directly from the Godot
-            // viewport position mapped to engine's 640×480 virtual space.
-            Vector2 pos = motion_event->get_position();
-            int ex = (int)((pos.x - ui_offset_x) / ui_scale_x);
-            int ey = (int)((pos.y - ui_offset_y) / ui_scale_y);
-            if (ex < 0) ex = 0;
-            if (ey < 0) ey = 0;
-            if (ex >= ui_vid_w) ex = ui_vid_w - 1;
-            if (ey >= ui_vid_h) ey = ui_vid_h - 1;
-            Godot_Client_SetMousePos(ex, ey);
-        }
-        return;
-    }
-
-    // ── Mouse buttons ──
-    InputEventMouseButton *button_event = Object::cast_to<InputEventMouseButton>(p_event.ptr());
-    if (button_event) {
-        int godot_button = (int)button_event->get_button_index();
-        bool pressed = button_event->is_pressed();
-
-        // Always inject mouse buttons into the engine's event queue.
-        // CL_KeyEvent handles UI routing based on keyCatchers internally.
-        // In UI mode the engine tracks cl.mouseButtons for hit testing.
-        if (godot_button >= 1 && godot_button <= 3) {
-            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-        } else if (godot_button == 8 || godot_button == 9) {
-            Godot_InjectMouseButton(godot_button, pressed ? 1 : 0);
-        } else if (godot_button >= 4 && godot_button <= 5) {
-            // Wheel events: Godot only fires pressed=true, engine expects
-            // both press and release.
-            if (pressed) {
-                Godot_InjectMouseButton(godot_button, 1);
-                Godot_InjectMouseButton(godot_button, 0);
-            }
-        }
-
-        return;
-    }
+    // Mouse events are handled in _input() so UI hover/click still works even
+    // when controls consume input before the unhandled phase.
 }

@@ -30,6 +30,16 @@ extern "C" {
 }
 
 #include <cstring>
+#include <chrono>
+#include <random>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>
+#include <libgen.h>
+#ifdef __EMSCRIPTEN__
+#include <dlfcn.h>
+#endif
 
 // ──────────────────────────────────────────────
 //  UpdateChecker stubs — the real implementation in sys_update_checker.cpp
@@ -108,13 +118,32 @@ void Sys_UnloadGame(void) {
 
 void *Sys_GetCGameAPI(void *parms) {
     typedef void *(*GetCGameAPI_t)(void);
-    GetCGameAPI_t getCGameAPI;
+    GetCGameAPI_t getCGameAPI = NULL;
     const char *gamename = "cgame.so";
 
     if (cgame_library) {
         Com_Printf("GDExtension: Sys_GetCGameAPI — already loaded\n");
         return NULL;
     }
+
+#ifdef __EMSCRIPTEN__
+    {
+        // Primary web path: cgame.so is preloaded via loadDylibs() with global
+        // visibility, so resolve the export directly first. This avoids a
+        // synchronous dlopen attempt from the worker thread.
+        getCGameAPI = (GetCGameAPI_t)dlsym(RTLD_DEFAULT, "GetCGameAPI");
+        if (!getCGameAPI) {
+            getCGameAPI = (GetCGameAPI_t)dlsym(RTLD_DEFAULT, "_GetCGameAPI");
+        }
+        if (getCGameAPI) {
+            Com_Printf("GDExtension: Sys_GetCGameAPI — resolved from preloaded globals\n");
+            return (void *)getCGameAPI();
+        }
+
+        Com_Printf("GDExtension: Sys_GetCGameAPI — GetCGameAPI not found in preloaded globals (skipping runtime dlopen on web)\n");
+        return NULL;
+    }
+#else
 
     /* Try fs_homedatapath/game/, fs_basepath/game/, and fs_homepath/game/ */
     {
@@ -134,9 +163,14 @@ void *Sys_GetCGameAPI(void *parms) {
                 Com_sprintf(libPath, sizeof(libPath), "%s/%s/%s", paths[i], gameDir, gamename);
                 Com_Printf("GDExtension: trying cgame at \"%s\"...\n", libPath);
                 cgame_library = Sys_LoadLibrary(libPath);
+                if (!cgame_library) {
+                    const char *dlErr = Sys_LibraryError();
+                    Com_Printf("GDExtension: dlopen failed: %s\n", dlErr ? dlErr : "(null)");
+                }
             }
         }
     }
+#endif
 
     if (!cgame_library) {
         cgame_library = Sys_LoadDll(gamename, 0);
@@ -207,6 +241,342 @@ void Sys_ShutdownEx(void) {
 
 void Sys_ProcessBackgroundTasks(void) {
 }
+
+static char s_web_home_path[] = "/userfs";
+static char s_web_install_path[] = "/";
+static char s_web_empty_path[] = "";
+
+static constexpr int STUB_MAX_FOUND_FILES = 0x1000;
+
+static void Godot_Sys_ListFilteredFiles(
+    const char *basedir,
+    const char *subdirs,
+    const char *filter,
+    qboolean wantsubs,
+    char **list,
+    int *numfiles
+) {
+    char search[MAX_OSPATH];
+    char newsubdirs[MAX_OSPATH];
+    char filename[MAX_OSPATH];
+    DIR *fdir;
+    struct dirent *d;
+    struct stat st;
+
+    if (*numfiles >= STUB_MAX_FOUND_FILES - 1 || !basedir || basedir[0] == '\0') {
+        return;
+    }
+
+    if (subdirs && subdirs[0]) {
+        Com_sprintf(search, sizeof(search), "%s/%s", basedir, subdirs);
+    } else {
+        Com_sprintf(search, sizeof(search), "%s", basedir);
+    }
+
+    fdir = opendir(search);
+    if (!fdir) {
+        return;
+    }
+
+    while ((d = readdir(fdir)) != NULL) {
+        if (!(Q_stricmp(d->d_name, ".") && Q_stricmp(d->d_name, "..") && Q_stricmp(d->d_name, "cvs"))) {
+            continue;
+        }
+
+        Com_sprintf(filename, sizeof(filename), "%s/%s", search, d->d_name);
+        if (stat(filename, &st) == -1) {
+            continue;
+        }
+
+        if ((st.st_mode & S_IFDIR) != 0 && wantsubs) {
+            if (subdirs && subdirs[0]) {
+                Com_sprintf(newsubdirs, sizeof(newsubdirs), "%s/%s", subdirs, d->d_name);
+            } else {
+                Com_sprintf(newsubdirs, sizeof(newsubdirs), "%s", d->d_name);
+            }
+            Godot_Sys_ListFilteredFiles(basedir, newsubdirs, filter, wantsubs, list, numfiles);
+        }
+
+        if (*numfiles >= STUB_MAX_FOUND_FILES - 1) {
+            break;
+        }
+
+        if (subdirs && subdirs[0]) {
+            Com_sprintf(filename, sizeof(filename), "%s/%s", subdirs, d->d_name);
+        } else {
+            Q_strncpyz(filename, d->d_name, sizeof(filename));
+        }
+
+        if (!Com_FilterPath(filter, filename, qfalse)) {
+            continue;
+        }
+
+        list[*numfiles] = CopyString(filename);
+        (*numfiles)++;
+    }
+
+    closedir(fdir);
+}
+
+char *Sys_DefaultHomePath(void) {
+    return s_web_home_path;
+}
+
+char *Sys_DefaultHomeConfigPath(void) {
+    return s_web_home_path;
+}
+
+char *Sys_DefaultHomeDataPath(void) {
+    return s_web_home_path;
+}
+
+char *Sys_DefaultHomeStatePath(void) {
+    return s_web_home_path;
+}
+
+char *Sys_DefaultInstallPath(void) {
+    return s_web_install_path;
+}
+
+char *Sys_SteamPath(void) {
+    return s_web_empty_path;
+}
+
+char *Sys_GogPath(void) {
+    return s_web_empty_path;
+}
+
+char *Sys_MicrosoftStorePath(void) {
+    return s_web_empty_path;
+}
+
+char *Sys_DefaultAppPath(void) {
+    return s_web_install_path;
+}
+
+char *Sys_DefaultBasePath(void) {
+    return s_web_install_path;
+}
+
+char *Sys_DefaultUserPath(void) {
+    return s_web_home_path;
+}
+
+char *Sys_DefaultOutputPath(void) {
+    return s_web_home_path;
+}
+
+void Sys_SetDefaultInstallPath(const char *path) {
+    (void)path;
+}
+
+const char *Sys_Basename(char *path) {
+    return basename(path);
+}
+
+const char *Sys_Dirname(char *path) {
+    return dirname(path);
+}
+
+FILE *Sys_FOpen(const char *ospath, const char *mode) {
+    struct stat buf;
+
+    if (ospath && !stat(ospath, &buf) && S_ISDIR(buf.st_mode)) {
+        return NULL;
+    }
+
+    return fopen(ospath, mode);
+}
+
+qboolean Sys_Mkdir(const char *path) {
+    int result = mkdir(path, 0750);
+    if (result != 0) {
+        return (errno == EEXIST) ? qtrue : qfalse;
+    }
+    return qtrue;
+}
+
+FILE *Sys_Mkfifo(const char *ospath) {
+    (void)ospath;
+    return NULL;
+}
+
+char *Sys_Cwd(void) {
+    static char cwd[MAX_OSPATH];
+    char *result = getcwd(cwd, sizeof(cwd) - 1);
+    if (result != cwd) {
+        Q_strncpyz(cwd, "/", sizeof(cwd));
+    }
+    cwd[MAX_OSPATH - 1] = 0;
+    return cwd;
+}
+
+char **Sys_ListFiles(const char *directory, const char *extension, const char *filter, int *numfiles, qboolean wantsubs) {
+    struct dirent *d;
+    DIR *fdir;
+    char search[MAX_OSPATH];
+    int nfiles = 0;
+    char *list[STUB_MAX_FOUND_FILES];
+    char **listCopy;
+    int i;
+    struct stat st;
+    char buffer[64];
+
+    if (!numfiles) {
+        return NULL;
+    }
+
+    *numfiles = 0;
+    if (!directory || directory[0] == '\0') {
+        return NULL;
+    }
+
+    if (!extension) {
+        extension = "";
+    }
+
+    if (!filter && (extension[0] != '/' || extension[1])) {
+        Q_snprintf(buffer, sizeof(buffer), "*%s", extension);
+        filter = buffer;
+    }
+
+    if (filter) {
+        Godot_Sys_ListFilteredFiles(directory, "", filter, wantsubs, list, &nfiles);
+        list[nfiles] = NULL;
+        *numfiles = nfiles;
+        if (!nfiles) {
+            return NULL;
+        }
+
+        listCopy = (char **)Z_Malloc((nfiles + 1) * sizeof(*listCopy));
+        for (i = 0; i < nfiles; i++) {
+            listCopy[i] = list[i];
+        }
+        listCopy[i] = NULL;
+        return listCopy;
+    }
+
+    fdir = opendir(directory);
+    if (!fdir) {
+        return NULL;
+    }
+
+    while ((d = readdir(fdir)) != NULL) {
+        Com_sprintf(search, sizeof(search), "%s/%s", directory, d->d_name);
+        if (stat(search, &st) == -1) {
+            continue;
+        }
+
+        if (!(Q_stricmp(d->d_name, ".") && Q_stricmp(d->d_name, "..") && Q_stricmp(d->d_name, "cvs"))) {
+            continue;
+        }
+
+        if ((st.st_mode & S_IFDIR) == 0) {
+            continue;
+        }
+
+        if (nfiles >= STUB_MAX_FOUND_FILES - 1) {
+            break;
+        }
+
+        list[nfiles++] = CopyString(d->d_name);
+    }
+
+    closedir(fdir);
+
+    list[nfiles] = NULL;
+    *numfiles = nfiles;
+    if (!nfiles) {
+        return NULL;
+    }
+
+    listCopy = (char **)Z_Malloc((nfiles + 1) * sizeof(*listCopy));
+    for (i = 0; i < nfiles; i++) {
+        listCopy[i] = list[i];
+    }
+    listCopy[i] = NULL;
+    return listCopy;
+}
+
+void Sys_FreeFileList(char **list) {
+    int i;
+
+    if (!list) {
+        return;
+    }
+
+    for (i = 0; list[i]; i++) {
+        Z_Free(list[i]);
+    }
+
+    Z_Free(list);
+}
+
+void CON_Init(void) {
+}
+
+void CON_Shutdown(void) {
+}
+
+char *CON_Input(void) {
+    return NULL;
+}
+
+void Sys_PlatformInit(void) {
+}
+
+void Sys_SetEnv(const char *name, const char *value) {
+    (void)name;
+    (void)value;
+}
+
+char *Sys_GetCurrentUser(void) {
+    static char s_web_user[] = "player";
+    return s_web_user;
+}
+
+int Sys_PID(void) {
+    return 1;
+}
+
+qboolean Sys_DllExtension(const char *name) {
+    const char *ext;
+
+    if (!name) {
+        return qfalse;
+    }
+
+    ext = strrchr(name, '.');
+    if (!ext) {
+        return qfalse;
+    }
+
+    if (!Q_stricmp(ext, ".so") || !Q_stricmp(ext, ".dll") || !Q_stricmp(ext, ".wasm")) {
+        return qtrue;
+    }
+
+    return qfalse;
+}
+
+#ifdef __EMSCRIPTEN__
+int Sys_Milliseconds(void) {
+    static const auto base = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    return (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - base).count();
+}
+
+qboolean Sys_RandomBytes(byte *string, int len) {
+    if (!string || len <= 0) {
+        return qfalse;
+    }
+
+    static std::random_device rd;
+    for (int i = 0; i < len; ++i) {
+        string[i] = (byte)(rd() & 0xFF);
+    }
+    return qtrue;
+}
+#endif
 
 // Registry stubs (Windows-origin, called on all platforms in some paths)
 qboolean SaveRegistryInfo(qboolean user, const char *pszName, void *pvBuf, long lSize) {

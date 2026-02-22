@@ -32,25 +32,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  * You may also wish to include "jerror.h".
  */
 
-#ifndef GODOT_GDEXTENSION
 #define JPEG_INTERNALS
 #include <jpeglib.h>
-#endif
 
 
 static void LoadBMP( const char *name, byte **pic, int *width, int *height );
 static void LoadTGA( const char *name, byte **pic, int *width, int *height );
-#ifdef GODOT_GDEXTENSION
-/* No libjpeg under Godot — stub returns NULL so TGA fallback is used */
-static void LoadJPG( const char *name, byte **pic, int *width, int *height )
-{
-    *pic = NULL;
-    *width = 0;
-    *height = 0;
-}
-#else
 static void LoadJPG( const char *name, byte **pic, int *width, int *height );
-#endif
 
 static byte			 s_intensitytable[256];
 static unsigned char s_gammatable[256];
@@ -1891,8 +1879,7 @@ static void LoadTGA ( const char *name, byte **pic, int *width, int *height)
   ri.FS_FreeFile (buffer);
 }
 
-#ifndef GODOT_GDEXTENSION
-/* JPEG support requires libjpeg — excluded under Godot */
+
 
 /* Catching errors, as done in libjpeg's example.c */
 typedef struct q_jpeg_error_mgr_s
@@ -2169,8 +2156,6 @@ boolean empty_output_buffer (j_compress_ptr cinfo)
 {
   return TRUE;
 }
-#endif /* !GODOT_GDEXTENSION */
-
 #if 0
 /*
  * Compression initialization.

@@ -48,6 +48,13 @@ extern "C" {
 
     long Godot_VFS_ReadFile(const char *qpath, void **out_buffer);
     void Godot_VFS_FreeFile(void *buffer);
+
+    /* Engine-side sprite dimension accessor (godot_shader_accessors.c).
+     * Reads image_t->width/height and shader_t->sprite.scale from the
+     * real renderer structs — same data path as SPR_RegisterSprite. */
+    int  Godot_Sprite_GetEngineSize(const char *shader_name,
+                                    int *out_width, int *out_height,
+                                    float *out_sprite_scale);
 }
 
 /* ── Constants ── */
@@ -247,7 +254,7 @@ static Ref<ImageTexture> vfx_load_texture(int shader_handle)
     return tex;
 }
 
-/* ── Sprite size lookup (image dimensions × shader spritescale) ── */
+/* ── Sprite size lookup — uses engine's real image_t dimensions ── */
 static VfxSpriteSize vfx_get_sprite_size(int shader_handle)
 {
     auto it = vfx_size_cache.find(shader_handle);
@@ -255,20 +262,37 @@ static VfxSpriteSize vfx_get_sprite_size(int shader_handle)
 
     VfxSpriteSize sz;
 
-    /* Get image dimensions from the cached texture */
-    Ref<ImageTexture> tex = vfx_load_texture(shader_handle);
-    if (tex.is_valid()) {
-        sz.width  = tex->get_width();
-        sz.height = tex->get_height();
-    }
-
-    /* Get spritescale from shader props */
+    /* Resolve the shader name for this handle */
     const char *raw_name = Godot_Renderer_GetShaderName(shader_handle);
     const char *remapped = Godot_Renderer_GetShaderRemap(raw_name);
     const char *lookup   = (remapped && remapped[0]) ? remapped : raw_name;
+
+    /* Primary: read dimensions from the engine's real shader_t/image_t.
+     * This mirrors SPR_RegisterSprite's data path exactly:
+     *   shader->unfoggedStages[0]->bundle[0].image[0]->width/height
+     * Guarantees parity with the engine's RB_DrawSprite sizing. */
     if (lookup && lookup[0]) {
-        const GodotShaderProps *sp = Godot_ShaderProps_Find(lookup);
-        if (sp) sz.sprite_scale = sp->sprite_scale;
+        int eng_w = 0, eng_h = 0;
+        float eng_scale = 1.0f;
+        if (Godot_Sprite_GetEngineSize(lookup, &eng_w, &eng_h, &eng_scale)) {
+            sz.width        = eng_w;
+            sz.height       = eng_h;
+            sz.sprite_scale = eng_scale;
+        }
+    }
+
+    /* Fallback: if engine lookup failed, try Godot-loaded texture */
+    if (sz.width <= 0 || sz.height <= 0) {
+        Ref<ImageTexture> tex = vfx_load_texture(shader_handle);
+        if (tex.is_valid()) {
+            sz.width  = tex->get_width();
+            sz.height = tex->get_height();
+        }
+        /* Fallback spritescale from shader props */
+        if (lookup && lookup[0]) {
+            const GodotShaderProps *sp = Godot_ShaderProps_Find(lookup);
+            if (sp) sz.sprite_scale = sp->sprite_scale;
+        }
     }
 
     vfx_size_cache[shader_handle] = sz;
@@ -381,7 +405,6 @@ void Godot_VFX_Update(float delta)
                 Ref<ImageTexture> tex = vfx_load_texture(shaderHandle);
                 const GodotShaderProps *sp = (lookup && lookup[0]) ? Godot_ShaderProps_Find(lookup) : nullptr;
                 const char *transp_names[] = {"OPAQUE","ALPHA_TEST","ALPHA_BLEND","ADDITIVE","MULTIPLICATIVE","MULT_INV","ALPHA_INV"};
-                const char *blend_names[] = {"MIX","ADD","SUB","MUL"};
                 int tn = sp ? sp->transparency : -1;
                 UtilityFunctions::print(String("[VFX-DIAG] New sprite shader: handle=") +
                     String::num_int64(shaderHandle) +
@@ -393,12 +416,34 @@ void Godot_VFX_Update(float delta)
                     " rgba=(" + String::num_int64(rgba[0]) + "," + String::num_int64(rgba[1]) + "," +
                     String::num_int64(rgba[2]) + "," + String::num_int64(rgba[3]) + ")" +
                     " radius=" + String::num(radius, 1));
-                /* Also log image dimensions and spritescale for size debugging */
+
+                /* Log engine dimensions vs Godot dimensions for comparison */
                 VfxSpriteSize diag_sz = vfx_get_sprite_size(shaderHandle);
-                UtilityFunctions::print(String("[VFX-DIAG]   img=") +
-                    String::num_int64(diag_sz.width) + "x" + String::num_int64(diag_sz.height) +
-                    " spritescale=" + String::num(diag_sz.sprite_scale, 2) +
-                    " entityScale=" + String::num(entityScale, 3));
+                int godot_w = 0, godot_h = 0;
+                if (tex.is_valid()) {
+                    godot_w = tex->get_width();
+                    godot_h = tex->get_height();
+                }
+                int eng_w = 0, eng_h = 0;
+                float eng_spr_scale = 1.0f;
+                int eng_ok = 0;
+                if (lookup && lookup[0])
+                    eng_ok = Godot_Sprite_GetEngineSize(lookup, &eng_w, &eng_h, &eng_spr_scale);
+
+                UtilityFunctions::print(String("[VFX-DIAG]   engine_img=") +
+                    String::num_int64(eng_w) + "x" + String::num_int64(eng_h) +
+                    " godot_img=" + String::num_int64(godot_w) + "x" + String::num_int64(godot_h) +
+                    (eng_ok && (eng_w != godot_w || eng_h != godot_h) ? " ** MISMATCH **" : "") +
+                    " spritescale=" + String::num(diag_sz.sprite_scale, 3) +
+                    " eng_spritescale=" + String::num(eng_spr_scale, 3) +
+                    " entityScale=" + String::num(entityScale, 4));
+
+                /* At scale=1, compute what the sprite extent would be in metres */
+                float extent_m = (float)diag_sz.width * diag_sz.sprite_scale * MOHAA_UNIT_SCALE;
+                UtilityFunctions::print(String("[VFX-DIAG]   base_extent=") +
+                    String::num(extent_m, 3) + "m (at entityScale=1.0)" +
+                    " actual_extent=" + String::num(extent_m * entityScale, 3) + "m");
+
                 if (sp && sp->stage_count > 0) {
                     for (int st = 0; st < sp->stage_count; st++) {
                         if (sp->stages[st].map[0]) {
@@ -517,6 +562,38 @@ void Godot_VFX_Update(float delta)
         mi->set_global_transform(Transform3D(basis, pos));
 
         mi->set_visible(true);
+    }
+
+    /* Per-frame aggregate diagnostics — log max sprite extent and scale
+     * for the first 120 frames that have sprites (after that, quiet). */
+    {
+        static int diag_frame_count = 0;
+        if (count > 0 && diag_frame_count < 120) {
+            diag_frame_count++;
+            float max_extent = 0.0f, max_scale = 0.0f, min_scale = 999.0f;
+            int   max_extent_idx = -1;
+            for (int j = 0; j < count && j < VFX_SPRITE_POOL_SIZE; j++) {
+                float oj[3] = {0}, rj = 0, rotj = 0, sj = 1.0f;
+                int shj = 0;
+                unsigned char cj[4] = {255,255,255,255};
+                Godot_VFX_GetSprite(j, oj, &rj, &shj, &rotj, cj, &sj);
+                if (shj > 0 && sj > 0.0001f) {
+                    VfxSpriteSize szj = vfx_get_sprite_size(shj);
+                    float ext = (float)szj.width * sj * szj.sprite_scale * MOHAA_UNIT_SCALE;
+                    if (ext > max_extent) { max_extent = ext; max_extent_idx = j; }
+                    if (sj > max_scale) max_scale = sj;
+                    if (sj < min_scale) min_scale = sj;
+                }
+            }
+            if (max_extent > 0.5f) {
+                /* Only log when sprites are > 0.5m (potential "huge" sprites) */
+                UtilityFunctions::print(String("[VFX-FRAME] n=") + String::num_int64(count) +
+                    " max_extent=" + String::num(max_extent, 3) + "m" +
+                    " min_entityScale=" + String::num(min_scale, 4) +
+                    " max_entityScale=" + String::num(max_scale, 4) +
+                    " biggest_sprite_idx=" + String::num_int64(max_extent_idx));
+            }
+        }
     }
 }
 

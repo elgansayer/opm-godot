@@ -127,6 +127,7 @@ void GLimp_Init(qboolean fixedFunction) {
     glConfig.textureCompression = TC_NONE;
     glConfig.maxTextureSize = 4096;
     glConfig.numTextureUnits = 2;
+    glConfig.textureEnvAddAvailable = qtrue;
     glConfig.isFullscreen = qfalse;
     glConfig.windowAspect = 1280.0f / 720.0f;
 }

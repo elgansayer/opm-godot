@@ -500,6 +500,10 @@ void QDECL Com_Error( int code, const char *fmt, ... ) {
 	Q_vsnprintf (com_errorMessage,sizeof(com_errorMessage),fmt,argptr);
 	va_end (argptr);
 
+#if defined(GODOT_GDEXTENSION) && defined(__EMSCRIPTEN__)
+	Com_Printf("[COM_ERROR] code=%d message=%s\n", code, com_errorMessage);
+#endif
+
 	if (code != ERR_DISCONNECT && code != ERR_NEED_CD)
 		Cvar_Set("com_errorMessage", com_errorMessage);
 

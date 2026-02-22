@@ -36,6 +36,7 @@
 
 #include <vector>
 #include <unordered_map>
+#include <array>
 
 // ── Defensive module integration (compile-time guards) ──
 // Each agent's module is conditionally included only if it exists,
@@ -178,6 +179,10 @@ private:
 
     // Input state (Phase 6)
     bool mouse_captured = false;  // Whether mouse is in relative/captured mode
+    bool mouse_poll_initialised = false;
+    Vector2 mouse_poll_prev_pos;
+    std::array<bool, 10> mouse_poll_prev_buttons{};
+    bool overlay_prev_frame = false;  // overlay state from end of last frame; used for pre-Com_Frame web mouse poll
     bool hud_visible = true;        // F9 toggles HUD overlay visibility
     bool debug_fog_off = false;     // F5 toggles fog off for debugging
     bool debug_notex = false;       // F8 toggles textures off for debugging
@@ -200,6 +205,7 @@ private:
     // Input routing — automatic cursor management based on engine keyCatcher state
     bool overlay_was_active = false;   // Previous frame's overlay state (for transition detection)
     void update_input_routing();       // Called each frame to sync cursor mode with engine state
+    void poll_mouse_input_web(bool overlay_active);
 
     // 3D scene nodes (Phase 7a — camera bridge)
     Node3D *game_world = nullptr;            // Root for all 3D content
@@ -430,6 +436,7 @@ public:
 
     void _ready() override;
     void _process(double delta) override;
+    void _input(const Ref<InputEvent> &p_event) override;
     void _unhandled_input(const Ref<InputEvent> &p_event) override;
 
     // Engine lifecycle
@@ -457,6 +464,7 @@ public:
     int get_player_count() const;
     int get_server_state() const;
     String get_server_state_string() const;
+    String get_cvar_string(const String &p_name) const;
 
     // VFS access (Task 4.1) — read files from the engine's pk3/search-path VFS
     PackedByteArray vfs_read_file(const String &p_qpath) const;

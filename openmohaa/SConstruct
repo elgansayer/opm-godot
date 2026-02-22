@@ -129,7 +129,11 @@ env.Append(CPPPATH=[
     "code/thirdparty/recastnavigation/Detour/Include",
     "code/thirdparty/recastnavigation/DetourCrowd/Include",
     "code/thirdparty/recastnavigation/DetourTileCache/Include",
+    "code/thirdparty/jpeg-9f",
 ])
+
+# ── Bundled libjpeg (jpeg-9f) for JPEG texture loading ──
+sources.extend(Glob("code/thirdparty/jpeg-9f/j*.c"))
 
 # ── Sys files — platform specific ──
 sys_sources = ["code/sys/sys_main.c", "code/sys/con_log.c"]
@@ -259,7 +263,7 @@ excluded_client_basenames = {
 }
 
 def should_exclude(filepath):
-    fp = filepath.lower().replace("\\", "/")
+    fp = str(filepath).lower().replace("\\", "/")
 
     # Old parser duplicates
     if fp.endswith(("code/parser/lex.yy.cpp", "code/parser/y.tab.cpp")):
@@ -386,8 +390,10 @@ cgame_env.Append(CPPDEFINES=[
     "GODOT_GDEXTENSION",
 ])
 
-# Use a separate build directory so SCons doesn't conflict with the main build
-cgame_env.VariantDir("build/cgame", "code", duplicate=0)
+# Use a separate build directory so SCons doesn't conflict with the main build.
+# For web use a distinct dir to avoid mixing native .o and Emscripten .o files.
+_cgame_variant_dir = "build/cgame-web" if env["platform"] == "web" else "build/cgame"
+cgame_env.VariantDir(_cgame_variant_dir, "code", duplicate=0)
 
 if env["platform"] == "linux":
     cgame_env.Append(CPPDEFINES=["_LINUX", "__linux__"])
@@ -415,12 +421,54 @@ elif env["platform"] == "windows":
     cgame_env.Append(CPPDEFINES=["_WIN32", "WIN32", "_WINDOWS"])
     cgame_env.Append(CCFLAGS=["/EHsc", "/O2"])
     cgame_env.Append(LINKFLAGS=["/FORCE:MULTIPLE"])
+elif env["platform"] == "web":
+    # cgame for web: compiled as Emscripten WASM SIDE_MODULE so that
+    # Sys_GetCGameAPI / Sys_LoadLibrary (dlopen) can load it at runtime
+    # from the virtual FS where the preloader deposits it as /main/cgame.so.
+    # SIDE_MODULE=2 is lightweight — libc/C++ runtime are supplied by the
+    # main Godot WASM module.
+    cgame_env.Replace(
+        CC     = env.get("CC",     "emcc"),
+        CXX    = env.get("CXX",    "em++"),
+        AR     = env.get("AR",     "emar"),
+        RANLIB = env.get("RANLIB", "emranlib"),
+        SHLINK = env.get("CXX",    "em++"),
+    )
+    # Inherit the PATH that contains emcc/em++
+    if "ENV" in env and "PATH" in env["ENV"]:
+        cgame_env["ENV"]["PATH"] = env["ENV"]["PATH"]
+    cgame_env.Append(CPPDEFINES=["__EMSCRIPTEN__", "_LINUX", "__linux__"])
+    # -pthread is REQUIRED: the main Godot WASM module uses SharedArrayBuffer
+    # (shared memory). Without -pthread, cgame.so declares it imports unshared
+    # memory, causing a LinkError ("imported shared memory but unshared required")
+    # when loadDylibs() instantiates it. -pthread makes cgame.so import shared
+    # memory, matching the main module's SharedArrayBuffer.
+    cgame_env.Append(CCFLAGS=["-O2", "-fvisibility=hidden", "-pthread"])
+    cgame_env.Append(CFLAGS=[
+        "-Wno-incompatible-pointer-types",
+        "-Wno-discarded-qualifiers",
+    ])
+    cgame_env.Append(CXXFLAGS=[
+        "-std=c++17", "-fexceptions", "-frtti",
+        "-sSUPPORT_LONGJMP=emscripten",
+    ])
+    # Replace SHLINKFLAGS entirely — we do NOT want SCons's default -shared
+    # flag; emcc uses -sSIDE_MODULE instead.
+    # -pthread must also appear in link flags so emcc generates shared-memory
+    # imports in the final .wasm SIDE_MODULE.
+    cgame_env.Replace(SHLINKFLAGS=[
+        "-sSIDE_MODULE=2",
+        "-pthread",
+        "-sDISABLE_EXCEPTION_CATCHING=0",
+        "-sSUPPORT_LONGJMP=emscripten",
+        "-Wl,--allow-multiple-definition",
+    ])
 
-# Remap sources to build/cgame/ variant directory
+# Remap sources to the chosen cgame variant directory
 def cgame_path(src):
-    """Remap code/xxx to build/cgame/xxx for variant dir isolation."""
+    """Remap code/xxx to <variant_dir>/xxx for variant dir isolation."""
     if src.startswith("code/"):
-        return "build/cgame/" + src[5:]
+        return _cgame_variant_dir + "/" + src[5:]
     return src
 
 cgame_sources_raw = []

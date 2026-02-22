@@ -118,6 +118,7 @@ static enum GodotShaderTransparency classify_blend_factors(
         return SHADER_MULTIPLICATIVE;
     if (src == BLEND_ONE)
         return SHADER_ADDITIVE;
+    ri.Printf(PRINT_DEVELOPER, "[ShaderAccessors] classify_blend_factors FALLBACK: src=%d dst=%d -> ALPHA_BLEND\n", (int)src, (int)dst);
     return SHADER_ALPHA_BLEND;
 }
 
@@ -713,6 +714,7 @@ static void convert_shader(const shader_t *sh, GodotShaderProps *out) {
                 }
             }
         }
+
     }
 }
 
@@ -795,15 +797,20 @@ static shader_t *resolve_shader(const char *name) {
 
     /* First try already-loaded lookup (cheap) */
     sh = R_FindShaderByName(name);
-    if (sh && sh != tr.defaultShader)
+    if (sh && sh != tr.defaultShader) {
         return sh;
+    }
 
     /* Not yet loaded — call R_FindShader which will parse the .shader
      * text definition (or create an implicit shader from the image).
      * Use LIGHTMAP_NONE for generic lookups. */
     sh = R_FindShader(name, LIGHTMAP_NONE, qtrue, qtrue, qtrue, qtrue);
-    if (sh && !sh->defaultShader)
+    /* Check both the defaultShader flag AND pointer identity.
+     * CreateInternalShaders doesn't set tr.defaultShader->defaultShader = qtrue,
+     * so pointer comparison is the reliable check. */
+    if (sh && sh != tr.defaultShader && !sh->defaultShader) {
         return sh;
+    }
 
     return NULL;
 }
@@ -964,4 +971,47 @@ int Godot_ShaderProps_GetTextureMap(const char *shader_name, char *out_path, int
     }
 
     return 0;
+}
+
+/* ===================================================================
+ *  Sprite dimension accessor — reads from real engine shader_t/image_t
+ *
+ *  Mirrors the data path in SPR_RegisterSprite (tr_sprite.c):
+ *    shader = R_FindShader(name, ...)
+ *    img    = shader->unfoggedStages[0]->bundle[0].image[0]
+ *    width  = img->width;   height = img->height;
+ *    scale  = shader->sprite.scale;
+ *
+ *  This guarantees our Godot-side sprite sizing uses the exact same
+ *  dimensions that the engine's RB_DrawSprite would use.
+ * ================================================================ */
+
+int Godot_Sprite_GetEngineSize(const char *shader_name,
+                               int *out_width, int *out_height,
+                               float *out_sprite_scale)
+{
+    shader_t *sh;
+    image_t  *img;
+
+    if (!shader_name || !shader_name[0])
+        return 0;
+
+    /* Look up existing shader first (cheap), then force-create if needed */
+    sh = R_FindShaderByName(shader_name);
+    if (!sh || sh == tr.defaultShader)
+        sh = R_FindShader(shader_name, -1, qfalse, qfalse, qfalse, qfalse);
+    if (!sh || sh == tr.defaultShader)
+        return 0;
+
+    /* Read the first stage's first image — same as SPR_RegisterSprite */
+    img = NULL;
+    if (sh->unfoggedStages[0])
+        img = sh->unfoggedStages[0]->bundle[0].image[0];
+    if (!img)
+        return 0;
+
+    if (out_width)        *out_width        = img->width;
+    if (out_height)       *out_height       = img->height;
+    if (out_sprite_scale) *out_sprite_scale = sh->sprite.scale;
+    return 1;
 }

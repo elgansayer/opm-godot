@@ -121,6 +121,19 @@ int Godot_Client_IsAnyOverlayActive(void) {
 }
 
 /*
+ * Godot_Client_SyncGuiMouseToOverlayState — Keep in_guimouse aligned with
+ *   overlay catcher state. Some web paths can leave in_guimouse stale even
+ *   when KEYCATCH_UI is active, which breaks hover/click hit testing.
+ */
+void Godot_Client_SyncGuiMouseToOverlayState(void) {
+    if (cls.keyCatchers & (KEYCATCH_UI | KEYCATCH_CONSOLE | KEYCATCH_MESSAGE)) {
+        IN_MouseOn();
+    } else {
+        IN_MouseOff();
+    }
+}
+
+/*
  * Godot_Client_SetMousePos — Set the engine's UI cursor position directly.
  *   Used when transitioning to UI mode to place the cursor at a sensible
  *   position (e.g. centre of screen) instead of (0,0).
