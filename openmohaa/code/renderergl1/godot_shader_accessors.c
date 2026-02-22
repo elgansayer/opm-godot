@@ -659,10 +659,14 @@ static void convert_shader(const shader_t *sh, GodotShaderProps *out) {
     }
 
     /* ── Transparency classification ──
-     * Same logic as the old parser: check first non-lightmap stage's blend.
-     * Alpha test takes priority. */
+     * The engine's FinishShader() sets sort order based on stage blend bits.
+     * sort <= SS_OPAQUE means the surface is opaque — any blendFunc on
+     * later stages is internal multi-pass compositing (e.g. envmap +
+     * alpha-blend window texture), NOT world transparency.
+     * Use the engine sort as the primary signal.  Alpha test still
+     * overrides because it clips pixels rather than blending. */
     {
-        /* Check for alpha test first */
+        /* Check for alpha test first — takes priority regardless of sort */
         qboolean hasAlphaTest = qfalse;
         for (int i = 0; i < out->stage_count; i++) {
             if (out->stages[i].hasAlphaFunc) {
@@ -674,43 +678,49 @@ static void convert_shader(const shader_t *sh, GodotShaderProps *out) {
         }
 
         if (!hasAlphaTest && out->stage_count > 0) {
-            /* Detect lightmap presence */
-            qboolean has_lightmap = qfalse;
-            for (int s = 0; s < out->stage_count; s++) {
-                if (!out->stages[s].active) continue;
-                if (out->stages[s].isLightmap || out->stages[s].hasNextBundleLightmap) {
-                    has_lightmap = qtrue;
+            /* Engine sort <= SS_OPAQUE → opaque surface */
+            if (sh->sort <= SS_OPAQUE) {
+                out->transparency = SHADER_OPAQUE;
+            } else {
+                /* Transparent sort order — classify blend type */
+                /* Detect lightmap presence */
+                qboolean has_lightmap = qfalse;
+                for (int s = 0; s < out->stage_count; s++) {
+                    if (!out->stages[s].active) continue;
+                    if (out->stages[s].isLightmap || out->stages[s].hasNextBundleLightmap) {
+                        has_lightmap = qtrue;
+                        break;
+                    }
+                }
+
+                /* Find first non-lightmap, non-env stage with blendFunc */
+                int best = -1;
+                int fallback_nl = -1;
+                for (int s = 0; s < out->stage_count; s++) {
+                    if (!out->stages[s].active) continue;
+                    if (out->stages[s].isLightmap) continue;
+                    if (!out->stages[s].hasBlendFunc) {
+                        if (out->stages[s].tcGen != STAGE_TCGEN_ENVIRONMENT)
+                            break; /* opaque */
+                        continue;
+                    }
+                    if (fallback_nl < 0) fallback_nl = s;
+                    if (out->stages[s].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
+                    best = s;
                     break;
                 }
-            }
+                if (best < 0) best = fallback_nl;
 
-            /* Find first non-lightmap, non-env stage with blendFunc */
-            int best = -1;
-            int fallback_nl = -1;
-            for (int s = 0; s < out->stage_count; s++) {
-                if (!out->stages[s].active) continue;
-                if (out->stages[s].isLightmap) continue;
-                if (!out->stages[s].hasBlendFunc) {
-                    if (out->stages[s].tcGen != STAGE_TCGEN_ENVIRONMENT)
-                        break; /* opaque */
-                    continue;
-                }
-                if (fallback_nl < 0) fallback_nl = s;
-                if (out->stages[s].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
-                best = s;
-                break;
-            }
-            if (best < 0) best = fallback_nl;
-
-            if (best >= 0) {
-                enum MohaaBlendFactor bs = out->stages[best].blendSrc;
-                enum MohaaBlendFactor bd = out->stages[best].blendDst;
-                qboolean is_filter = (bs == BLEND_DST_COLOR && bd == BLEND_ZERO) ||
-                                     (bs == BLEND_ZERO && bd == BLEND_SRC_COLOR);
-                if (has_lightmap && is_filter) {
-                    /* Multi-pass lightmap modulation → stays opaque */
-                } else {
-                    out->transparency = classify_blend_factors(bs, bd);
+                if (best >= 0) {
+                    enum MohaaBlendFactor bs = out->stages[best].blendSrc;
+                    enum MohaaBlendFactor bd = out->stages[best].blendDst;
+                    qboolean is_filter = (bs == BLEND_DST_COLOR && bd == BLEND_ZERO) ||
+                                         (bs == BLEND_ZERO && bd == BLEND_SRC_COLOR);
+                    if (has_lightmap && is_filter) {
+                        /* Multi-pass lightmap modulation → stays opaque */
+                    } else {
+                        out->transparency = classify_blend_factors(bs, bd);
+                    }
                 }
             }
         }
