@@ -659,11 +659,10 @@ void Sys_DebugPrint(const char *msg) {
 void Sys_PrintBackTrace(void) {
 }
 
-void Sys_LV_CL_ConvertString(char *dest, const char *src, int maxlen) {
-    if (dest && src) {
-        strncpy(dest, src, maxlen);
-        dest[maxlen - 1] = '\0';
-    }
+/* Real signature: const char *Sys_LV_CL_ConvertString(const char *var)
+ * Localisation passthrough — returns the input string unchanged. */
+const char *Sys_LV_CL_ConvertString(const char *var) {
+    return var ? var : "";
 }
 
 void Sys_LV_ConvertString(char *dest, const char *src, int maxlen) {

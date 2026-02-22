@@ -31,10 +31,16 @@ using namespace godot;
 /* ── Engine accessor prototypes ── */
 extern "C" {
     int  Godot_Renderer_GetEntityCount(void);
+    /* Signature must match godot_renderer.c exactly (8 params). */
     int  Godot_Renderer_GetEntity(int index,
-                                  float *origin, float axis[3][3], float *scale,
-                                  int *hModel, int *entityNumber, unsigned char *shaderRGBA,
-                                  int *frame, int *oldframe, float *backlerp);
+                                  float *origin, float *axis, float *out_scale,
+                                  int *hModel, int *entityNumber,
+                                  unsigned char *rgba, int *renderfx);
+    /* Returns 1 if entity has a TIKI (skeletal), 0 otherwise. */
+    int  Godot_Renderer_GetEntityAnim(int index, void **outTiki,
+                                      int *outEntityNumber, void *outFrameInfo,
+                                      int *outBoneTag, float *outBoneQuat,
+                                      float *outActionWeight, float *outScale);
 }
 
 /* ── Constants ── */
@@ -249,19 +255,18 @@ static void update_speeds(float delta) {
     int skeletal_count = 0;
     int static_count   = 0;
     for (int i = 0; i < ent_count; i++) {
-        float origin[3], axis[3][3], scale, backlerp;
-        int hModel, entNum, frame, oldframe;
+        float origin[3], axis[3][3], scale;
+        int hModel, entNum, renderfx;
         unsigned char rgba[4];
-        int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
-                                               &hModel, &entNum, rgba,
-                                               &frame, &oldframe, &backlerp);
+        int reType = Godot_Renderer_GetEntity(i, origin, (float*)axis, &scale,
+                                               &hModel, &entNum, rgba, &renderfx);
         if (reType == 0) { /* RT_MODEL */
-            /* Heuristic: entities with animation frames are skeletal */
-            if (frame != 0 || oldframe != 0) {
+            /* Use GetEntityAnim to detect skeletal (has TIKI) vs static */
+            if (Godot_Renderer_GetEntityAnim(i, nullptr, nullptr, nullptr,
+                                             nullptr, nullptr, nullptr, nullptr))
                 skeletal_count++;
-            } else {
+            else
                 static_count++;
-            }
         }
     }
 
@@ -319,12 +324,11 @@ static void update_shownormals(void) {
     int mesh_idx  = 0;
 
     for (int i = 0; i < ent_count && mesh_idx < MAX_NORMAL_MESHES; i++) {
-        float origin[3], axis[3][3], scale, backlerp;
-        int hModel, entNum, frame, oldframe;
+        float origin[3], axis[3][3], scale;
+        int hModel, entNum, renderfx;
         unsigned char rgba[4];
-        int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
-                                               &hModel, &entNum, rgba,
-                                               &frame, &oldframe, &backlerp);
+        int reType = Godot_Renderer_GetEntity(i, origin, (float*)axis, &scale,
+                                               &hModel, &entNum, rgba, &renderfx);
         if (reType != 0) continue; /* only RT_MODEL */
 
         Vector3 gpos = id_to_godot(origin);
@@ -382,19 +386,20 @@ static void update_showbbox(void) {
     int mesh_idx  = 0;
 
     for (int i = 0; i < ent_count && mesh_idx < MAX_NORMAL_MESHES; i++) {
-        float origin[3], axis[3][3], scale, backlerp;
-        int hModel, entNum, frame, oldframe;
+        float origin[3], axis[3][3], scale;
+        int hModel, entNum, renderfx;
         unsigned char rgba[4];
-        int reType = Godot_Renderer_GetEntity(i, origin, axis, &scale,
-                                               &hModel, &entNum, rgba,
-                                               &frame, &oldframe, &backlerp);
+        int reType = Godot_Renderer_GetEntity(i, origin, (float*)axis, &scale,
+                                               &hModel, &entNum, rgba, &renderfx);
         if (reType != 0) continue; /* only RT_MODEL */
 
         Vector3 gpos = id_to_godot(origin);
         float half = BBOX_HALF_SIZE * scale * MOHAA_UNIT_SCALE;
         if (half < BBOX_MIN_THRESHOLD) half = BBOX_MIN_SIZE;
 
-        bool is_dynamic = (frame != 0 || oldframe != 0);
+        /* Use GetEntityAnim as skeletal heuristic (returns 1 if TIKI present) */
+        bool is_dynamic = (Godot_Renderer_GetEntityAnim(i, nullptr, nullptr, nullptr,
+                                                         nullptr, nullptr, nullptr, nullptr) != 0);
 
         /* Build wireframe box with 12 line edges */
         Ref<ImmediateMesh> im;

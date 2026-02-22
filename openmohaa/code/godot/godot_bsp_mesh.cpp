@@ -942,6 +942,7 @@ static Ref<ArrayMesh> batches_to_array_mesh(
                             mat->set_cull_mode(BaseMaterial3D::CULL_FRONT);
                             break;
                         case SHADER_CULL_NONE:
+                            mat->set_cull_mode(BaseMaterial3D::CULL_DISABLED);
                             break;
                     }
 

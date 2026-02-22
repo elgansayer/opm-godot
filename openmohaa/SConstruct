@@ -463,6 +463,12 @@ elif env["platform"] == "web":
         "-sSUPPORT_LONGJMP=emscripten",
         "-Wl,--allow-multiple-definition",
     ])
+    # Use .wasm suffix so the web cgame artifact (bin/libcgame.wasm) cannot be
+    # confused with the native ELF build (bin/libcgame.so).  build-web.sh checks
+    # for libcgame.wasm first, then falls back to libcgame.so.  If the native
+    # libcgame.so already exists, SCons would re-use it without rebuilding when
+    # the target name is the same.  Distinct names prevent that staleness.
+    cgame_env["SHLIBSUFFIX"] = ".wasm"
 
 # Remap sources to the chosen cgame variant directory
 def cgame_path(src):
