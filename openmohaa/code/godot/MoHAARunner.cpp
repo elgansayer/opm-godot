@@ -4316,6 +4316,10 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
             if (!stage_map) continue;
             if (strcmp(stage_map, "$lightmap") == 0) continue;
             if (strcmp(stage_map, "$whiteimage") == 0) continue;
+            // Internal image names from the shader accessor start with '*'
+            // (e.g. *white = tr.whiteImage, *lightmap, *default). These are
+            // never real file paths — skip them to reach the actual texture stage.
+            if (stage_map[0] == '*') continue;
             if (!fallback) fallback = stage_map;
             if (sp->stages[st].tcGen == STAGE_TCGEN_ENVIRONMENT) continue;
             texture_paths[num_texture_paths++] = stage_map;
@@ -4367,7 +4371,7 @@ Ref<ImageTexture> MoHAARunner::get_shader_texture(int shader_handle) {
         for (int st = 0; st < sp->stage_count; st++) {
             if (sp->stages[st].isLightmap) continue;
             const char *sm = sp->stages[st].map;
-            if (sm[0] && strcmp(sm, "$whiteimage") != 0 && strcmp(sm, "$lightmap") != 0) {
+            if (sm[0] && strcmp(sm, "$whiteimage") != 0 && strcmp(sm, "$lightmap") != 0 && sm[0] != '*') {
                 all_white = false;
                 break;
             }
