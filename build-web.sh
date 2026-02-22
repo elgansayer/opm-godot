@@ -204,8 +204,13 @@ generate_web_main_manifest() {
                 *.log|crashlog.txt|qconsole.log)
                     continue
                     ;;
+                *.so|*.cfg)
+                    printf '%s\n' "$rel" >> "$manifest_path"
+                    ;;
+                *)
+                    continue
+                    ;;
             esac
-            printf '%s\n' "$rel" >> "$manifest_path"
         done < <(find "$main_dir" \( -name ".*" -prune \) -o -type f -print0 | sort -z)
     fi
 
