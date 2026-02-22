@@ -1862,11 +1862,14 @@ void MoHAARunner::update_entities() {
 
         MeshInstance3D *mi = entity_meshes[i];
 
-        // Quick pre-check: is this a brush entity? (for diagnostics)
-        bool dbg_is_brush = false;
+        // Quick pre-check: is this a brush entity?
+        // Brush models (doors, movers) need special handling for frustum
+        // culling since their entity origin is a movement delta, not the
+        // mesh centre.
+        bool is_brush_entity = false;
         if (reType == 0 /* RT_MODEL */ && hModel > 0) {
             const char *mn = Godot_Model_GetName(hModel);
-            if (mn && mn[0] == '*') dbg_is_brush = true;
+            if (mn && mn[0] == '*') is_brush_entity = true;
         }
 
         // Skip non-renderable entities (portals, etc.)
@@ -1876,41 +1879,33 @@ void MoHAARunner::update_entities() {
 #else
         if (reType != RT_MODEL && reType != RT_SPRITE && reType != RT_BEAM) {
 #endif
-            if (dbg_is_brush) dbg_brush_lost_retype++;
             mi->set_visible(false);
             continue;
         }
-        if (dbg_is_brush) dbg_brush_pass_retype++;
         // RT_MODEL needs a valid model handle
         if (reType == RT_MODEL && hModel <= 0) {
-            if (dbg_is_brush) dbg_brush_lost_hmodel++;
             mi->set_visible(false);
             continue;
         }
-        if (dbg_is_brush) dbg_brush_pass_hmodel++;
 
         // RF_THIRD_PERSON (1<<0 = 0x01): player body — not visible in first-person
         // RF_FIRST_PERSON (1<<1 = 0x02): view weapon — only visible in first-person
         // RF_DEPTHHACK     (1<<2 = 0x04): compress depth so weapon doesn't clip into walls
         // RF_DONTDRAW      (1<<7 = 0x80): don't draw this entity
         if (renderfx & 0x01) {  // RF_THIRD_PERSON — skip player body
-            if (dbg_is_brush) dbg_brush_lost_thirdperson++;
             mi->set_visible(false);
             continue;
         }
-        if (dbg_is_brush) dbg_brush_pass_thirdperson++;
 
         // PVS culling: skip entities not visible from the camera's cluster.
         // Skip first-person entities (RF_FIRST_PERSON / RF_DEPTHHACK) — they
         // are always visible as they're attached to the view weapon.
         if (pvs_current_cluster >= 0 && !(renderfx & 0x06)) {
             if (!Godot_BSP_InPVS(pvs_cam_origin, origin)) {
-                if (dbg_is_brush) dbg_brush_lost_pvs++;
                 mi->set_visible(false);
                 continue;
             }
         }
-        if (dbg_is_brush) dbg_brush_pass_pvs++;
 
         // Phase 133: Frustum and draw distance culling — skip entities that
         // are outside the camera frustum or beyond the far-plane cull distance.
@@ -1924,8 +1919,7 @@ void MoHAARunner::update_entities() {
             // their entity origin is the movement origin, not the mesh centre.
             // Skip our manual frustum culling for brush entities — Godot's own
             // per-AABB frustum culling in the renderer handles them correctly.
-            if (!dbg_is_brush && !Godot_FrustumCull_TestSphere(ent_pos, 2.0f)) {
-                if (dbg_is_brush) dbg_brush_lost_frustum++;
+            if (!is_brush_entity && !Godot_FrustumCull_TestSphere(ent_pos, 2.0f)) {
                 mi->set_visible(false);
                 continue;
             }
@@ -1942,7 +1936,6 @@ void MoHAARunner::update_entities() {
 #endif
         }
 #endif
-        if (dbg_is_brush) dbg_brush_pass_frustum++;
 
         // RT_SPRITE: billboard quad at entity origin (Phase 16)
         if (reType == RT_SPRITE) {
@@ -2293,11 +2286,9 @@ void MoHAARunner::update_entities() {
 
         // 
         if (renderfx & 0x80) {  // RF_DONTDRAW
-            if (dbg_is_brush) dbg_brush_lost_dontdraw++;
             mi->set_visible(false);
             continue;
         }
-        if (dbg_is_brush) dbg_brush_pass_dontdraw++;
 
         bool is_first_person = (renderfx & 0x02) != 0;  // RF_FIRST_PERSON
         bool is_depthhack    = (renderfx & 0x04) != 0;  // RF_DEPTHHACK
@@ -2370,7 +2361,6 @@ void MoHAARunner::update_entities() {
                 // by batches_to_array_mesh() — no override needed.
             } else if (!bmesh.is_valid()) {
                 // Brush model mesh not available — skip display
-                dbg_brush_lost_nomesh++;
                 static std::unordered_set<int> logged_missing_bmodels;
                 if (logged_missing_bmodels.find(subIdx) == logged_missing_bmodels.end()) {
                     logged_missing_bmodels.insert(subIdx);
@@ -3065,31 +3055,6 @@ void MoHAARunner::update_entities() {
                     String::num_int64(n_beam) + " beam, " +
                     String::num_int64(n_other) + " other");
             }
-        }
-    }
-
-    // One-shot brush entity culling diagnostic
-    if (!dbg_brush_trace_done && ent_count > 0) {
-        int total_brush = dbg_brush_pass_retype + dbg_brush_lost_retype;
-        if (total_brush > 0) {
-            dbg_brush_trace_done = true;
-            UtilityFunctions::print(String("[MoHAA-BRUSH-TRACE] ") +
-                String::num_int64(total_brush) + " brush ents: " +
-                "pass_retype=" + String::num_int64(dbg_brush_pass_retype) +
-                " pass_hmodel=" + String::num_int64(dbg_brush_pass_hmodel) +
-                " pass_3rdperson=" + String::num_int64(dbg_brush_pass_thirdperson) +
-                " pass_pvs=" + String::num_int64(dbg_brush_pass_pvs) +
-                " pass_frustum=" + String::num_int64(dbg_brush_pass_frustum) +
-                " pass_dontdraw=" + String::num_int64(dbg_brush_pass_dontdraw) +
-                " | lost: retype=" + String::num_int64(dbg_brush_lost_retype) +
-                " hmodel=" + String::num_int64(dbg_brush_lost_hmodel) +
-                " 3rdperson=" + String::num_int64(dbg_brush_lost_thirdperson) +
-                " pvs=" + String::num_int64(dbg_brush_lost_pvs) +
-                " frustum=" + String::num_int64(dbg_brush_lost_frustum) +
-                " dontdraw=" + String::num_int64(dbg_brush_lost_dontdraw) +
-                " nomesh=" + String::num_int64(dbg_brush_lost_nomesh) +
-                " reached_visible=" + String::num_int64(dbg_reached_visible) +
-                " pvs_cluster=" + String::num_int64(pvs_current_cluster));
         }
     }
 
