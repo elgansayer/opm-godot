@@ -29,23 +29,44 @@ func _ready():
 	#   --exec=<cfg>     Exec config at startup (e.g. --exec=server.cfg)
 	#   --server         Shorthand for --exec=server.cfg
 	#   --dev / --nodev  Toggle developer mode
+	#   +connect <ip>    Connect to a server (forwarded to engine)
+	#   +<cmd> [args]    Any Quake-style +command forwarded to the engine
 	var user_args = OS.get_cmdline_user_args()
 	var dev_mode = false
+	var extra_engine_cmds = ""  # raw +command args forwarded to engine
+	var in_plus_cmd = false     # true while collecting args for a +command
 	for arg in user_args:
 		if arg == "--dedicated":
 			launch_dedicated = true
+			in_plus_cmd = false
 		elif arg == "--client":
 			launch_dedicated = false
+			in_plus_cmd = false
 		elif arg.begins_with("--map="):
 			launch_map = arg.substr(6)
+			in_plus_cmd = false
 		elif arg.begins_with("--exec="):
 			exec_cfg = arg.substr(7)
+			in_plus_cmd = false
 		elif arg == "--server":
 			exec_cfg = "server.cfg"
+			in_plus_cmd = false
 		elif arg == "--nodev":
 			dev_mode = false
+			in_plus_cmd = false
 		elif arg == "--dev":
 			dev_mode = true
+			in_plus_cmd = false
+		elif arg.begins_with("+"):
+			# Quake-style +command -- forward directly to engine
+			# e.g. "+connect" "127.0.0.1" arrives as two separate user args
+			extra_engine_cmds += " " + arg
+			in_plus_cmd = true
+		elif in_plus_cmd:
+			# Value-arg following a +command (e.g. the IP in "+connect <ip>")
+			extra_engine_cmds += " " + arg
+			# A new +command resets this; bare args "consume" one token only
+			in_plus_cmd = false
 
 	# On web: also read URL query params
 	# e.g. http://localhost:8086/mohaa.html\?map\=dm/mohdm1
@@ -75,7 +96,11 @@ func _ready():
 			startup_args += " +exec " + exec_cfg
 		elif launch_map != "":
 			startup_args += " +map " + launch_map
-		# else: no startup command → engine shows main menu
+		# else: no startup command -> engine shows main menu
+
+		# Append any raw +command args forwarded from user args (e.g. +connect <ip>)
+		if extra_engine_cmds != "":
+			startup_args += extra_engine_cmds
 
 		runner.set_startup_args(startup_args)
 		runner.name = "MoHAARunnerInstance"
@@ -84,6 +109,8 @@ func _ready():
 		print("Main: Startup args -> ", startup_args)
 		if exec_cfg != "":
 			print("Main: Exec cfg -> ", exec_cfg)
+		elif extra_engine_cmds != "":
+			print("Main: Extra engine cmds -> ", extra_engine_cmds.strip_edges())
 		elif launch_map != "":
 			print("Main: Startup map -> ", launch_map)
 		else:
@@ -118,7 +145,7 @@ func _parse_url_params() -> Dictionary:
 			result[kv[0]] = "1"
 	return result
 
-# ── Signal handlers ──
+# -- Signal handlers --
 
 func _on_engine_error(message: String):
 	printerr("Main: ENGINE ERROR: ", message)
@@ -158,13 +185,13 @@ func _unhandled_key_input(event: InputEvent):
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
 		print("Main: Fullscreen toggled")
 	elif event.keycode == KEY_F10:
-		# F10 — exec server.cfg (listen server: host + play on dm/mohdm1)
+		# F10 -- exec server.cfg (listen server: host + play on dm/mohdm1)
 		if runner and runner.is_engine_initialized():
 			loading_screen_force_sent = false
 			runner.execute_command("exec server.cfg")
 			print("Main: Executed -> exec server.cfg")
 	elif event.keycode == KEY_F11:
-		# F11 — connect to localhost as pure client (join local server)
+		# F11 -- connect to localhost as pure client (join local server)
 		if runner and runner.is_engine_initialized():
 			runner.execute_command("connect localhost")
 			print("Main: Executed -> connect localhost")

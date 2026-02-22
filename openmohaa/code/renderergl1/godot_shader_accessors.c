@@ -848,8 +848,14 @@ void Godot_ShaderProps_Load(void) {
         }
     }
 
-    ri.Printf(PRINT_ALL, "[ShaderAccessors] Pre-cached %d shaders from tr.shaders[]\n",
-              s_shaderCacheCount);
+    /* ri.Printf may be NULL in dedicated mode (renderer not initialised). */
+    if (ri.Printf) {
+        ri.Printf(PRINT_ALL, "[ShaderAccessors] Pre-cached %d shaders from tr.shaders[]\n",
+                  s_shaderCacheCount);
+    } else {
+        Com_Printf("[ShaderAccessors] Pre-cached %d shaders from tr.shaders[]\n",
+                   s_shaderCacheCount);
+    }
 }
 
 void Godot_ShaderProps_Unload(void) {
