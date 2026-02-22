@@ -845,6 +845,194 @@ js_path.write_text(src, encoding='utf-8')
 PYWS
 }
 
+obfuscate_godot_fingerprints() {
+    # Post-build pass: remove/rename ALL Godot-identifiable strings from the
+    # exported JS, HTML, and audio worklet files so the engine lineage is not
+    # visible in browser DevTools, page source, or network requests.
+    #
+    # This is purely cosmetic — WASM binaries are already opaque bytecode.
+    # We rename identifiers consistently across all files so cross-references
+    # (e.g. worklet processor names) remain valid.
+
+    local export_dir="$EXPORT_DIR"
+    [[ -d "$export_dir" ]] || return 0
+
+    python3 - "$export_dir" << 'PYOBF'
+import sys, os, re, pathlib
+
+export_dir = pathlib.Path(sys.argv[1])
+
+# ── Files to process ──
+js_file = export_dir / 'mohaa.js'
+html_file = export_dir / 'mohaa.html'
+worklet_file = export_dir / 'mohaa.audio.worklet.js'
+pos_worklet_file = export_dir / 'mohaa.audio.position.worklet.js'
+manifest_file = export_dir / 'mohaa.manifest.json'
+
+def read(p):
+    return p.read_text(encoding='utf-8') if p.exists() else None
+
+def write(p, txt):
+    if txt is not None:
+        p.write_text(txt, encoding='utf-8')
+
+# ── 1. Identifier renaming (order matters: longer matches first) ──
+# These replacements are applied to ALL text files.
+renames = [
+    # PascalCase class names
+    ('GodotAudioScript',             'OpmAudioScript'),
+    ('GodotAudioWorklet',            'OpmAudioWorklet'),
+    ('GodotAudio',                   'OpmAudio'),
+    ('GodotChannel',                 'OpmChannel'),
+    ('GodotConfig',                  'OpmConfig'),
+    ('GodotDisplayCursor',           'OpmDisplayCursor'),
+    ('GodotDisplayScreen',           'OpmDisplayScreen'),
+    ('GodotDisplayVK',               'OpmDisplayVK'),
+    ('GodotDisplay',                 'OpmDisplay'),
+    ('GodotEmscripten',              'OpmEmscripten'),
+    ('GodotEventListeners',          'OpmEventListeners'),
+    ('GodotFetch',                   'OpmFetch'),
+    ('GodotFS',                      'OpmFS'),
+    ('GodotIME',                     'OpmIME'),
+    ('GodotInputDragDrop',           'OpmInputDragDrop'),
+    ('GodotInputGamepads',           'OpmInputGamepads'),
+    ('GodotInput',                   'OpmInput'),
+    ('GodotJSWrapper',               'OpmJSWrapper'),
+    ('GodotOS',                      'OpmOS'),
+    ('GodotPWA',                     'OpmPWA'),
+    ('GodotRTCDataChannel',          'OpmRTCDataChannel'),
+    ('GodotRTCPeerConnection',       'OpmRTCPeerConnection'),
+    ('GodotRuntime',                 'OpmRuntime'),
+    ('GodotWebGL',                   'OpmWebGL'),
+    ('GodotWebMidi',                 'OpmWebMidi'),
+    ('GodotWebSocket',               'OpmWebSocket'),
+    ('GodotWebXR',                   'OpmWebXR'),
+    ('GodotProcessor',               'OpmProcessor'),
+    ('GodotPositionReportingProcessor', 'OpmPositionReportingProcessor'),
+
+    # Worklet processor registration names (cross-referenced between JS and worklet files)
+    ('godot-position-reporting-processor', 'opm-position-reporting-processor'),
+    ('godot-processor',              'opm-processor'),
+
+    # Config property names (HTML + JS)
+    ('gdextensionLibs',              'extensionLibs'),
+    ('godotPoolSize',                'workerPoolSize'),
+
+    # UPPER_CASE config names (HTML inline script)
+    ('GODOT_THREADS_ENABLED',        'OPM_THREADS_ENABLED'),
+    ('GODOT_CONFIG',                 'OPM_CONFIG'),
+
+    # NOTE: Do NOT rename godot_* / _godot_* snake_case function names!
+    # These are WASM import/export symbols (C-exported via Emscripten) and
+    # C++ mangled names (e.g. _Z14godot_web_mainiPPc). The .wasm binary
+    # still references the original names — renaming them in JS breaks linking.
+
+    # Safe string-only renames
+    ('godotengine.org',              'openmohaa.net'),
+]
+
+def apply_renames(txt):
+    for old, new in renames:
+        txt = txt.replace(old, new)
+    # Only rename user-visible "Godot" text, NOT snake_case function names
+    # which are WASM import symbols that must match the compiled binary.
+    txt = re.sub(r'\bGodot Engine\b', 'OpenMoHAA Engine', txt)
+    txt = re.sub(r'\bGodot projects\b', 'projects', txt)
+    # Rename PascalCase "Godot" only when NOT preceded by _ or lowercase
+    # (to avoid mangled C++ names like _Z14godot_web_mainiPPc)
+    # The PascalCase class renames above already handle GodotXxx classes.
+    # This catches any remaining standalone "Godot" in string literals.
+    txt = re.sub(r'(?<![_a-z0-9])Godot(?![_a-z])', 'Opm', txt)
+    return txt
+
+# ── 2. Strip copyright headers mentioning Godot from worklet files ──
+def strip_godot_headers(txt):
+    if txt is None:
+        return None
+    # Remove multi-line /* ... GODOT ENGINE ... */ comment blocks
+    txt = re.sub(
+        r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/\s*',
+        '',
+        txt,
+        count=0,
+        flags=re.DOTALL
+    )
+    # Remove any remaining single-line // comments mentioning godot
+    txt = re.sub(r'//.*godot.*\n', '\n', txt, flags=re.IGNORECASE)
+    return txt
+
+# ── 3. Silence console output in mohaa.js ──
+def silence_console(txt):
+    if txt is None:
+        return None
+    # Redirect console.log/warn/info to no-ops at the very start.
+    # Keep console.error for real errors.
+    silencer = (
+        '(function(){var _n=function(){}; '
+        'console.log=_n; console.info=_n; console.warn=_n; '
+        'console.debug=_n;})();\n'
+    )
+    txt = silencer + txt
+    return txt
+
+# ── 4. Clean HTML ──
+def clean_html(txt):
+    if txt is None:
+        return None
+    txt = apply_renames(txt)
+    # After apply_renames, "Godot" is now "Opm" — match the transformed text
+    txt = txt.replace(
+        'required to run Opm projects on the Web are missing',
+        'required to run this application on the Web are missing'
+    )
+    txt = txt.replace(
+        'required to run projects on the Web are missing',
+        'required to run this application on the Web are missing'
+    )
+    # Clean page title if still default
+    txt = txt.replace('OpenMoHAA Test', 'OpenMoHAA')
+    return txt
+
+# ── Process all files ──
+counts = {}
+
+# mohaa.js — main runtime
+js = read(js_file)
+if js:
+    js = silence_console(js)
+    js = apply_renames(js)
+    # Strip the "Godot Engine v4.x.x" startup banner from print output
+    js = re.sub(r'Opm Engine v[\d.]+[^\n]*', '', js)
+    write(js_file, js)
+    counts['mohaa.js'] = True
+
+# mohaa.html
+html = read(html_file)
+if html:
+    html = clean_html(html)
+    write(html_file, html)
+    counts['mohaa.html'] = True
+
+# Audio worklet files
+for wf in [worklet_file, pos_worklet_file]:
+    w = read(wf)
+    if w:
+        w = strip_godot_headers(w)
+        w = apply_renames(w)
+        write(wf, w)
+        counts[wf.name] = True
+
+# Manifest
+m = read(manifest_file)
+if m:
+    m = m.replace('OpenMoHAA Test', 'OpenMoHAA')
+    write(manifest_file, m)
+    counts['manifest'] = True
+
+print(f"Obfuscated Godot fingerprints in {len(counts)} files: {', '.join(counts.keys())}")
+PYOBF
+}
+
 cd "$OPENMOHAA_DIR"
 
 PARSER_DIR="code/parser/generated"
@@ -918,6 +1106,7 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
     patch_web_html_disable_service_worker
     patch_web_ws_relay
+    obfuscate_godot_fingerprints
 fi
 
 echo "Web build complete (target=$BUILD_TARGET)."

@@ -42,12 +42,9 @@ for f in mohaa.html mohaa.js mohaa.wasm mohaa.side.wasm mohaa.pck \
     fi
 done
 
-# Game data (pk3 files + cgame.so + configs)
-echo "Copying game assets (main/)..."
+# Runtime files needed from main/ (cgame + cfg)
+echo "Copying runtime files (main/)..."
 mkdir -p "$OUT/web/main"
-for f in "$SCRIPT_DIR/exports/web/main/"*.pk3; do
-    [[ -f "$f" ]] && cp -f "$f" "$OUT/web/main/"
-done
 # cgame.so is needed at runtime
 if [[ -f "$SCRIPT_DIR/exports/web/main/cgame.so" ]]; then
     cp -f "$SCRIPT_DIR/exports/web/main/cgame.so" "$OUT/web/main/"
@@ -82,6 +79,7 @@ services:
       - "8086:80"
     volumes:
       - ./web:/usr/share/nginx/html:ro
+      - ${MOHAA_ASSETS:-${HOME}/mohaa-web-base}:/gamedata:ro
       - ./docker/web/default.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
 
@@ -96,6 +94,10 @@ COMPOSE
 
 # --- 5. .gitignore ---
 cat > "$OUT/.gitignore" << 'GITIGNORE'
+# Game assets (copyrighted — not distributed via git)
+gamedata/
+*.pk3
+
 # Node
 relay/node_modules/
 
@@ -107,23 +109,38 @@ web/main/qconsole.log
 Thumbs.db
 GITIGNORE
 
-# --- 6. .gitattributes for LFS ---
-cat > "$OUT/.gitattributes" << 'GITATTR'
-# Track large binary files with Git LFS
-*.pk3 filter=lfs diff=lfs merge=lfs -text
-*.wasm filter=lfs diff=lfs merge=lfs -text
-*.pck filter=lfs diff=lfs merge=lfs -text
-*.so filter=lfs diff=lfs merge=lfs -text
-*.png filter=lfs diff=lfs merge=lfs -text
-GITATTR
-
-# --- 7. README ---
+# --- 6. README ---
 cat > "$OUT/README.md" << 'README'
 # OPM-Godot Web Export
 
 Self-contained web deployment of OpenMoHAA via Godot GDExtension.
 
 ## Quick Start
+
+### 1. Add game assets
+
+Copy your MOHAA pk3 files into:
+
+```bash
+mkdir -p ~/mohaa-web-base/main ~/mohaa-web-base/mainta ~/mohaa-web-base/maintt
+
+# Allied Assault (required)
+cp /path/to/mohaa/main/Pak*.pk3 ~/mohaa-web-base/main/
+cp /path/to/mohaa/main/pak6.pk3 ~/mohaa-web-base/main/
+
+# Spearhead (optional)
+cp /path/to/mohaa/mainta/*.pk3 ~/mohaa-web-base/mainta/
+
+# Breakthrough (optional)
+cp /path/to/mohaa/maintt/*.pk3 ~/mohaa-web-base/maintt/
+```
+
+Override with env var if needed:
+```bash
+MOHAA_ASSETS=/path/to/mohaa-web-base docker compose up -d
+```
+
+### 2. Start stack
 
 ```bash
 docker compose up -d
@@ -150,6 +167,17 @@ To connect to a specific server, use the in-game console:
 connect <server-ip>
 ```
 
+## Asset Layout
+
+Nginx serves from two roots:
+- `web/` (repo): engine/runtime files (`mohaa.*`, `cgame.so`, cfgs)
+- `/gamedata` (host mount): pk3 assets from `~/mohaa-web-base`
+
+The game can load:
+- `main/` from `~/mohaa-web-base/main`
+- `mainta/` from `~/mohaa-web-base/mainta`
+- `maintt/` from `~/mohaa-web-base/maintt`
+
 ## Directory Structure
 
 ```
@@ -164,19 +192,24 @@ connect <server-ip>
     ├── mohaa.js             # Emscripten runtime
     ├── *.wasm               # Engine binaries
     ├── mohaa.pck            # Godot project package
-    └── main/                # Game assets (pk3 files)
+  └── main/                # Runtime files (cgame.so, cfg)
+
+~/mohaa-web-base/            # External game assets (not in git)
+  ├── main/                # AA pk3 files
+  ├── mainta/              # SH pk3 files
+  └── maintt/              # BT pk3 files
 ```
 
 ## Requirements
 
 - Docker + Docker Compose
-- Game assets (`Pak0.pk3` through `pak6.pk3`) in `web/main/`
-- Git LFS (for cloning — large binaries tracked via LFS)
+- Game assets in `~/mohaa-web-base/{main,mainta,maintt}`
 
 ## Portainer Deployment
 
 1. Add this repo as a Git stack in Portainer
 2. Set the compose path to `docker-compose.yml`
+3. Ensure `~/mohaa-web-base` exists on host with your pk3 files
 3. Deploy — both services start automatically
 README
 
@@ -190,8 +223,9 @@ du -sh "$OUT"/*
 echo ""
 echo "Next steps:"
 echo "  cd $OUT"
-echo "  git init && git lfs install"
-echo "  git lfs track '*.pk3' '*.wasm' '*.pck' '*.so' '*.png'"
+echo "  mkdir -p ~/mohaa-web-base/main ~/mohaa-web-base/mainta ~/mohaa-web-base/maintt"
+echo "  # copy your pk3 files into ~/mohaa-web-base/..."
+echo "  git init"
 echo "  git add -A && git commit -m 'Initial web export package'"
 echo "  git remote add origin git@github.com:YOUR_USER/opm-godot-web-export.git"
 echo "  git push -u origin main"
