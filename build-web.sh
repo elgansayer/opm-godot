@@ -193,13 +193,20 @@ generate_web_main_manifest() {
     if [[ -d "$main_dir" ]]; then
         while IFS= read -r -d '' f; do
             local rel="${f#"$main_dir/"}"
+            # Skip hidden/dot files and directories (dev artifacts: .vscode, .genkit, etc.)
+            case "$rel" in
+                .*|*/.*) continue ;;
+            esac
             case "${rel,,}" in
                 pak0.pk3|pak1.pk3|pak2.pk3|pak3.pk3|pak4.pk3|pak5.pk3|pak6.pk3|openmohaa.pk3|cgame.so)
                     continue
                     ;;
+                *.log|crashlog.txt|qconsole.log)
+                    continue
+                    ;;
             esac
             printf '%s\n' "$rel" >> "$manifest_path"
-        done < <(find "$main_dir" -type f -print0 | sort -z)
+        done < <(find "$main_dir" \( -name ".*" -prune \) -o -type f -print0 | sort -z)
     fi
 
     echo "$manifest_path"
@@ -383,8 +390,16 @@ else:
 stub_old = "stubs[prop]=(...args)=>{resolved||=resolveSymbol(prop);return resolved(...args)}"
 stub_new = (
     "stubs[prop]=(...args)=>{"
+    # C++ exception runtime - must run BEFORE resolveSymbol so our versions
+    # take precedence over Godot's abort() stubs for these symbols.
+    "if(prop==='___cxa_throw'){resolved=(ptr,type,destructor)=>{var e=new Error('CxxException');e.name='CxxException';e.__cxa_ptr=ptr;stubs.__cxaLast=ptr;stubs.__cxaType=type;throw e};}"
+    "if(prop==='___resumeException'){resolved=(ptr)=>{stubs.__cxaLast=ptr||stubs.__cxaLast||0;var e=new Error('CxxException');e.name='CxxException';e.__cxa_ptr=stubs.__cxaLast;throw e};}"
+    "if(prop==='__cxa_begin_catch'){resolved=(ptr)=>{stubs.__cxaLast=0;return ptr};}"
+    "if(prop==='__cxa_end_catch'||prop==='__cxa_free_exception'){resolved=()=>{stubs.__cxaLast=0};}"
+    "if(prop==='__cxa_rethrow'){resolved=()=>{var e=new Error('CxxException');e.name='CxxException';e.__cxa_ptr=stubs.__cxaLast||0;throw e};}"
+    "if(/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>{var ptr=stubs.__cxaLast||0;if(typeof setTempRet0!=='undefined'){setTempRet0(0)}else if(typeof _setTempRet0!=='undefined'){_setTempRet0(0)}return ptr};}"
     "resolved||=resolveSymbol(prop);"
-    "if(!resolved&&prop==='__cxa_find_matching_catch_2'){resolved=()=>0}"
+    "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
     "if(!resolved){"
     "var __baseProp=String(prop||'');"
     "var __trimmed=__baseProp.replace(/^_+/, '');"
@@ -420,6 +435,7 @@ stub_new = (
     "try{return fn(...invokeArgs.slice(1))}"
     "catch(e){"
     "if(e&&e.name==='ExitStatus'){throw e}"
+    "if(e&&e.name==='RuntimeError'&&typeof ABORT!=='undefined'&&ABORT){ABORT=false}"
     "if(typeof _setThrew==='function'){_setThrew(1,0)}else if(typeof setThrew==='function'){setThrew(1,0)}"
     "return 0"
     "}"
@@ -598,7 +614,7 @@ sync_gdextension_web_entries "${WASM_ARTIFACTS[@]}"
 if [[ "$COPY_GAME_FILES" -eq 1 ]]; then
     if [[ -d "$GAME_FILES_DIR" ]]; then
         mkdir -p "$EXPORT_DIR/main"
-        rsync -a --delete "$GAME_FILES_DIR/" "$EXPORT_DIR/main/"
+        rsync -a --delete --exclude='.*' "$GAME_FILES_DIR/" "$EXPORT_DIR/main/"
         echo "Copied game files: $GAME_FILES_DIR -> $EXPORT_DIR/main"
     else
         echo "WARNING: Game files directory not found: $GAME_FILES_DIR"

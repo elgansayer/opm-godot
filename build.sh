@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa"
 PROJECT_BIN_DIR="$SCRIPT_DIR/project/bin"
-CGAME_DEPLOY_DIR="$HOME/.local/share/openmohaa/main"
+CGAME_DEPLOY_DIR="$SCRIPT_DIR/project/bin"
 
 # Build OpenMoHAA GDExtension
 cd "$OPENMOHAA_DIR"
@@ -29,7 +29,8 @@ scons platform=linux target=template_debug -j"$(nproc)" "$@"
 mkdir -p "$PROJECT_BIN_DIR" "$CGAME_DEPLOY_DIR"
 \cp -f bin/libopenmohaa.so "$PROJECT_BIN_DIR/libopenmohaa.so" || exit 1
 
-# cgame.so is not built by SCons; use the pre-built copy from the old build dir
+# Deploy cgame.so next to libopenmohaa.so (project/bin/) so the GDExtension
+# loader finds it via dladdr without polluting the main/ game directory.
 OLD_CGAME="$SCRIPT_DIR/openmohaa/bin/libcgame.so"
 if [[ -f bin/libcgame.so ]]; then
     \cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so" || exit 1
@@ -37,5 +38,12 @@ elif [[ -f "$OLD_CGAME" ]]; then
     \cp -f "$OLD_CGAME" "$CGAME_DEPLOY_DIR/cgame.so" || exit 1
 else
     echo "WARNING: libcgame.so not found; cgame.so not deployed"
+fi
+
+# Clean up old cgame.so from main/ if it exists (legacy location)
+OLD_MAIN_CGAME="$HOME/.local/share/openmohaa/main/cgame.so"
+if [[ -f "$OLD_MAIN_CGAME" ]]; then
+    rm -f "$OLD_MAIN_CGAME"
+    echo "Removed legacy $OLD_MAIN_CGAME"
 fi
 
