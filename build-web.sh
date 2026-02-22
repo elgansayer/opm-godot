@@ -397,7 +397,12 @@ stub_new = (
     "if(prop==='__cxa_begin_catch'){resolved=(ptr)=>{stubs.__cxaLast=0;return ptr};}"
     "if(prop==='__cxa_end_catch'||prop==='__cxa_free_exception'){resolved=()=>{stubs.__cxaLast=0};}"
     "if(prop==='__cxa_rethrow'){resolved=()=>{var e=new Error('CxxException');e.name='CxxException';e.__cxa_ptr=stubs.__cxaLast||0;throw e};}"
-    "if(/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>{var ptr=stubs.__cxaLast||0;if(typeof setTempRet0!=='undefined'){setTempRet0(0)}else if(typeof _setTempRet0!=='undefined'){_setTempRet0(0)}return ptr};}"
+    # __cxa_find_matching_catch_N: read _cxaLast (set by ___cxa_throw via wasmImports)
+    # stubs.__cxaLast is a fallback for completeness; _cxaLast is the primary source
+    "if(/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>{"
+    "var ptr=(typeof _cxaLast!=='undefined'?_cxaLast:0)||stubs.__cxaLast||0;"
+    "if(typeof setTempRet0!=='undefined'){setTempRet0(0)}else if(typeof _setTempRet0!=='undefined'){_setTempRet0(0)}"
+    "return ptr};}"
     "resolved||=resolveSymbol(prop);"
     "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
     "if(!resolved){"
@@ -435,7 +440,8 @@ stub_new = (
     "try{return fn(...invokeArgs.slice(1))}"
     "catch(e){"
     "if(e&&e.name==='ExitStatus'){throw e}"
-    "if(e&&e.name==='RuntimeError'&&typeof ABORT!=='undefined'&&ABORT){ABORT=false}"
+    "if(e&&e.name==='CxxException'&&e.__cxa_ptr){stubs.__cxaLast=e.__cxa_ptr}"
+    "else if(e&&e.name==='RuntimeError'&&typeof ABORT!=='undefined'&&ABORT){ABORT=false}"
     "if(typeof _setThrew==='function'){_setThrew(1,0)}else if(typeof setThrew==='function'){setThrew(1,0)}"
     "return 0"
     "}"
@@ -530,6 +536,77 @@ if gdext_locate_old in src:
 else:
     print("WARNING: Could not find locateFile gdextension marker; lookup patch skipped")
 
+# Patch C++ exception ABI stubs: replace abort()-based stubs with proper JS
+# implementations so the WASM's try/catch blocks work correctly.
+# wasmImports maps  __cxa_throw -> ___cxa_throw  (2 vs 3 leading underscores).
+# The stubs proxy short-circuits via `if(prop in wasmImports)` before our
+# CxxException intercept could fire, so we must patch the hardcoded functions.
+cxa_patches = [
+    # 1. ___cxa_throw: add _cxaLast state + throw CxxException object
+    (
+        'function ___cxa_throw(){abort()}___cxa_throw.sig="vppp";',
+        'var _cxaLast=0;'
+        'function ___cxa_throw(ptr,type,dtor){'
+          '_cxaLast=ptr;'
+          'var e=new Error("CxxException");e.name="CxxException";e.__cxa_ptr=ptr;'
+          'throw e'
+        '}___cxa_throw.sig="vppp";'
+    ),
+    # 2. ___cxa_rethrow
+    (
+        'function ___cxa_rethrow(){abort()}___cxa_rethrow.sig="v";',
+        'function ___cxa_rethrow(){'
+          'if(_cxaLast){var e=new Error("CxxException");e.name="CxxException";e.__cxa_ptr=_cxaLast;throw e}'
+        '}___cxa_rethrow.sig="v";'
+    ),
+    # 3. _llvm_eh_typeid_for
+    (
+        'function _llvm_eh_typeid_for(){abort()}_llvm_eh_typeid_for.sig="vp";',
+        'function _llvm_eh_typeid_for(type){return type}_llvm_eh_typeid_for.sig="vp";'
+    ),
+    # 4. ___cxa_begin_catch
+    (
+        'function ___cxa_begin_catch(){abort()}___cxa_begin_catch.sig="pp";',
+        'function ___cxa_begin_catch(ptr){return ptr}___cxa_begin_catch.sig="pp";'
+    ),
+    # 5. ___cxa_end_catch
+    (
+        'function ___cxa_end_catch(){abort()}___cxa_end_catch.sig="v";',
+        'function ___cxa_end_catch(){_cxaLast=0}___cxa_end_catch.sig="v";'
+    ),
+    # 6. ___cxa_call_unexpected
+    (
+        'function ___cxa_call_unexpected(){abort()}___cxa_call_unexpected.sig="vp";',
+        'function ___cxa_call_unexpected(ptr){console.warn("cxa_call_unexpected",ptr)}___cxa_call_unexpected.sig="vp";'
+    ),
+    # 7. ___cxa_find_matching_catch (no .sig; immediately followed by ___resumeException)
+    (
+        'function ___cxa_find_matching_catch(){abort()}',
+        'function ___cxa_find_matching_catch(){'
+          'if(typeof setTempRet0!=="undefined")setTempRet0(0);'
+          'return _cxaLast'
+        '}'
+    ),
+    # 8. ___resumeException
+    (
+        'function ___resumeException(){abort()}___resumeException.sig="vp";',
+        'function ___resumeException(ptr){'
+          'if(ptr)_cxaLast=ptr;'
+          'var e=new Error("CxxException");e.name="CxxException";e.__cxa_ptr=_cxaLast;'
+          'throw e'
+        '}___resumeException.sig="vp";'
+    ),
+]
+cxa_patched = 0
+for cxa_old, cxa_new in cxa_patches:
+    if cxa_old in src:
+        src = src.replace(cxa_old, cxa_new, 1)
+        cxa_patched += 1
+if cxa_patched == len(cxa_patches):
+    print(f"Patched mohaa.js C++ exception ABI stubs ({cxa_patched}/{len(cxa_patches)})")
+else:
+    print(f"WARNING: Only {cxa_patched}/{len(cxa_patches)} C++ exception ABI stubs found/patched")
+
 js_path.write_text(src, encoding='utf-8')
 PY
 }
@@ -584,6 +661,188 @@ PY
         rm -f "$sw_file"
         echo "Removed generated service worker: $sw_file"
     fi
+}
+
+patch_web_ws_relay() {
+    # Inject WebSocket relay bridge functions into mohaa.js.
+    # These are called from the GDExtension SIDE_MODULE (net_ws.c)
+    # via the Emscripten runtime stub resolver's globalThis fallback.
+    #
+    # IMPORTANT: The bridge IIFE runs early in mohaa.js before Module is
+    # defined. We register functions on globalThis with the underscore-
+    # prefixed names that the WASM import table uses (C function
+    # opm_ws_open -> import _opm_ws_open). The patched stub resolver
+    # checks globalThis[__name] as a fallback, so it finds them.
+    # Module.HEAPU8 / UTF8ToString are accessed at *call* time (not
+    # registration time) — they are available then because the SIDE_MODULE
+    # is loaded after the main WASM module initialises.
+    local export_js="$EXPORT_JS"
+    if [[ ! -f "$export_js" ]]; then
+        echo "WARNING: Export JS not found for WS relay patch: $export_js"
+        return
+    fi
+
+    python3 - "$export_js" <<'PYWS'
+import sys
+from pathlib import Path
+
+js_path = Path(sys.argv[1])
+src = js_path.read_text(encoding='utf-8', errors='ignore')
+
+# Register on globalThis so the stub resolver's globalThis[__name] fallback
+# finds them. Use underscore-prefixed names (_opm_ws_open) matching the WASM
+# import names. Module is NOT available at injection time, so we look it up
+# at call time via globalThis.Module (set by Emscripten during init).
+ws_bridge_js = r"""
+/* ═══════ OpenMoHAA WebSocket Relay Bridge (injected by build-web.sh) ═══════ */
+(function() {
+    var _opmWsRelay = null;
+    var _opmWsRecvQueue = [];
+    var _opmWsConnected = false;
+
+    /** Helper: get the Emscripten Module at call time (not capture time). */
+    function _getModule() {
+        return (typeof Module !== 'undefined' && Module) || globalThis.Module || null;
+    }
+
+    /**
+     * _opm_ws_open(url_ptr) — Connect to a WebSocket relay server.
+     * @param url_ptr  WASM pointer to a NUL-terminated C string (the relay URL)
+     * @returns 1 on success, 0 on failure
+     */
+    globalThis._opm_ws_open = function(url_ptr) {
+        var url;
+        try {
+            url = UTF8ToString(url_ptr);
+        } catch (e) {
+            console.error('opm_ws_open: UTF8ToString failed', e);
+            return 0;
+        }
+        if (!url) { console.warn('opm_ws_open: empty URL'); return 0; }
+
+        /* Close any existing connection */
+        if (_opmWsRelay) {
+            try { _opmWsRelay.close(); } catch (e) {}
+            _opmWsRelay = null;
+        }
+        _opmWsConnected = false;
+        _opmWsRecvQueue = [];
+
+        try {
+            _opmWsRelay = new WebSocket(url);
+            _opmWsRelay.binaryType = 'arraybuffer';
+
+            _opmWsRelay.onopen = function() {
+                _opmWsConnected = true;
+                console.log('[mohaa-ws] Connected to relay:', url);
+            };
+
+            _opmWsRelay.onclose = function(ev) {
+                _opmWsConnected = false;
+                console.log('[mohaa-ws] Disconnected from relay, code=' + ev.code);
+            };
+
+            _opmWsRelay.onerror = function(ev) {
+                console.error('[mohaa-ws] WebSocket error:', ev);
+            };
+
+            _opmWsRelay.onmessage = function(ev) {
+                if (ev.data instanceof ArrayBuffer && ev.data.byteLength >= 6) {
+                    _opmWsRecvQueue.push(new Uint8Array(ev.data));
+                }
+            };
+
+            return 1;
+        } catch (e) {
+            console.error('[mohaa-ws] Failed to create WebSocket:', e);
+            return 0;
+        }
+    };
+
+    /**
+     * _opm_ws_close() — Close the relay WebSocket connection.
+     */
+    globalThis._opm_ws_close = function() {
+        if (_opmWsRelay) {
+            try { _opmWsRelay.close(1000, 'shutdown'); } catch (e) {}
+            _opmWsRelay = null;
+        }
+        _opmWsConnected = false;
+        _opmWsRecvQueue = [];
+    };
+
+    /**
+     * _opm_ws_send(data_ptr, length) — Send a binary message via the relay.
+     * @param data_ptr  WASM pointer to the data buffer
+     * @param length    Number of bytes to send
+     * @returns 1 on success, 0 on failure
+     */
+    globalThis._opm_ws_send = function(data_ptr, length) {
+        if (!_opmWsRelay || !_opmWsConnected) return 0;
+        if (length <= 0 || length > 65536) return 0;
+        try {
+            var M = _getModule();
+            var heap = M ? M.HEAPU8 : (typeof HEAPU8 !== 'undefined' ? HEAPU8 : null);
+            if (!heap) { console.error('[mohaa-ws] Send: no HEAPU8'); return 0; }
+            var data = heap.slice(data_ptr, data_ptr + length);
+            _opmWsRelay.send(data.buffer);
+            return 1;
+        } catch (e) {
+            console.error('[mohaa-ws] Send failed:', e);
+            return 0;
+        }
+    };
+
+    /**
+     * _opm_ws_recv(data_ptr, maxlen) — Receive the next queued binary message.
+     * @param data_ptr  WASM pointer to a receive buffer
+     * @param maxlen    Maximum bytes to copy
+     * @returns Number of bytes written, or 0 if queue is empty
+     */
+    globalThis._opm_ws_recv = function(data_ptr, maxlen) {
+        if (_opmWsRecvQueue.length === 0) return 0;
+        var pkt = _opmWsRecvQueue.shift();
+        var len = Math.min(pkt.length, maxlen);
+        var M = _getModule();
+        var heap = M ? M.HEAPU8 : (typeof HEAPU8 !== 'undefined' ? HEAPU8 : null);
+        if (!heap) { console.error('[mohaa-ws] Recv: no HEAPU8'); return 0; }
+        heap.set(pkt.subarray(0, len), data_ptr);
+        return len;
+    };
+
+    /**
+     * _opm_ws_status() — Check if the relay connection is active.
+     * @returns 1 if connected, 0 otherwise
+     */
+    globalThis._opm_ws_status = function() {
+        return (_opmWsConnected && _opmWsRelay &&
+                _opmWsRelay.readyState === WebSocket.OPEN) ? 1 : 0;
+    };
+
+    /* Also register without the underscore prefix — the stub resolver tries
+       both _opm_ws_open and opm_ws_open as candidates. */
+    globalThis.opm_ws_open   = globalThis._opm_ws_open;
+    globalThis.opm_ws_close  = globalThis._opm_ws_close;
+    globalThis.opm_ws_send   = globalThis._opm_ws_send;
+    globalThis.opm_ws_recv   = globalThis._opm_ws_recv;
+    globalThis.opm_ws_status = globalThis._opm_ws_status;
+
+    console.log('[mohaa-ws] WebSocket relay bridge registered on globalThis');
+})();
+/* ═══════ End OpenMoHAA WebSocket Relay Bridge ═══════ */
+"""
+
+# Inject the bridge early in the JS file. The exact position doesn't matter
+# since we use globalThis (always available), not Module.
+marker = "var ENVIRONMENT_IS_WEB="
+if marker in src:
+    src = src.replace(marker, ws_bridge_js + marker, 1)
+    print("Patched mohaa.js with WebSocket relay bridge functions (globalThis)")
+else:
+    print("WARNING: Could not find injection marker for WS relay bridge")
+
+js_path.write_text(src, encoding='utf-8')
+PYWS
 }
 
 cd "$OPENMOHAA_DIR"
@@ -658,6 +917,7 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
     patch_web_html_disable_service_worker
+    patch_web_ws_relay
 fi
 
 echo "Web build complete (target=$BUILD_TARGET)."

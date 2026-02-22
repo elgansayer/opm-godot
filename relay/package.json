@@ -1,0 +1,12 @@
+{
+  "name": "mohaa-ws-relay",
+  "version": "1.0.0",
+  "description": "WebSocket-to-UDP relay for MOHAA web clients",
+  "main": "mohaa_relay.js",
+  "scripts": {
+    "start": "node mohaa_relay.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

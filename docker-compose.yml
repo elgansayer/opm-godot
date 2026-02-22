@@ -8,3 +8,11 @@ services:
       - ./exports/web:/usr/share/nginx/html:ro
       - ./docker/web/default.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
+
+  relay:
+    build: ./relay
+    container_name: opm-godot-relay
+    # Host networking so UDP broadcast (LAN server scanning) reaches
+    # the real LAN interface, not just the Docker bridge.
+    network_mode: host
+    restart: unless-stopped

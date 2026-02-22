@@ -10,8 +10,8 @@ var launch_dedicated = false
 var launch_map = ""
 # exec_cfg: exec this config at startup (e.g. "server.cfg" loads its map)
 var exec_cfg = ""
-var loading_screen_force_sent = false
 var last_state_logged = -999
+var web_net_tweaks_applied = false  # DEPRECATED: kept for compat, no longer used
 
 func _ready():
 	print("Main: Script started.")
@@ -81,6 +81,17 @@ func _ready():
 			exec_cfg = "server.cfg"
 		if url_params.has("dedicated") and url_params["dedicated"] == "1":
 			launch_dedicated = true
+		if url_params.has("relay"):
+			# WebSocket relay: store host:port only (no ws:// — engine parser
+			# treats // as comment). C code prepends ws:// at connect time.
+			var relay_val = url_params["relay"].replace("ws://", "").replace("wss://", "")
+			extra_engine_cmds += " +set net_ws_relay " + relay_val
+		else:
+			# Auto-default: relay runs on same host as web server, port 12300
+			var relay_url = _auto_relay_url()
+			if relay_url != "":
+				extra_engine_cmds += " +set net_ws_relay " + relay_url
+				print("Main: Auto-detected relay URL -> ", relay_url)
 
 	if runner:
 		var startup_args = "+set dedicated %d +set developer %d" % [
@@ -88,8 +99,8 @@ func _ready():
 			1 if dev_mode else 0
 		]
 		if OS.has_feature("web"):
-			# Web: emscripten VFS root = game data dir; disable raw UDP
-			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set net_noudp 1 +set r_fullscreen 0"
+			# Web: emscripten VFS root = game data dir; GameSpy off
+			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set r_fullscreen 0 +set ui_gamespy 0 +set sv_gamespy 0"
 
 		# Startup command: exec config takes priority over direct +map
 		if exec_cfg != "":
@@ -145,6 +156,20 @@ func _parse_url_params() -> Dictionary:
 			result[kv[0]] = "1"
 	return result
 
+# Auto-detect relay host:port from the current page hostname (web only).
+# Returns host:port only (no ws:// prefix — the engine command parser treats
+# // as a comment delimiter). C code prepends ws:// at connect time.
+func _auto_relay_url() -> String:
+	if not Engine.has_singleton("JavaScriptBridge"):
+		return ""
+	var js = Engine.get_singleton("JavaScriptBridge")
+	if not js:
+		return ""
+	var hostname = js.eval("window.location.hostname")
+	if typeof(hostname) != TYPE_STRING or hostname == "":
+		return ""
+	return hostname + ":12300"
+
 # -- Signal handlers --
 
 func _on_engine_error(message: String):
@@ -187,9 +212,8 @@ func _unhandled_key_input(event: InputEvent):
 	elif event.keycode == KEY_F10:
 		# F10 -- exec server.cfg (listen server: host + play on dm/mohdm1)
 		if runner and runner.is_engine_initialized():
-			loading_screen_force_sent = false
-			runner.execute_command("exec server.cfg")
-			print("Main: Executed -> exec server.cfg")
+			runner.execute_command("exec server.cfg; set ui_gamespy 0; set sv_gamespy 0")
+			print("Main: Executed -> exec server.cfg; set ui_gamespy 0; set sv_gamespy 0")
 	elif event.keycode == KEY_F11:
 		# F11 -- connect to localhost as pure client (join local server)
 		if runner and runner.is_engine_initialized():
@@ -197,6 +221,12 @@ func _unhandled_key_input(event: InputEvent):
 			print("Main: Executed -> connect localhost")
 
 func _process(delta):
+	# One-time GameSpy re-disable for web (in case engine reset the cvars)
+	if OS.has_feature("web") and runner and runner.is_engine_initialized() and not web_net_tweaks_applied:
+		web_net_tweaks_applied = true
+		runner.execute_command("set ui_gamespy 0; set sv_gamespy 0")
+		print("Main: Web tweaks applied -> ui_gamespy=0 sv_gamespy=0")
+
 	if screenshot_pending:
 		screenshot_timer += delta
 		if screenshot_timer >= SCREENSHOT_DELAY:
@@ -209,13 +239,6 @@ func _process(delta):
 			last_state_logged = server_state
 			print("Main: server_state -> ", runner.get_server_state_string(),
 				" (", server_state, ")")
-
-		# Web: force finishloadingscreen when stuck in SS_LOADING2
-		if OS.has_feature("web") and not loading_screen_force_sent:
-			if server_state == 2:
-				runner.execute_command("finishloadingscreen")
-				loading_screen_force_sent = true
-				print("Main: Executed -> finishloadingscreen (web loading2 recovery)")
 
 		status_log_timer += delta
 		if status_log_timer >= 5.0:
