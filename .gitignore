@@ -48,3 +48,4 @@ Thumbs.db
 project/gdb.txt
 node_modules/
 tmp/
+openmohaa/.cmake-native/
