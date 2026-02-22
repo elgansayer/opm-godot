@@ -769,6 +769,7 @@ static void parse_stage(char **text, GodotShaderProps *props, int stage_index,
                 float freq = (float)atof(token);
                 if (first_stage) {
                     props->has_tcmod_stretch = true;
+                    props->tcmod_stretch_func  = parse_wave_func(func_tok);
                     props->tcmod_stretch_base  = base;
                     props->tcmod_stretch_amp   = amp;
                     props->tcmod_stretch_phase = phase;

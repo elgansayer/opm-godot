@@ -3975,13 +3975,14 @@ void MoHAARunner::update_shader_animations(double delta) {
             Ref<StandardMaterial3D> smat = base;
             if (!smat.is_valid()) continue;
 
-            // Apply UV tcMod animation: scroll + turb
+            // Apply UV tcMod animation: scroll + turb + rotate + stretch
             if (sp->has_tcmod) {
-                float offS = 0.0f;
-                float offT = 0.0f;
-                /* Phase 144: tcMod offset — static UV shift */
-                offS += sp->tcmod_offset_s;
-                offT += sp->tcmod_offset_t;
+                float offS = sp->tcmod_offset_s;
+                float offT = sp->tcmod_offset_t;
+                float rot  = 0.0f;
+                float scale_s = sp->tcmod_scale_s;
+                float scale_t = sp->tcmod_scale_t;
+
                 if (sp->tcmod_scroll_s != 0.0f || sp->tcmod_scroll_t != 0.0f) {
                     offS += fmodf((float)(sp->tcmod_scroll_s * shader_anim_time), 1.0f);
                     offT += fmodf((float)(sp->tcmod_scroll_t * shader_anim_time), 1.0f);
@@ -3991,11 +3992,25 @@ void MoHAARunner::update_shader_animations(double delta) {
                     offS += sinf(t) * sp->tcmod_turb_amp;
                     offT += cosf(t) * sp->tcmod_turb_amp;
                 }
-                smat->set_uv1_offset(Vector3(offS, offT, 0.0f));
-
                 if (sp->tcmod_rotate != 0.0f) {
-                    smat->set_uv1_offset(Vector3(offS, offT, Math::deg_to_rad((float)(sp->tcmod_rotate * shader_anim_time))));
+                    rot = Math::deg_to_rad((float)(sp->tcmod_rotate * shader_anim_time));
                 }
+
+                // Phase 66: tcMod stretch — pulsing UV scale
+                if (sp->has_tcmod_stretch) {
+                    float s = eval_wave(sp->tcmod_stretch_func, sp->tcmod_stretch_base, sp->tcmod_stretch_amp,
+                                        sp->tcmod_stretch_phase, sp->tcmod_stretch_freq, shader_anim_time);
+                    scale_s *= s;
+                    scale_t *= s;
+                    // Center the stretch effect around (0.5, 0.5)
+                    // Offset added = 0.5 * (1 - s)
+                    float center_off = 0.5f * (1.0f - s);
+                    offS += center_off;
+                    offT += center_off;
+                }
+
+                smat->set_uv1_scale(Vector3(scale_s, scale_t, 1.0f));
+                smat->set_uv1_offset(Vector3(offS, offT, rot));
             }
 
             // Phase 55: animMap frame swap — uses cached shader_handle (O(1))

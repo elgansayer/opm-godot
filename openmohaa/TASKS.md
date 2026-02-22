@@ -57,3 +57,10 @@ The OpenMoHAA script engine (`code/script/` — ScriptVM, ScriptCompiler, Script
 - [ ] **Task 4.1:** Bridge the VFS so Godot can also read assets via the engine's `FS_*` functions (expose file-read helpers to GDScript). Ensure `fs_basepath` correctly resolves for all three game directories. Do not bypass or re-implement the VFS.
 - [ ] **Task 4.2:** Implement a BSP parser that generates Godot `ArrayMesh` data from map files at runtime, reading BSP data through the engine VFS.
 - [ ] **Task 4.3:** Convert Quake 3 / MOHAA textures and shader definitions to Godot `ShaderMaterial` / `StandardMaterial3D` at runtime.
+## Phase 4.3: Shader Features - tcMod stretch
+- [x] **Task 4.3.1:** Implement `tcMod stretch` in `MoHAARunner` and shader parser.
+  - Added `tcmod_stretch_func` to `GodotShaderProps` in `godot_shader_props.h`.
+  - Updated `godot_shader_accessors.c` (renderergl1) to populate `tcmod_stretch_func` from real shader data.
+  - Updated `MoHAARunner::update_shader_animations` to apply wave-based texture scaling (`uv1_scale`) and centering offset.
+  - Refactored `update_shader_animations` to calculate final UV offset/scale statelessly each frame, preventing offset accumulation drift.
+  - Updated dead code in `godot_shader_props.cpp` for consistency.
