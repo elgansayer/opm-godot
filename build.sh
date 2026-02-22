@@ -40,7 +40,7 @@ else
 fi
 
 # Deploy server.cfg to engine config path (fs_homepath/main/) so +exec server.cfg works
-SERVER_CFG_SRC="$SCRIPT_DIR/exports/web/main/server.cfg"
+SERVER_CFG_SRC="$SCRIPT_DIR/config/server.cfg"
 SERVER_CFG_DST="$HOME/.config/openmohaa/main/server.cfg"
 if [[ -f "$SERVER_CFG_SRC" ]]; then
     mkdir -p "$(dirname "$SERVER_CFG_DST")"
