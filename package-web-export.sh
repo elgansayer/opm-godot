@@ -42,13 +42,13 @@ for f in mohaa.html mohaa.js mohaa.wasm mohaa.side.wasm mohaa.pck \
     fi
 done
 
-# Runtime files needed from main/ (cgame + cfg)
+# Runtime files needed from main/ (all .so runtime modules + cfg)
 echo "Copying runtime files (main/)..."
 mkdir -p "$OUT/web/main"
-# cgame.so is needed at runtime
-if [[ -f "$SCRIPT_DIR/exports/web/main/cgame.so" ]]; then
-    cp -f "$SCRIPT_DIR/exports/web/main/cgame.so" "$OUT/web/main/"
-fi
+# Copy all runtime modules produced by the web export (eg cgame.so, game.so, renderer_opengl1.so)
+for f in "$SCRIPT_DIR/exports/web/main/"*.so; do
+  [[ -f "$f" ]] && cp -f "$f" "$OUT/web/main/"
+done
 # Server configs
 for f in "$SCRIPT_DIR/exports/web/main/"*.cfg; do
     [[ -f "$f" ]] && cp -f "$f" "$OUT/web/main/"
@@ -192,7 +192,7 @@ The game can load:
     ├── mohaa.js             # Emscripten runtime
     ├── *.wasm               # Engine binaries
     ├── mohaa.pck            # Godot project package
-  └── main/                # Runtime files (cgame.so, cfg)
+    └── main/                # Runtime files (eg cgame.so, game.so, renderer_opengl1.so, cfg)
 
 ~/mohaa-web-base/            # External game assets (not in git)
   ├── main/                # AA pk3 files
@@ -210,7 +210,7 @@ The game can load:
 1. Add this repo as a Git stack in Portainer
 2. Set the compose path to `docker-compose.yml`
 3. Ensure `~/mohaa-web-base` exists on host with your pk3 files
-3. Deploy — both services start automatically
+4. Deploy — both services start automatically
 README
 
 # --- Summary ---
