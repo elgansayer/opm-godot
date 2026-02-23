@@ -84,8 +84,9 @@ func _ready():
 		if url_params.has("connect"):
 			extra_engine_cmds += " +connect " + url_params["connect"]
 		if url_params.has("relay"):
-			# WebSocket relay: store host:port only (no ws:// — engine parser
-			# treats // as comment). C code prepends ws:// at connect time.
+			# WebSocket relay: strip any scheme prefix before storing.
+			# NET_WS_BuildURL() re-applies the correct scheme based on
+			# whether the value has a path (wss://) or is host:port (ws://).
 			var relay_val = url_params["relay"].replace("ws://", "").replace("wss://", "")
 			extra_engine_cmds += " +set net_ws_relay " + relay_val
 		else:
@@ -158,9 +159,12 @@ func _parse_url_params() -> Dictionary:
 			result[kv[0]] = "1"
 	return result
 
-# Auto-detect relay host:port from the current page hostname (web only).
-# Returns host:port only (no ws:// prefix — the engine command parser treats
-# // as a comment delimiter). C code prepends ws:// at connect time.
+# Auto-detect relay URL from the current page hostname (web only).
+# Returns the value stored in net_ws_relay — no scheme prefix, because the
+# Quake command parser treats // as a comment delimiter.
+# NET_WS_BuildURL() in net_ws.c applies the correct scheme:
+#   - value contains '/'  →  wss://value   (HTTPS reverse-proxy path)
+#   - value is host:port  →  ws://value    (plain LAN/direct relay)
 func _auto_relay_url() -> String:
 	if not Engine.has_singleton("JavaScriptBridge"):
 		return ""
@@ -170,6 +174,11 @@ func _auto_relay_url() -> String:
 	var hostname = js.eval("window.location.hostname")
 	if typeof(hostname) != TYPE_STRING or hostname == "":
 		return ""
+	# When served over HTTPS the relay is behind the Apache proxy at /relay.
+	# When served over plain HTTP (local dev) fall back to direct port 12300.
+	var protocol = js.eval("window.location.protocol")
+	if typeof(protocol) == TYPE_STRING and protocol == "https:":
+		return hostname + "/relay"
 	return hostname + ":12300"
 
 # -- Signal handlers --
