@@ -3,13 +3,28 @@
 # suitable for Portainer / docker compose.
 #
 # Usage:
-#   ./package-web-export.sh [output-dir]
+#   ./package-web-export.sh [--push] [output-dir]
+#
+#   --push   After packaging, commit and push the output repo to GitHub.
+#            GitHub Actions will then build & push the Docker image to GHCR.
+#            Portainer pulls the pre-built image — no local build needed.
+#
 #   Default output: ../opm-godot-web-export
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_OUT="$(dirname "$SCRIPT_DIR")/opm-godot-web-export"
-OUT="${1:-$DEFAULT_OUT}"
+PUSH=0
+
+# Parse flags before the optional positional output-dir argument.
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        --push) PUSH=1 ;;
+        *)      args+=("$arg") ;;
+    esac
+done
+OUT="${args[0]:-$DEFAULT_OUT}"
 
 echo "=== Packaging opm-godot web export ==="
 echo "Source: $SCRIPT_DIR"
@@ -27,6 +42,10 @@ fi
 
 # Create output directory
 mkdir -p "$OUT"
+
+# Clean up stale generated directories so old files never linger in the repo.
+# The .git dir is preserved; nothing else in docker/ is hand-authored.
+rm -rf "$OUT/docker"
 
 # --- 1. Web export files ---
 echo "Copying web export files..."
@@ -67,18 +86,41 @@ cp -f "$SCRIPT_DIR/relay/.dockerignore" "$OUT/relay/"
 echo "Writing nginx Docker files..."
 mkdir -p "$OUT/docker/web"
 
-# Dockerfile — config is COPY-ed in (not mounted), avoids Portainer OCI bind-mount errors
+# Dockerfile — uses repo root as build context so both nginx.conf and web/ are
+# baked into the image.  Portainer CE cannot reliably resolve relative bind-mount
+# paths from its internal compose working directory, so we avoid bind mounts for
+# static files entirely.  Only the pk3 asset volume (ASSET_PATH) remains as a
+# host mount because those files are not committed to git.
 cat > "$OUT/docker/web/Dockerfile" << 'WEBDOCKERFILE'
 FROM nginx:alpine
-# nginx.conf is baked into the image — no volume mount needed for config
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Bake nginx config into the image
+COPY docker/web/nginx.conf /etc/nginx/conf.d/default.conf
+# Bake all web export files (HTML/JS/WASM/PCK/runtime .so) into the image.
+# This avoids bind-mount path issues with Portainer CE Git stacks.
+COPY web /srv/web
 WEBDOCKERFILE
 
 # nginx.conf — serves web/ files + proxies /main/ /mainta/ /maintt/ to asset volume
 cat > "$OUT/docker/web/nginx.conf" << 'NGINXCONF'
+# Correct MIME type for WebAssembly (not in nginx:alpine defaults)
+types {
+    application/wasm          wasm;
+    application/octet-stream  pck so;
+}
+
 server {
     listen 80;
     server_name _;
+
+    # Efficient large-file delivery (mohaa.side.wasm is ~39 MB)
+    sendfile    on;
+    tcp_nopush  on;
+    tcp_nodelay on;
+
+    # Never gzip already-binary/compressed files.
+    # Critical: prevents Apache mod_deflate from seeing a pre-compressed body
+    # while keeping the original Content-Length → ERR_CONTENT_LENGTH_MISMATCH.
+    gzip off;
 
     # Required for SharedArrayBuffer (Emscripten threading + WASM)
     add_header Cross-Origin-Opener-Policy  "same-origin"   always;
@@ -121,22 +163,24 @@ cat > "$OUT/docker-compose.yml" << 'COMPOSE'
 #                 Must contain main/, mainta/, maintt/ sub-directories with pk3s.
 #                 Example:  ASSET_PATH=/home/elgan/mohaa-web-base
 #
-# The web service serves game files on port 8086 (mapped to your Apache VHost).
+# The web service serves the game on port 8086 (Apache proxies :80 → :8086).
 # The relay service bridges browser WebSockets to UDP game servers (port 12300).
+#
+# The web image is built and pushed to GHCR by GitHub Actions on every push to
+# main.  Portainer just pulls the pre-built image — no local build required.
 # =============================================================================
 
 services:
   web:
-    build: ./docker/web
+    image: ghcr.io/mohcentral/opm-godot-web-export:latest
     container_name: opm-godot-web
     ports:
       # Apache VHost for game.moh-central.net (port 80) reverse-proxies to :8086.
       # Docker binds host port 8086 → container port 80.
       - "8086:80"
     volumes:
-      # Static game files (HTML/JS/WASM/runtime .so) from this repo
-      - ./web:/srv/web:ro
-      # Game asset pk3 archives from the host — set ASSET_PATH in Portainer env vars
+      # Game asset pk3 archives from the host — set ASSET_PATH in Portainer env vars.
+      # Static web files (HTML/JS/WASM) are baked into the GHCR image, not mounted.
       - ${ASSET_PATH:-/opt/mohaa-assets}:/srv/assets:ro
     restart: unless-stopped
 
@@ -252,9 +296,26 @@ echo ""
 echo "Contents:"
 du -sh "$OUT"/*
 echo ""
-echo "Next steps:"
-echo "  cd $OUT"
-echo "  # Copy pk3 assets to server, then set ASSET_PATH in Portainer env vars"
-echo "  git add -A && git commit -m 'Update web export'"
-echo "  git push"
-echo "  # In Portainer: pull latest → redeploy stack"
+
+if [[ "$PUSH" -eq 1 ]]; then
+    echo "=== Pushing to GitHub ==="
+    cd "$OUT"
+    git add -A
+    if git diff --cached --quiet; then
+        echo "Nothing changed — skipping commit."
+    else
+        TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        git commit -m "chore: update web export ${TIMESTAMP}"
+        git push
+        echo "Pushed. GitHub Actions will build and push the Docker image to GHCR."
+        echo "Once the workflow completes (~2 min), redeploy in Portainer."
+    fi
+else
+    echo "Next steps:"
+    echo "  cd $OUT"
+    echo "  git add -A && git commit -m 'Update web export' && git push"
+    echo "  # GitHub Actions builds + pushes ghcr.io/mohcentral/opm-godot-web-export:latest"
+    echo "  # Then in Portainer: pull latest image → redeploy stack"
+    echo ""
+    echo "  Or run:  ./package-web-export.sh --push"
+fi
