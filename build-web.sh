@@ -24,6 +24,9 @@ BUILD_TARGET="template_debug"
 CHECK_ONLY=0
 EXPORT_AFTER_BUILD=1
 COPY_GAME_FILES=1
+PATCH_ONLY=0
+SERVE_ONLY=0
+ASSET_PATH="${ASSET_PATH:-}"
 EXTRA_SCONS_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +46,25 @@ while [[ $# -gt 0 ]]; do
         --no-export)
             EXPORT_AFTER_BUILD=0
             shift
+            ;;
+        --patch-only)
+            PATCH_ONLY=1
+            EXPORT_AFTER_BUILD=0
+            COPY_GAME_FILES=0
+            shift
+            ;;
+        --serve)
+            # (Re-)deploy docker compose stack and exit; no build.
+            SERVE_ONLY=1
+            shift
+            ;;
+        --asset-path)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --asset-path requires a path" >&2
+                exit 1
+            fi
+            ASSET_PATH="$2"
+            shift 2
             ;;
         --no-game-files)
             COPY_GAME_FILES=0
@@ -72,10 +94,30 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+serve_docker() {
+    local asset_path="${ASSET_PATH:-}"
+    if [[ -z "$asset_path" ]]; then
+        echo "ERROR: ASSET_PATH is not set. Pass --asset-path /path/to/game/files or export ASSET_PATH." >&2
+        exit 1
+    fi
+    echo "Deploying docker compose stack (asset path: $asset_path)..."
+    cd "$SCRIPT_DIR"
+    # Force-remove any lingering containers by name to avoid the 'already in use' conflict,
+    # then bring the stack up with --force-recreate so existing containers are replaced atomically.
+    docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
+    ASSET_PATH="$asset_path" docker compose up -d --build --force-recreate
+    echo "Stack is up. Web: http://localhost:8086"
+}
+
 EMSDK_ENV_SH="$EMSDK_DIR/emsdk_env.sh"
-if [[ ! -f "$EMSDK_ENV_SH" ]]; then
+if [[ ! -f "$EMSDK_ENV_SH" && "$SERVE_ONLY" -eq 0 && "$PATCH_ONLY" -eq 0 ]]; then
     echo "ERROR: Emscripten SDK env script not found at: $EMSDK_ENV_SH" >&2
     exit 1
+fi
+
+if [[ "$SERVE_ONLY" -eq 1 && "$PATCH_ONLY" -eq 0 ]]; then
+    serve_docker
+    exit 0
 fi
 
 set +u
@@ -247,40 +289,25 @@ extra_files_js = ','.join(
     f"['main/{_js_quote(rel)}','/main/{_js_quote(rel)}']" for rel in extra_preload_entries
 )
 
-old = "loadDylibs();updateMemoryViews();return wasmExports"
-new = (
-    "if(wasmMemory&&wasmMemory.buffer&&wasmMemory.buffer.byteLength<4096*65536){"
-    "try{var __godot_required_pages=(4096*65536-wasmMemory.buffer.byteLength+65535)>>16;"
-    "if(__godot_required_pages>0){wasmMemory.grow(__godot_required_pages);updateMemoryViews()}}"
-    "catch(e){console.warn('OpenMoHAA: wasm memory grow before dylib load failed',e)}}"
-    "loadDylibs();updateMemoryViews();return wasmExports"
+# Grow wasm memory before loadDylibs so the GDExtension side module (which
+# declares initial=1628 pages) can be instantiated.  Use >>> (unsigned right
+# shift) to avoid signed-int overflow at 2GB.  Target 2048 pages (128 MB).
+mem_old = "LDSO.init();loadDylibs();"
+mem_new = (
+    "LDSO.init();"
+    "var __wm_pages=(wasmMemory.buffer.byteLength>>>16);"
+    "if(__wm_pages<2048){"
+    "try{wasmMemory.grow(2048-__wm_pages);updateMemoryViews()}"
+    "catch(e){console.warn('OpenMoHAA: memory pre-grow failed',e)}}"
+    "loadDylibs();"
 )
-
-old_threads = (
-    "if(metadata.neededDynlibs){dynamicLibraries=metadata.neededDynlibs.concat(dynamicLibraries)}"
-    "registerTLSInit"
-)
-new_threads = (
-    "if(metadata.neededDynlibs){dynamicLibraries=metadata.neededDynlibs.concat(dynamicLibraries)}"
-    "if(wasmMemory&&wasmMemory.buffer&&wasmMemory.buffer.byteLength<4096*65536){"
-    "try{var __godot_required_pages=(4096*65536-wasmMemory.buffer.byteLength+65535)>>16;"
-    "if(__godot_required_pages>0){wasmMemory.grow(__godot_required_pages);updateMemoryViews()}}"
-    "catch(e){console.warn('OpenMoHAA: wasm memory grow before dylib load failed',e)}}"
-    "registerTLSInit"
-)
-
-patched = False
-if old in src:
-    src = src.replace(old, new, 1)
-    patched = True
-elif old_threads in src:
-    src = src.replace(old_threads, new_threads, 1)
-    patched = True
-
-if not patched:
-    print("WARNING: Could not find wasm dylib load marker in mohaa.js; memory patch skipped")
+if mem_old in src:
+    src = src.replace(mem_old, mem_new, 1)
+    print("Patched mohaa.js: memory pre-grow before loadDylibs (2048 pages)")
+elif "__wm_pages" in src:
+    print("Memory pre-grow already patched (idempotent)")
 else:
-    print("Patched mohaa.js runtime memory growth for GDExtension load")
+    print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow skipped")
 
 preload_old = "var moduleRtn;var Module=moduleArg;var ENVIRONMENT_IS_WEB="
 preload_new = (
@@ -288,74 +315,109 @@ preload_new = (
     "Module['preRun']=Module['preRun']||[];"
     "Module['preRun'].push(()=>{"
     "if(typeof FS==='undefined'||typeof fetch==='undefined'||typeof addRunDependency!=='function'||typeof removeRunDependency!=='function'){return;}"
-    "try{FS.mkdir('/main')}catch(e){}"
-    "var __requiredFiles=["
-    "['Pak0.pk3','pak0.pk3'],"
-    "['Pak1.pk3','pak1.pk3'],"
-    "['Pak2.pk3','pak2.pk3'],"
-    "['Pak3.pk3','pak3.pk3'],"
-    "['Pak4.pk3','pak4.pk3'],"
-    "['Pak5.pk3','pak5.pk3'],"
-    "['Pak6.pk3','pak6.pk3'],"
-    "['openmohaa.pk3'],"
-    "['cgame.so']"
-    "];"
-    f"var __extraFiles=[{extra_files_js}];"
-    "var __dep='openmohaa-pk3-preload';"
-    "var __extraLoaded=0;"
-    "addRunDependency(__dep);"
-    "var __remaining=__requiredFiles.length+__extraFiles.length;"
-    "var __finishOne=()=>{__remaining--;if(__remaining<=0){removeRunDependency(__dep)}};"
-    "var __ensureDir=(path)=>{"
-    "if(!path||path==='/'||path===''){return}"
-    "if(typeof FS.mkdirTree==='function'){try{FS.mkdirTree(path)}catch(e){}return}"
-    "var parts=path.split('/').filter(Boolean);"
-    "var cur='';"
-    "for(var i=0;i<parts.length;i++){cur+='/'+parts[i];try{FS.mkdir(cur)}catch(e){}}"
-    "};"
-    "var __tryNames=(names,done)=>{"
-    "if(!names.length){done(false);return;}"
-    "var name=names[0];"
-    "fetch('main/'+name).then((res)=>{if(!res.ok){throw new Error('HTTP '+res.status)}return res.arrayBuffer()})"
-    ".then((buf)=>{FS.writeFile('/main/'+name,new Uint8Array(buf),{canRead:true,canWrite:false});done(true,name)})"
-    ".catch(()=>{__tryNames(names.slice(1),done)});"
-    "};"
-    "__requiredFiles.forEach((candidates)=>{"
-    "__tryNames(candidates,(ok,name)=>{"
-    "if(!ok){console.warn('OpenMoHAA preload missing',candidates[0])}"
-    "else{console.log('OpenMoHAA preloaded',name)}"
-    "__finishOne();"
-    "});"
-    "});"
-    "var __extraQueue=__extraFiles.slice();"
-    "var __extraWorkers=8;"
-    "for(var __worker=0;__worker<__extraWorkers;__worker++){"
-    "(function __pumpExtra(){"
-    "var entry=__extraQueue.shift();"
-    "if(!entry){return}"
-    "var srcPath=entry[0];"
-    "var dstPath=entry[1];"
-    "fetch(srcPath).then((res)=>{if(!res.ok){throw new Error('HTTP '+res.status)}return res.arrayBuffer()})"
-    ".then((buf)=>{"
-    "var cut=dstPath.lastIndexOf('/');"
-    "if(cut>0){__ensureDir(dstPath.slice(0,cut))}"
-    "FS.writeFile(dstPath,new Uint8Array(buf),{canRead:true,canWrite:false});"
-    "__extraLoaded++;"
-    "if(__extraLoaded<=5){console.log('OpenMoHAA preloaded loose',srcPath)}"
-    "})"
-    ".catch(()=>{})"
-    ".finally(()=>{__finishOne();__pumpExtra()});"
-    "})();"
-    "}"
+    "var __dep='openmohaa-vfs-preload'; addRunDependency(__dep);"
+    "(async()=>{"
+    "  var cfg=(typeof OPM_CONFIG!=='undefined'?OPM_CONFIG:{}),cdn=cfg['CDN_URL']||'';"
+    "  if(cdn&&!cdn.endsWith('/'))cdn+='/';"
+    "  var cache=null; try{cache=await caches.open('opm-assets-v1')}catch(e){console.warn('[OPM] Cache API unavailable',e)}"
+    # --- helper: ensure MEMFS directory exists ---
+    "  var __mkdirs=(path)=>{"
+    "    var p='',ps=path.split('/').filter(Boolean);"
+    "    for(var i=0;i<ps.length;i++){p+='/'+ps[i];try{FS.mkdir(p)}catch(e){}}"
+    "  };"
+    # --- helper: fetch directory listing as JSON array ---
+    "  var __listDir=async(relDir)=>{"
+    "    try{"
+    "      var r=await fetch(cdn+relDir,{cache:'no-cache',headers:{'Accept':'application/json'}});"
+    "      if(!r.ok)return[];"
+    "      var j=await r.json();"
+    "      if(Array.isArray(j)&&j.length&&typeof j[0]==='object')return j;"
+    "      return[];"
+    "    }catch(e){return[]}"
+    "  };"
+    # --- helper: fetch a single file, return {dst, data} or null ---
+    "  var __fetchOne=async(rel)=>{"
+    "    var src=cdn+rel,dst='/'+rel;"
+    "    try{"
+    "      var res=null; if(cache)res=await cache.match(src);"
+    "      if(!res){"
+    "        res=await fetch(src); if(!res.ok)return null;"
+    "        if(cache)try{cache.put(src,res.clone())}catch(e){}"
+    "      }"
+    "      return{dst:dst,data:new Uint8Array(await res.arrayBuffer())};"
+    "    }catch(e){return null}"
+    "  };"
+    # --- bounded concurrency pool ---
+    "  var __sem=0,__maxSem=30,__semQ=[];"
+    "  var __acquire=()=>__sem<__maxSem?(++__sem,Promise.resolve()):new Promise(r=>{__semQ.push(r)});"
+    "  var __release=()=>{__sem--;if(__semQ.length){__sem++;(__semQ.shift())()}};"
+    # --- recursive walk: discover + download simultaneously ---
+    "  var total=0,loaded=0,failed=0;"
+    "  var __walk=async(relDir)=>{"
+    "    var entries=await __listDir(relDir);"
+    "    var promises=[];"
+    "    for(var i=0;i<entries.length;i++){"
+    "      var e=entries[i],name=e.name;"
+    "      if(name.startsWith('.'))continue;"
+    # skip native binaries (Linux .so, Windows .dll, macOS .dylib) — useless on web
+    "      var ln=name.toLowerCase();"
+    "      if(ln.endsWith('.so')||ln.endsWith('.dll')||ln.endsWith('.dylib'))continue;"
+    "      var rel=relDir+name;"
+    "      if(e.type==='directory'){"
+    "        __mkdirs('/'+rel);"
+    "        promises.push(__walk(rel+'/'));"
+    "      }else{"
+    "        total++;"
+    "        promises.push((async(r)=>{"
+    "          await __acquire();"
+    "          try{"
+    "            var result=await __fetchOne(r);"
+    "            if(result){"
+    "              var cut=result.dst.lastIndexOf('/');"
+    "              if(cut>0)__mkdirs(result.dst.slice(0,cut));"
+    "              FS.writeFile(result.dst,result.data,{canRead:true,canWrite:false});"
+    "              loaded++;"
+    "            }else{failed++}"
+    "          }catch(e){failed++}"
+    "          finally{__release()}"
+    "          if((loaded+failed)%200===0||loaded+failed===total)"
+    "            console.log('[OPM] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
+    "        })(rel));"
+    "      }"
+    "    }"
+    "    await Promise.all(promises);"
+    "  };"
+    # --- walk main/ recursively ---
+    "  __mkdirs('/main');"
+    "  console.log('[OPM] Scanning and downloading /main/ ...');"
+    "  await __walk('main/');"
+    "  console.log('[OPM] VFS preload complete: '+loaded+' files downloaded, '+failed+' failed');"
+    "})().catch(e=>console.error('[OPM] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
     "});"
     "var ENVIRONMENT_IS_WEB="
 )
 
 if preload_old in src:
     src = src.replace(preload_old, preload_new, 1)
-    print("Patched mohaa.js async preRun pk3 preload")
+    print("Patched mohaa.js async preRun VFS preload (fresh)")
+elif "openmohaa-pk3-preload" in src or "openmohaa-vfs-preload" in src:
+    # Already patched with old or current preloader — strip and re-inject
+    import re
+    # The preloader block starts with Module['preRun'] and ends just before var ENVIRONMENT_IS_WEB=
+    pat = re.compile(
+        r"Module\['preRun'\]=Module\['preRun'\]\|\|\[\];.*?"
+        r"var ENVIRONMENT_IS_WEB=",
+        re.DOTALL
+    )
+    m = pat.search(src)
+    if m:
+        # Replace old preloader text with just the marker (the new preload_new ends with it)
+        src = src[:m.start()] + preload_new.split("var moduleRtn;var Module=moduleArg;", 1)[-1] + src[m.end():]
+        print("Patched mohaa.js async preRun VFS preload (replaced old preloader)")
+    else:
+        print("WARNING: Found preloader dep ID but could not locate preloader block boundary")
 else:
-    print("WARNING: Could not find Module preRun injection marker in mohaa.js; pk3 preload patch skipped")
+    print("WARNING: Could not find Module preRun injection marker in mohaa.js; preload patch skipped")
 
 if extra_preload_entries:
     print(f"Prepared full main preload entries: {len(extra_preload_entries)}")
@@ -484,9 +546,11 @@ else:
 # PATH.normalize("./main/cgame.so") == "main/cgame.so" (strips ./ prefix, no leading slash).
 # loadDynamicLibrary stores the key verbatim, so we must register with "main/cgame.so" (no
 # leading slash) to match the normalized path that dlopenInternal looks up.
-dynlib_old = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.gdextensionLibs),"
-dynlib_new = "'dynamicLibraries': [`${loadPath}.side.wasm`, 'main/cgame.so'].concat(this.gdextensionLibs),"
-if dynlib_old in src:
+dynlib_old = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs),"
+dynlib_new = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs).concat(['main/cgame.so']),"
+if dynlib_new in src:
+    print("dynamicLibraries already patched (idempotent)")
+elif dynlib_old in src:
     src = src.replace(dynlib_old, dynlib_new, 1)
     print("Patched mohaa.js dynamicLibraries to pre-register cgame.so")
 else:
@@ -966,15 +1030,17 @@ def strip_godot_headers(txt):
     txt = re.sub(r'//.*godot.*\n', '\n', txt, flags=re.IGNORECASE)
     return txt
 
-# ── 3. Silence console output in mohaa.js ──
+# ── 3. Silence noisy console output in mohaa.js ──
 def silence_console(txt):
     if txt is None:
         return None
-    # Redirect console.log/warn/info to no-ops at the very start.
-    # Keep console.error for real errors.
+    marker = '/*opm-console-silence*/'
+    # Strip any previously-prepended silencers (idempotent)
+    txt = re.sub(r'(?:/\*opm-console-silence\*/\s*)?\(function\(\)\{var _n=function\(\)\{\};\s*console\.log=_n;\s*console\.info=_n;\s*console\.warn=_n;\s*console\.debug=_n;\}\)\(\);\n?', '', txt)
+    # Redirect console.log/info/debug to no-ops.  Keep warn and error for debugging.
     silencer = (
-        '(function(){var _n=function(){}; '
-        'console.log=_n; console.info=_n; console.warn=_n; '
+        marker + '(function(){var _n=function(){}; '
+        'console.log=_n; console.info=_n; '
         'console.debug=_n;})();\n'
     )
     txt = silencer + txt
@@ -1039,6 +1105,20 @@ PYOBF
 }
 
 cd "$OPENMOHAA_DIR"
+
+if [[ "$PATCH_ONLY" -eq 1 ]]; then
+    echo "Patch-only mode: re-applying JS/HTML patches to existing export..."
+    MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
+    patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
+    patch_web_html_disable_service_worker
+    patch_web_ws_relay
+    obfuscate_godot_fingerprints
+    echo "Patch-only complete."
+    if [[ "$SERVE_ONLY" -eq 1 ]]; then
+        serve_docker
+    fi
+    exit 0
+fi
 
 PARSER_DIR="code/parser/generated"
 if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then

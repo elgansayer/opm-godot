@@ -87,25 +87,72 @@ echo "Writing nginx Docker files..."
 mkdir -p "$OUT/docker/web"
 
 # Dockerfile — uses repo root as build context so both nginx.conf and web/ are
-# baked into the image.  Portainer CE cannot reliably resolve relative bind-mount
-# paths from its internal compose working directory, so we avoid bind mounts for
-# static files entirely.  Only the pk3 asset volume (ASSET_PATH) remains as a
-# host mount because those files are not committed to git.
+# baked into the image.
 cat > "$OUT/docker/web/Dockerfile" << 'WEBDOCKERFILE'
 FROM nginx:alpine
 # Bake nginx config into the image
 COPY docker/web/nginx.conf /etc/nginx/conf.d/default.conf
+# Bake entrypoint
+COPY docker/web/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 # Bake all web export files (HTML/JS/WASM/PCK/runtime .so) into the image.
-# This avoids bind-mount path issues with Portainer CE Git stacks.
 COPY web /srv/web
+ENTRYPOINT ["/entrypoint.sh"]
 WEBDOCKERFILE
 
-# nginx.conf — serves web/ files + proxies /main/ /mainta/ /maintt/ to asset volume
+# entrypoint.sh — generates assets_manifest.json and injects CDN_URL
+cat > "$OUT/docker/web/entrypoint.sh" << 'ENTRYPOINT'
+#!/bin/sh
+set -e
+
+MANIFEST="/srv/web/assets_manifest.json"
+echo "[OpenMoHAA] Generating asset manifest..."
+echo "[" > "$MANIFEST"
+
+# Find all pk3, so, and cfg files in /srv/assets
+# We use a temporary file to handle the comma separation
+TMP_LIST=$(mktemp)
+find /srv/assets -type f \( -name "*.pk3" -o -name "*.so" -o -name "*.cfg" \) | sort > "$TMP_LIST"
+
+COUNT=0
+TOTAL=$(wc -l < "$TMP_LIST")
+while IFS= read -r f; do
+    COUNT=$((COUNT + 1))
+    # Get path relative to /srv/assets
+    REL=${f#/srv/assets/}
+    if [ "$COUNT" -eq "$TOTAL" ]; then
+        echo "  \"$REL\"" >> "$MANIFEST"
+    else
+        echo "  \"$REL\"," >> "$MANIFEST"
+    fi
+done < "$TMP_LIST"
+rm "$TMP_LIST"
+
+echo "]" >> "$MANIFEST"
+echo "[OpenMoHAA] Manifest generated: $TOTAL files"
+
+# Inject CDN_URL into mohaa.html if provided
+if [ -n "$CDN_URL" ]; then
+    echo "[OpenMoHAA] Injecting CDN_URL: $CDN_URL"
+    # Ensure it ends with slash for the JS logic
+    CDNLINK="$CDN_URL"
+    case "$CDNLINK" in */) ;; *) CDNLINK="$CDNLINK/";; esac
+    
+    # Inject into GODOT_CONFIG in mohaa.html
+    sed -i "s|\"serviceWorker\":\"\"|\"serviceWorker\":\"\",\"CDN_URL\":\"$CDNLINK\"|g" /srv/web/mohaa.html
+fi
+
+exec nginx -g 'daemon off;'
+ENTRYPOINT
+chmod +x "$OUT/docker/web/entrypoint.sh"
+
+# nginx.conf — serves web/ files + game assets from volume with autoindex for preloader
 cat > "$OUT/docker/web/nginx.conf" << 'NGINXCONF'
 # Correct MIME type for WebAssembly (not in nginx:alpine defaults)
 types {
     application/wasm          wasm;
-    application/octet-stream  pck so;
+    application/octet-stream  pck so pk3;
+    application/json          json;
 }
 
 server {
@@ -117,35 +164,85 @@ server {
     tcp_nopush  on;
     tcp_nodelay on;
 
-    # Never gzip already-binary/compressed files.
-    # Critical: prevents Apache mod_deflate from seeing a pre-compressed body
-    # while keeping the original Content-Length → ERR_CONTENT_LENGTH_MISMATCH.
-    gzip off;
+    # Gzip for text/code artifacts
+    gzip on;
+    gzip_types application/javascript application/wasm application/json text/css text/html;
+    gzip_min_length 1000;
 
     # Required for SharedArrayBuffer (Emscripten threading + WASM)
     add_header Cross-Origin-Opener-Policy  "same-origin"   always;
     add_header Cross-Origin-Embedder-Policy "require-corp" always;
     add_header Cross-Origin-Resource-Policy "cross-origin" always;
-    add_header Cache-Control               "no-store"      always;
 
-    # Game web files (HTML, JS, WASM, compiled .so, .cfg)
+    # --- WASM cgame.so: exact match from baked-in web root (not game assets volume) ---
+    # Without this, the /main/ regex below would serve the Linux ELF binary from assets.
+    location = /main/cgame.so {
+        root /srv/web;
+        default_type application/wasm;
+        add_header Cross-Origin-Opener-Policy  "same-origin"   always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin"  always;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # --- Game asset directories: autoindex JSON for the VFS preloader ---
+    # The JS preloader walks /main/ recursively via fetch() and expects JSON directory listings.
+    # Files come from the ASSET_PATH volume mounted at /srv/assets.
+    location ~ ^/main(/|$)(.*)$ {
+        alias /srv/assets/main/$2;
+        index off;
+        autoindex on;
+        autoindex_format json;
+        add_header Cross-Origin-Opener-Policy  "same-origin"   always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin"  always;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # Expansion packs (same pattern)
+    location ~ ^/mainta(/|$)(.*)$ {
+        alias /srv/assets/mainta/$2;
+        index off;
+        autoindex on;
+        autoindex_format json;
+        add_header Cross-Origin-Opener-Policy  "same-origin"   always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin"  always;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location ~ ^/maintt(/|$)(.*)$ {
+        alias /srv/assets/maintt/$2;
+        index off;
+        autoindex on;
+        autoindex_format json;
+        add_header Cross-Origin-Opener-Policy  "same-origin"   always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin"  always;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # No-cache for entrypoints so updates propagate immediately
+    location ~* \.(html|js|json)$ {
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Cross-Origin-Opener-Policy  "same-origin" always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
+        root /srv/web;
+    }
+
+    # Long-lived cache for binary assets served from baked-in web root
+    location ~* \.(wasm|pck)$ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin" always;
+        root /srv/web;
+    }
+
+    # Game web files (HTML, JS, WASM)
     root /srv/web;
     index mohaa.html;
 
-    # For game directories: try web/main/ first (runtime .so/.cfg),
-    # then fall back to the asset volume (pk3 archives).
-    location ~ ^/(main|mainta|maintt)/.+ {
-        try_files $uri @gamedata;
-    }
-
-    location @gamedata {
-        # ASSET_PATH is mounted at /srv/assets in docker-compose.yml
-        root /srv/assets;
-        try_files $uri =404;
-    }
-
     location / {
-        try_files $uri $uri/ =404;
+        try_files $uri $uri/ /mohaa.html;
     }
 }
 NGINXCONF
@@ -178,6 +275,9 @@ services:
       # Apache VHost for game.moh-central.net (port 80) reverse-proxies to :8086.
       # Docker binds host port 8086 → container port 80.
       - "8086:80"
+    environment:
+      # Optional CDN URL (e.g. https://cdn.example.com/assets)
+      - CDN_URL=${CDN_URL:-}
     volumes:
       # Game asset pk3 archives from the host — set ASSET_PATH in Portainer env vars.
       # Static web files (HTML/JS/WASM) are baked into the GHCR image, not mounted.
