@@ -371,6 +371,7 @@ preload_new = (
     "        promises.push((async(r)=>{"
     "          await __acquire();"
     "          try{"
+    "            if(FS.analyzePath('/'+r).exists){loaded++;return}"
     "            var result=await __fetchOne(r);"
     "            if(result){"
     "              var cut=result.dst.lastIndexOf('/');"
@@ -387,11 +388,26 @@ preload_new = (
     "    }"
     "    await Promise.all(promises);"
     "  };"
-    # --- walk main/ recursively ---
+    # --- write local files from picker/cache into MEMFS ---
+    "  var __lf=(typeof window!=='undefined'&&window.__opmLocalFiles)||{};"
+    "  var __lfKeys=Object.keys(__lf);"
+    "  if(__lfKeys.length>0){"
+    "    console.log('[OPM] Writing '+__lfKeys.length+' local files to MEMFS...');"
+    "    for(var __li=0;__li<__lfKeys.length;__li++){"
+    "      var __lrel=__lfKeys[__li];"
+    "      var __ldst='/main/'+__lrel;"
+    "      var __lcut=__ldst.lastIndexOf('/');"
+    "      if(__lcut>0)__mkdirs(__ldst.slice(0,__lcut));"
+    "      try{FS.writeFile(__ldst,__lf[__lrel],{canRead:true,canWrite:false})}catch(e){}"
+    "    }"
+    "    console.log('[OPM] Wrote '+__lfKeys.length+' local files to MEMFS');"
+    "    if(typeof window!=='undefined')window.__opmLocalFiles=null;"
+    "  }"
+    # --- walk server for missing files (gap-fill) ---
     "  __mkdirs('/main');"
-    "  console.log('[OPM] Scanning and downloading /main/ ...');"
+    "  console.log('[OPM] Server gap-fill: scanning for missing files...');"
     "  await __walk('main/');"
-    "  console.log('[OPM] VFS preload complete: '+loaded+' files downloaded, '+failed+' failed');"
+    "  console.log('[OPM] VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
     "})().catch(e=>console.error('[OPM] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
     "});"
     "var ENVIRONMENT_IS_WEB="
@@ -730,6 +746,285 @@ PY
         rm -f "$sw_file"
         echo "Removed generated service worker: $sw_file"
     fi
+}
+
+patch_web_html_file_picker() {
+    # Inject a local-file-picker UI + IndexedDB cache into mohaa.html so
+    # users can load their own MOHAA game files from disk.  Missing files
+    # are then gap-filled from the server by the JS preRun walker.
+    local export_html="$EXPORT_HTML"
+    if [[ ! -f "$export_html" ]]; then
+        echo "WARNING: Export HTML not found for file picker patch: $export_html"
+        return
+    fi
+
+    python3 - "$export_html" <<'PYPICK'
+import sys
+from pathlib import Path
+
+html_path = Path(sys.argv[1])
+src = html_path.read_text(encoding='utf-8', errors='ignore')
+
+# Idempotency
+if 'opm-loader' in src:
+    print("File picker already patched (idempotent)")
+    sys.exit(0)
+
+# ── 1. Inject CSS before </style> ─────────────────────────────────────────
+picker_css = """
+/* ── OpenMoHAA Local File Loader ── */
+#opm-loader {
+  position:fixed;inset:0;background:#1a1a1a;z-index:1000;
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  font-family:'Noto Sans',Arial,sans-serif;color:#e0e0e0;
+}
+.opm-inner{text-align:center;max-width:520px;padding:2rem}
+.opm-inner h2{color:#c0a060;font-size:1.8rem;margin:0 0 .4rem}
+.opm-inner p{margin:.4rem 0;line-height:1.5}
+.opm-hint{font-size:.85rem;color:#888}
+.opm-hint code{background:#333;padding:.1rem .4rem;border-radius:3px}
+.opm-btn{
+  display:inline-block;margin:1rem .5rem;padding:.7rem 2rem;
+  background:#c0a060;color:#1a1a1a;border:none;border-radius:6px;
+  font-size:1rem;font-weight:bold;cursor:pointer;transition:background .2s;
+}
+.opm-btn:hover{background:#d4b87a}
+.opm-btn:disabled{background:#555;cursor:not-allowed}
+.opm-link{
+  display:block;margin:.6rem auto;padding:.3rem;background:none;border:none;
+  color:#888;font-size:.85rem;cursor:pointer;text-decoration:underline;
+}
+.opm-link:hover{color:#aaa}
+#opm-prog-area{margin:1rem 0;display:none}
+#opm-file-prog{width:100%;height:6px}
+#opm-prog-text{font-size:.85rem;color:#aaa;margin-top:.3rem}
+"""
+
+style_close = '</style>'
+if style_close in src:
+    src = src.replace(style_close, picker_css + style_close, 1)
+    print("Injected file picker CSS")
+else:
+    print("WARNING: Could not find </style> for CSS injection")
+
+# ── 2. Inject HTML before <script src="mohaa.js"> ─────────────────────────
+picker_html = """
+\t\t<div id="opm-loader">
+\t\t\t<div class="opm-inner">
+\t\t\t\t<h2>OpenMoHAA</h2>
+\t\t\t\t<p>Load your Medal of Honor: Allied Assault game files</p>
+\t\t\t\t<p class="opm-hint">Select the folder containing your .pk3 game archives<br>(usually the <code>main</code> folder inside your MOHAA installation)</p>
+\t\t\t\t<button id="opm-pick-btn" class="opm-btn">Select Game Folder</button>
+\t\t\t\t<input type="file" id="opm-input-fb" webkitdirectory multiple style="display:none">
+\t\t\t\t<div id="opm-prog-area">
+\t\t\t\t\t<progress id="opm-file-prog" style="width:100%"></progress>
+\t\t\t\t\t<p id="opm-prog-text">Reading files\u2026</p>
+\t\t\t\t</div>
+\t\t\t\t<button id="opm-skip-btn" class="opm-link">Skip \u2014 use server files only</button>
+\t\t\t</div>
+\t\t</div>
+
+"""
+
+script_tag = '<script src="mohaa.js"></script>'
+if script_tag in src:
+    src = src.replace(script_tag, picker_html + '\t\t' + script_tag, 1)
+    print("Injected file picker HTML")
+else:
+    print("WARNING: Could not find <script src=mohaa.js> for HTML injection")
+
+# ── 3. Replace the engine.startGame() boot block ──────────────────────────
+# We locate the block between two unique markers rather than matching exact
+# whitespace (tab indentation varies across Godot export versions).
+BOOT_START = "setStatusMode('progress');"
+BOOT_END   = "}, displayFailureNotice);"
+
+si = src.find(BOOT_START)
+ei = src.find(BOOT_END, si) if si >= 0 else -1
+if si < 0 or ei < 0:
+    print("WARNING: Could not locate engine.startGame() boot block")
+    html_path.write_text(src, encoding='utf-8')
+    sys.exit(0)
+
+ei += len(BOOT_END)
+
+T2 = '\t\t'
+T3 = '\t\t\t'
+T4 = '\t\t\t\t'
+T5 = '\t\t\t\t\t'
+
+new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
+{T2}(async function opmBoot() {{
+{T3}var DB_NAME='opm-files',DB_VER=1,ST='f';
+
+{T3}/* ── IndexedDB helpers ── */
+{T3}function opmOpenDB() {{
+{T4}return new Promise(function(ok) {{
+{T5}try {{
+{T5}{T2}var r=indexedDB.open(DB_NAME,DB_VER);
+{T5}{T2}r.onupgradeneeded=function(e){{e.target.result.createObjectStore(ST)}};
+{T5}{T2}r.onsuccess=function(e){{ok(e.target.result)}};
+{T5}{T2}r.onerror=function(){{ok(null)}};
+{T5}}} catch(e){{ok(null)}}
+{T4}}});
+{T3}}}
+{T3}var idb=await opmOpenDB();
+
+{T3}function opmCacheLoad() {{
+{T4}if(!idb) return Promise.resolve(null);
+{T4}return new Promise(function(ok) {{
+{T5}try {{
+{T5}{T2}var tx=idb.transaction(ST,'readonly'),s=tx.objectStore(ST),out={{}},n=0;
+{T5}{T2}var cur=s.openCursor();
+{T5}{T2}cur.onsuccess=function(e){{var c=e.target.result;if(c){{out[c.key]=c.value;n++;c.continue()}}else ok(n?out:null)}};
+{T5}{T2}cur.onerror=function(){{ok(null)}};
+{T5}}} catch(e){{ok(null)}}
+{T4}}});
+{T3}}}
+
+{T3}function opmCacheSave(files) {{
+{T4}if(!idb) return Promise.resolve();
+{T4}var keys=Object.keys(files),bs=20;
+{T4}return (async function() {{
+{T5}for(var i=0;i<keys.length;i+=bs) {{
+{T5}{T2}var chunk=keys.slice(i,i+bs);
+{T5}{T2}await new Promise(function(ok){{
+{T5}{T3}try{{var tx=idb.transaction(ST,'readwrite'),s=tx.objectStore(ST);
+{T5}{T3}chunk.forEach(function(k){{s.put(files[k],k)}});
+{T5}{T3}tx.oncomplete=ok;tx.onerror=function(){{ok()}}}}catch(e){{ok()}}
+{T5}{T2}}});
+{T5}}}
+{T4}}})();
+{T3}}}
+
+{T3}function opmCacheClear() {{
+{T4}if(!idb) return Promise.resolve();
+{T4}return new Promise(function(ok){{
+{T5}try{{var tx=idb.transaction(ST,'readwrite');tx.objectStore(ST).clear();
+{T5}tx.oncomplete=ok;tx.onerror=function(){{ok()}}}}catch(e){{ok()}}
+{T4}}});
+{T3}}}
+
+{T3}/* ── File reading helpers ── */
+{T3}async function opmReadDirHandle(h,prefix) {{
+{T4}var files={{}};
+{T4}for await (var entry of h.values()) {{
+{T5}if(entry.name.startsWith('.'))continue;
+{T5}var p=prefix?prefix+'/'+entry.name:entry.name;
+{T5}if(entry.kind==='directory'){{Object.assign(files,await opmReadDirHandle(entry,p))}}
+{T5}else{{try{{var f=await entry.getFile();files[p]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}}}
+{T4}}}
+{T4}return files;
+{T3}}}
+
+{T3}async function opmReadViaInput() {{
+{T4}return new Promise(function(ok) {{
+{T5}var inp=document.getElementById('opm-input-fb');
+{T5}inp.onchange=async function() {{
+{T5}{T2}var list=Array.from(inp.files),files={{}};
+{T5}{T2}var area=document.getElementById('opm-prog-area');
+{T5}{T2}var bar=document.getElementById('opm-file-prog');
+{T5}{T2}var txt=document.getElementById('opm-prog-text');
+{T5}{T2}area.style.display='block';bar.max=list.length;bar.value=0;
+{T5}{T2}for(var i=0;i<list.length;i++) {{
+{T5}{T3}var f=list[i],rp=f.webkitRelativePath||f.name;
+{T5}{T3}var slash=rp.indexOf('/');if(slash>=0) rp=rp.substring(slash+1);
+{T5}{T3}if(!rp||rp.startsWith('.'))continue;
+{T5}{T3}try{{files[rp]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}
+{T5}{T3}bar.value=i+1;txt.textContent='Reading: '+(i+1)+'/'+list.length;
+{T5}{T2}}}
+{T5}{T2}area.style.display='none';
+{T5}{T2}ok(Object.keys(files).length?files:null);
+{T5}}};
+{T5}inp.click();
+{T4}}});
+{T3}}}
+
+{T3}async function opmPickFiles() {{
+{T4}var area=document.getElementById('opm-prog-area');
+{T4}var txt=document.getElementById('opm-prog-text');
+{T4}if(window.showDirectoryPicker) {{
+{T5}try {{
+{T5}{T2}area.style.display='block';txt.textContent='Reading files from folder\\u2026';
+{T5}{T2}var dh=await window.showDirectoryPicker({{mode:'read'}});
+{T5}{T2}var files=await opmReadDirHandle(dh,'');
+{T5}{T2}area.style.display='none';
+{T5}{T2}if(Object.keys(files).length) return files;
+{T5}}} catch(e) {{
+{T5}{T2}area.style.display='none';
+{T5}{T2}if(e.name==='AbortError') return null;
+{T5}{T2}console.warn('[OPM] Directory picker error, trying fallback:',e);
+{T5}}}
+{T4}}}
+{T4}return opmReadViaInput();
+{T3}}}
+
+{T3}/* ── Engine starter ── */
+{T3}function startEngine() {{
+{T4}setStatusMode('progress');
+{T4}engine.startGame({{
+{T5}'onProgress': function (current, total) {{
+{T5}{T2}if (current > 0 && total > 0) {{
+{T5}{T3}statusProgress.value = current;
+{T5}{T3}statusProgress.max = total;
+{T5}{T2}}} else {{
+{T5}{T3}statusProgress.removeAttribute('value');
+{T5}{T3}statusProgress.removeAttribute('max');
+{T5}{T2}}}
+{T5}}},
+{T4}}}).then(function() {{
+{T5}setStatusMode('hidden');
+{T4}}}, displayFailureNotice);
+{T3}}}
+
+{T3}/* ── Boot logic ── */
+{T3}var loader=document.getElementById('opm-loader');
+
+{T3}// 1. Check IndexedDB cache
+{T3}var cached=await opmCacheLoad();
+{T3}if(cached) {{
+{T4}console.log('[OPM] Loaded '+Object.keys(cached).length+' files from IndexedDB cache');
+{T4}window.__opmLocalFiles=cached;
+{T4}startEngine();
+{T4}return;
+{T3}}}
+
+{T3}// 2. Show file picker UI
+{T3}statusOverlay.style.visibility='hidden';
+{T3}loader.style.display='flex';
+
+{T3}await new Promise(function(resolve) {{
+{T4}document.getElementById('opm-pick-btn').onclick=async function() {{
+{T5}this.disabled=true;
+{T5}var files=await opmPickFiles();
+{T5}if(files) {{
+{T5}{T2}var n=Object.keys(files).length;
+{T5}{T2}console.log('[OPM] Read '+n+' local files from disk');
+{T5}{T2}window.__opmLocalFiles=files;
+{T5}{T2}loader.style.display='none';
+{T5}{T2}// Cache in background (non-blocking)
+{T5}{T2}opmCacheSave(files).then(function(){{console.log('[OPM] Cached '+n+' files to IndexedDB')}})
+{T5}{T3}.catch(function(e){{console.warn('[OPM] IndexedDB cache save failed',e)}});
+{T5}{T2}resolve();
+{T5}}} else {{
+{T5}{T2}this.disabled=false; // user cancelled — let them try again
+{T5}}}
+{T4}}};
+{T4}document.getElementById('opm-skip-btn').onclick=function() {{
+{T5}loader.style.display='none';
+{T5}resolve();
+{T4}}};
+{T3}}});
+
+{T3}startEngine();
+{T2}}})().catch(displayFailureNotice);"""
+
+src = src[:si] + new_boot + src[ei:]
+print("Patched boot sequence with local file picker gate")
+
+html_path.write_text(src, encoding='utf-8')
+print("File picker HTML patch complete")
+PYPICK
 }
 
 patch_web_ws_relay() {
@@ -1111,6 +1406,7 @@ if [[ "$PATCH_ONLY" -eq 1 ]]; then
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
     patch_web_html_disable_service_worker
+    patch_web_html_file_picker
     patch_web_ws_relay
     obfuscate_godot_fingerprints
     echo "Patch-only complete."
@@ -1190,6 +1486,7 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
     patch_web_html_disable_service_worker
+    patch_web_html_file_picker
     patch_web_ws_relay
     obfuscate_godot_fingerprints
 fi
