@@ -2,9 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa"
-PROJECT_BIN_DIR="$SCRIPT_DIR/project/bin"
-CGAME_DEPLOY_DIR="$SCRIPT_DIR/project/bin"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
+PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
+CGAME_DEPLOY_DIR="$REPO_ROOT/project/bin"
 
 # Build OpenMoHAA GDExtension
 cd "$OPENMOHAA_DIR"
@@ -31,7 +32,7 @@ mkdir -p "$PROJECT_BIN_DIR" "$CGAME_DEPLOY_DIR"
 
 # Deploy cgame.so next to libopenmohaa.so (project/bin/) so the GDExtension
 # loader finds it via dladdr without polluting the main/ game directory.
-OLD_CGAME="$SCRIPT_DIR/openmohaa/bin/libcgame.so"
+OLD_CGAME="$REPO_ROOT/openmohaa/bin/libcgame.so"
 if [[ -f bin/libcgame.so ]]; then
     \cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so" || exit 1
 elif [[ -f "$OLD_CGAME" ]]; then

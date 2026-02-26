@@ -27,10 +27,11 @@ openmohaa/bin/libopenmohaa.so
 openmohaa/bin/libcgame.so
 openmohaa/bin/*.wasm
 openmohaa/bin/*.side.wasm
+openmohaa/bin/*.dll
+openmohaa/bin/*.dylib
 project/bin/
-project/bin/*.wasm
 project/.godot/
-exports/web/
+web/
 
 # Godot editor files
 .godot/
@@ -49,3 +50,4 @@ project/gdb.txt
 node_modules/
 tmp/
 openmohaa/.cmake-native/
+opm-godot-web-export/

@@ -1,0 +1,100 @@
+# Build native GDExtension libraries for Linux, macOS, and Windows.
+# Triggered on push to main, PRs, and manual dispatch.
+name: Build Native
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-22.04
+            arch: x86_64
+            artifact_ext: .so
+            lib_name: libopenmohaa.so
+            cgame_name: libcgame.so
+          - platform: macos
+            os: macos-14
+            arch: universal
+            artifact_ext: .dylib
+            lib_name: libopenmohaa.dylib
+            cgame_name: libcgame.dylib
+          - platform: windows
+            os: windows-2022
+            arch: x86_64
+            artifact_ext: .dll
+            lib_name: openmohaa.dll
+            cgame_name: cgame.dll
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ zlib1g-dev bison flex
+
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        run: brew install bison flex
+
+      - name: Install Windows dependencies
+        if: matrix.platform == 'windows'
+        run: choco install winflexbison3 -y
+
+      - name: Generate parser sources (Linux/macOS)
+        if: matrix.platform != 'windows'
+        working-directory: openmohaa
+        run: |
+          PARSER_DIR="code/parser/generated"
+          if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
+            mkdir -p "$PARSER_DIR"
+            bison --defines="$PARSER_DIR/yyParser.hpp" -o "$PARSER_DIR/yyParser.cpp" code/parser/bison_source.txt
+            flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
+          fi
+
+      - name: Generate parser sources (Windows)
+        if: matrix.platform == 'windows'
+        working-directory: openmohaa
+        shell: cmd
+        run: |
+          if not exist "code\parser\generated" mkdir "code\parser\generated"
+          win_bison --defines="code\parser\generated\yyParser.hpp" -o "code\parser\generated\yyParser.cpp" code\parser\bison_source.txt
+          win_flex -Cem --nounistd -o "code\parser\generated\yyLexer.cpp" --header-file="code\parser\generated\yyLexer.h" code\parser\lex_source.txt
+
+      - name: Build GDExtension
+        working-directory: openmohaa
+        run: scons platform=${{ matrix.platform }} target=template_debug -j2 dev_build=yes
+
+      - name: Upload GDExtension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdextension-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            openmohaa/bin/${{ matrix.lib_name }}
+            openmohaa/bin/${{ matrix.cgame_name }}
+          if-no-files-found: error

@@ -2,24 +2,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_BIN_DIR="$SCRIPT_DIR/project/bin"
-PROJECT_DIR="$SCRIPT_DIR/project"
-EXPORT_DIR="$SCRIPT_DIR/exports/web"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
+PROJECT_DIR="$REPO_ROOT/project"
+EXPORT_DIR="$REPO_ROOT/web"
 EXPORT_HTML="$EXPORT_DIR/mohaa.html"
 EXPORT_JS="$EXPORT_DIR/mohaa.js"
 PROJECT_GDEXT="$PROJECT_DIR/openmohaa.gdextension"
-GAME_FILES_DIR="${GAME_FILES_DIR:-$HOME/.local/share/openmohaa/main}"
+GAME_FILES_DIR="${GAME_FILES_DIR:-$HOME/.local/share/openmohaa}"
 
-if [[ -f "$SCRIPT_DIR/openmohaa/SConstruct" ]]; then
-    OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa"
-elif [[ -f "$SCRIPT_DIR/openmohaa/openmohaa/SConstruct" ]]; then
-    OPENMOHAA_DIR="$SCRIPT_DIR/openmohaa/openmohaa"
+if [[ -f "$REPO_ROOT/openmohaa/SConstruct" ]]; then
+    OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
+elif [[ -f "$REPO_ROOT/openmohaa/openmohaa/SConstruct" ]]; then
+    OPENMOHAA_DIR="$REPO_ROOT/openmohaa/openmohaa"
 else
-    echo "ERROR: Could not find OpenMoHAA SConstruct under $SCRIPT_DIR/openmohaa" >&2
+    echo "ERROR: Could not find OpenMoHAA SConstruct under $REPO_ROOT/openmohaa" >&2
     exit 1
 fi
 
-EMSDK_DIR="${EMSDK_DIR:-/home/elgan/emsdk}"
+EMSDK_DIR="${EMSDK_DIR:-$HOME/emsdk}"
 BUILD_TARGET="template_debug"
 CHECK_ONLY=0
 EXPORT_AFTER_BUILD=1
@@ -101,7 +102,7 @@ serve_docker() {
         exit 1
     fi
     echo "Deploying docker compose stack (asset path: $asset_path)..."
-    cd "$SCRIPT_DIR"
+    cd "$REPO_ROOT"
     # Force-remove any lingering containers by name to avoid the 'already in use' conflict,
     # then bring the stack up with --force-recreate so existing containers are replaced atomically.
     docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
@@ -206,20 +207,24 @@ sync_gdextension_web_entries() {
         exit 1
     fi
 
-    awk '!/^web\.(debug|release)(\.threads)?\.wasm32\s*=/' "$PROJECT_GDEXT" > "$PROJECT_GDEXT.tmp"
+    awk '!/^web\.(debug|release|template_debug|template_release)(\.threads)?\.wasm32\s*=/' "$PROJECT_GDEXT" > "$PROJECT_GDEXT.tmp"
 
     {
         if [[ -n "$debug_threads" ]]; then
             echo "web.debug.threads.wasm32 = \"res://bin/$debug_threads\""
+            echo "web.template_debug.threads.wasm32 = \"res://bin/$debug_threads\""
         fi
         if [[ -n "$debug_nothreads" ]]; then
             echo "web.debug.wasm32 = \"res://bin/$debug_nothreads\""
+            echo "web.template_debug.wasm32 = \"res://bin/$debug_nothreads\""
         fi
         if [[ -n "$release_threads" ]]; then
             echo "web.release.threads.wasm32 = \"res://bin/$release_threads\""
+            echo "web.template_release.threads.wasm32 = \"res://bin/$release_threads\""
         fi
         if [[ -n "$release_nothreads" ]]; then
             echo "web.release.wasm32 = \"res://bin/$release_nothreads\""
+            echo "web.template_release.wasm32 = \"res://bin/$release_nothreads\""
         fi
     } >> "$PROJECT_GDEXT.tmp"
 
@@ -228,33 +233,36 @@ sync_gdextension_web_entries() {
 
 generate_web_main_manifest() {
     local manifest_path="$EXPORT_DIR/.openmohaa-main-files.txt"
-    local main_dir="$EXPORT_DIR/main"
 
     : > "$manifest_path"
 
-    if [[ -d "$main_dir" ]]; then
-        while IFS= read -r -d '' f; do
-            local rel="${f#"$main_dir/"}"
-            # Skip hidden/dot files and directories (dev artifacts: .vscode, .genkit, etc.)
-            case "$rel" in
-                .*|*/.*) continue ;;
-            esac
-            case "${rel,,}" in
-                pak0.pk3|pak1.pk3|pak2.pk3|pak3.pk3|pak4.pk3|pak5.pk3|pak6.pk3|openmohaa.pk3|cgame.so)
-                    continue
-                    ;;
-                *.log|crashlog.txt|qconsole.log)
-                    continue
-                    ;;
-                *.so|*.cfg)
-                    printf '%s\n' "$rel" >> "$manifest_path"
-                    ;;
-                *)
-                    continue
-                    ;;
-            esac
-        done < <(find "$main_dir" \( -name ".*" -prune \) -o -type f -print0 | sort -z)
-    fi
+    # Scan all three game directories: main, mainta, maintt
+    for game_dir_name in main mainta maintt; do
+        local game_dir="$EXPORT_DIR/$game_dir_name"
+        if [[ -d "$game_dir" ]]; then
+            while IFS= read -r -d '' f; do
+                local rel="${f#"$game_dir/"}"
+                # Skip hidden/dot files and directories (dev artifacts: .vscode, .genkit, etc.)
+                case "$rel" in
+                    .*|*/.*) continue ;;
+                esac
+                case "${rel,,}" in
+                    pak0.pk3|pak1.pk3|pak2.pk3|pak3.pk3|pak4.pk3|pak5.pk3|pak6.pk3|openmohaa.pk3|cgame.so)
+                        continue
+                        ;;
+                    *.log|crashlog.txt|qconsole.log)
+                        continue
+                        ;;
+                    *.so|*.cfg)
+                        printf '%s/%s\n' "$game_dir_name" "$rel" >> "$manifest_path"
+                        ;;
+                    *)
+                        continue
+                        ;;
+                esac
+            done < <(find "$game_dir" \( -name ".*" -prune \) -o -type f -print0 | sort -z)
+        fi
+    done
 
     echo "$manifest_path"
 }
@@ -286,7 +294,7 @@ if manifest_path and manifest_path.is_file():
         extra_preload_entries.append(rel)
 
 extra_files_js = ','.join(
-    f"['main/{_js_quote(rel)}','/main/{_js_quote(rel)}']" for rel in extra_preload_entries
+    f"['{_js_quote(rel)}','/{_js_quote(rel)}']" for rel in extra_preload_entries
 )
 
 # Grow wasm memory before loadDylibs so the GDExtension side module (which
@@ -319,7 +327,7 @@ preload_new = (
     "(async()=>{"
     "  var cfg=(typeof OPM_CONFIG!=='undefined'?OPM_CONFIG:{}),cdn=cfg['CDN_URL']||'';"
     "  if(cdn&&!cdn.endsWith('/'))cdn+='/';"
-    "  var cache=null; try{cache=await caches.open('opm-assets-v1')}catch(e){console.warn('[OPM] Cache API unavailable',e)}"
+    "  var cache=null; try{cache=await caches.open('mohaajs-assets-v1')}catch(e){console.warn('[MOHAAjs] Cache API unavailable',e)}"
     # --- helper: ensure MEMFS directory exists ---
     "  var __mkdirs=(path)=>{"
     "    var p='',ps=path.split('/').filter(Boolean);"
@@ -382,33 +390,44 @@ preload_new = (
     "          }catch(e){failed++}"
     "          finally{__release()}"
     "          if((loaded+failed)%200===0||loaded+failed===total)"
-    "            console.log('[OPM] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
+    "            console.log('[MOHAAjs] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
     "        })(rel));"
     "      }"
     "    }"
     "    await Promise.all(promises);"
     "  };"
     # --- write local files from picker/cache into MEMFS ---
+    # Files now arrive with full relative paths including game subdirs:
+    #   main/Pak0.pk3, mainta/Pak0.pk3, maintt/Pak0.pk3, etc.
+    # Write them at their original path so all game dirs are available.
     "  var __lf=(typeof window!=='undefined'&&window.__opmLocalFiles)||{};"
     "  var __lfKeys=Object.keys(__lf);"
     "  if(__lfKeys.length>0){"
-    "    console.log('[OPM] Writing '+__lfKeys.length+' local files to MEMFS...');"
+    "    console.log('[MOHAAjs] Writing '+__lfKeys.length+' local files to MEMFS...');"
     "    for(var __li=0;__li<__lfKeys.length;__li++){"
     "      var __lrel=__lfKeys[__li];"
-    "      var __ldst='/main/'+__lrel;"
+    "      var __ldst='/'+__lrel;"
     "      var __lcut=__ldst.lastIndexOf('/');"
     "      if(__lcut>0)__mkdirs(__ldst.slice(0,__lcut));"
     "      try{FS.writeFile(__ldst,__lf[__lrel],{canRead:true,canWrite:false})}catch(e){}"
     "    }"
-    "    console.log('[OPM] Wrote '+__lfKeys.length+' local files to MEMFS');"
+    "    console.log('[MOHAAjs] Wrote '+__lfKeys.length+' local files to MEMFS');"
     "    if(typeof window!=='undefined')window.__opmLocalFiles=null;"
     "  }"
-    # --- walk server for missing files (gap-fill) ---
-    "  __mkdirs('/main');"
-    "  console.log('[OPM] Server gap-fill: scanning for missing files...');"
-    "  await __walk('main/');"
-    "  console.log('[OPM] VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
-    "})().catch(e=>console.error('[OPM] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
+    # --- walk server for ALL game directories (gap-fill) ---
+    # Always load 'main' (base game), plus the expansion dir if target != 0.
+    "  var __gameDirs=['main'];"
+    "  var __tg=(typeof window!=='undefined'&&window.__opmTargetGame)||0;"
+    "  var __gdMap={1:'mainta',2:'maintt'};"
+    "  if(__gdMap[__tg])__gameDirs.push(__gdMap[__tg]);"
+    "  for(var __gi=0;__gi<__gameDirs.length;__gi++){"
+    "    var __gd=__gameDirs[__gi];"
+    "    __mkdirs('/'+__gd);"
+    "    console.log('[MOHAAjs] Server gap-fill: scanning /'+__gd+'/ ...');"
+    "    await __walk(__gd+'/');"
+    "  }"
+    "  console.log('[MOHAAjs] VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
+    "})().catch(e=>console.error('[MOHAAjs] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
     "});"
     "var ENVIRONMENT_IS_WEB="
 )
@@ -727,11 +746,11 @@ else:
     print("WARNING: Could not find serviceWorker config marker in mohaa.html")
 
 cleanup_marker = "<head>"
-cleanup_snippet = """<head>\n<script>(function(){\n  if (!('serviceWorker' in navigator)) return;\n  window.addEventListener('load', function(){\n    navigator.serviceWorker.getRegistrations()\n      .then(function(regs){ return Promise.all(regs.map(function(reg){ return reg.unregister(); })); })\n      .then(function(){\n        if (!('caches' in window)) return;\n        return caches.keys().then(function(keys){ return Promise.all(keys.map(function(key){ return caches.delete(key); })); });\n      })\n      .then(function(){ console.log('OpenMoHAA: cleared stale service workers/caches'); })\n      .catch(function(err){ console.warn('OpenMoHAA: SW cleanup warning', err); });\n  });\n})();</script>"""
-if cleanup_marker in src and "OpenMoHAA: cleared stale service workers/caches" not in src:
+cleanup_snippet = """<head>\n<script>(function(){\n  if (!('serviceWorker' in navigator)) return;\n  window.addEventListener('load', function(){\n    navigator.serviceWorker.getRegistrations()\n      .then(function(regs){ return Promise.all(regs.map(function(reg){ return reg.unregister(); })); })\n      .then(function(){\n        if (!('caches' in window)) return;\n        return caches.keys().then(function(keys){ return Promise.all(keys.map(function(key){ return caches.delete(key); })); });\n      })\n      .then(function(){ console.log('MOHAAjs: cleared stale service workers/caches'); })\n      .catch(function(err){ console.warn('MOHAAjs: SW cleanup warning', err); });\n  });\n})();</script>"""
+if cleanup_marker in src and "cleared stale service workers/caches" not in src:
     src = src.replace(cleanup_marker, cleanup_snippet, 1)
     print("Injected stale service-worker cleanup snippet")
-elif "OpenMoHAA: cleared stale service workers/caches" in src:
+elif "cleared stale service workers/caches" in src:
     print("Service-worker cleanup snippet already present")
 else:
     print("WARNING: Could not inject service-worker cleanup snippet")
@@ -772,17 +791,23 @@ if 'opm-loader' in src:
 
 # ── 1. Inject CSS before </style> ─────────────────────────────────────────
 picker_css = """
-/* ── OpenMoHAA Local File Loader ── */
+/* ── MOHAAjs Local File Loader ── */
 #opm-loader {
   position:fixed;inset:0;background:#1a1a1a;z-index:1000;
   display:none;flex-direction:column;align-items:center;justify-content:center;
   font-family:'Noto Sans',Arial,sans-serif;color:#e0e0e0;
 }
-.opm-inner{text-align:center;max-width:520px;padding:2rem}
+.opm-inner{text-align:center;max-width:580px;padding:2rem}
 .opm-inner h2{color:#c0a060;font-size:1.8rem;margin:0 0 .4rem}
 .opm-inner p{margin:.4rem 0;line-height:1.5}
 .opm-hint{font-size:.85rem;color:#888}
 .opm-hint code{background:#333;padding:.1rem .4rem;border-radius:3px}
+.opm-game-select{margin:.6rem 0;display:none}
+.opm-game-select label{font-size:.9rem;color:#aaa;margin-right:.4rem}
+.opm-game-select select{
+  padding:.3rem .6rem;background:#333;color:#e0e0e0;border:1px solid #555;
+  border-radius:4px;font-size:.9rem;
+}
 .opm-btn{
   display:inline-block;margin:1rem .5rem;padding:.7rem 2rem;
   background:#c0a060;color:#1a1a1a;border:none;border-radius:6px;
@@ -798,6 +823,8 @@ picker_css = """
 #opm-prog-area{margin:1rem 0;display:none}
 #opm-file-prog{width:100%;height:6px}
 #opm-prog-text{font-size:.85rem;color:#aaa;margin-top:.3rem}
+.opm-disclaimer{font-size:.75rem;color:#666;margin-top:1.5rem;line-height:1.4;max-width:520px}
+.opm-disclaimer a{color:#888}
 """
 
 style_close = '</style>'
@@ -811,16 +838,25 @@ else:
 picker_html = """
 \t\t<div id="opm-loader">
 \t\t\t<div class="opm-inner">
-\t\t\t\t<h2>OpenMoHAA</h2>
+\t\t\t\t<h2>MOHAAjs</h2>
 \t\t\t\t<p>Load your Medal of Honor: Allied Assault game files</p>
-\t\t\t\t<p class="opm-hint">Select the folder containing your .pk3 game archives<br>(usually the <code>main</code> folder inside your MOHAA installation)</p>
-\t\t\t\t<button id="opm-pick-btn" class="opm-btn">Select Game Folder</button>
+\t\t\t\t<p class="opm-hint"><strong>\u26a0\ufe0f Select the MOHAA <em>installation</em> folder</strong> \u2014 the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself!</p>
+\t\t\t\t<div class="opm-game-select" id="opm-game-select">
+\t\t\t\t\t<label for="opm-target-game">Target game:</label>
+\t\t\t\t\t<select id="opm-target-game">
+\t\t\t\t\t\t<option value="0">Allied Assault (main)</option>
+\t\t\t\t\t\t<option value="1">Spearhead (mainta)</option>
+\t\t\t\t\t\t<option value="2">Breakthrough (maintt)</option>
+\t\t\t\t\t</select>
+\t\t\t\t</div>
+\t\t\t\t<button id="opm-pick-btn" class="opm-btn">Select MOHAA Installation Folder</button>
 \t\t\t\t<input type="file" id="opm-input-fb" webkitdirectory multiple style="display:none">
 \t\t\t\t<div id="opm-prog-area">
 \t\t\t\t\t<progress id="opm-file-prog" style="width:100%"></progress>
 \t\t\t\t\t<p id="opm-prog-text">Reading files\u2026</p>
 \t\t\t\t</div>
 \t\t\t\t<button id="opm-skip-btn" class="opm-link">Skip \u2014 use server files only</button>
+\t\t\t\t<p class="opm-disclaimer">MOHAAjs is an independent fan project and is not affiliated with, endorsed by, or connected to Electronic Arts, the OpenMoHAA project, or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
 \t\t\t</div>
 \t\t</div>
 
@@ -853,16 +889,40 @@ T3 = '\t\t\t'
 T4 = '\t\t\t\t'
 T5 = '\t\t\t\t\t'
 
-new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
+new_boot = f"""{T2}/* MOHAAjs: Local File Loader + Server Gap-Fill + Multi-Game Support */
 {T2}(async function opmBoot() {{
-{T3}var DB_NAME='opm-files',DB_VER=1,ST='f';
+{T3}var DB_NAME='opm-files',DB_VER=2,ST='f';
+
+{T3}/* ── Game directory mapping ── */
+{T3}var GAME_DIRS={{0:'main',1:'mainta',2:'maintt'}};
+{T3}var GAME_NAMES={{0:'Allied Assault',1:'Spearhead',2:'Breakthrough'}};
+
+{T3}/* ── Read com_target_game from URL ── */
+{T3}var urlParams=new URLSearchParams(window.location.search);
+{T3}var urlTargetGame=urlParams.get('com_target_game');
+{T3}var targetGame=0; /* default: Allied Assault (main) */
+{T3}if(urlTargetGame!==null) {{
+{T4}var parsed=parseInt(urlTargetGame,10);
+{T4}if(parsed>=0&&parsed<=2) targetGame=parsed;
+{T3}}}
+{T3}window.__opmTargetGame=targetGame;
+{T3}console.log('[MOHAAjs] Target game: '+targetGame+' ('+GAME_NAMES[targetGame]+', dir: '+GAME_DIRS[targetGame]+')');
+
+{T3}/* ── Update game selector UI from URL param ── */
+{T3}var gameSel=document.getElementById('opm-target-game');
+{T3}var gameSelArea=document.getElementById('opm-game-select');
+{T3}if(gameSel) {{
+{T4}gameSel.value=String(targetGame);
+{T4}gameSelArea.style.display='block';
+{T4}gameSel.onchange=function(){{targetGame=parseInt(this.value,10);window.__opmTargetGame=targetGame}};
+{T3}}}
 
 {T3}/* ── IndexedDB helpers ── */
 {T3}function opmOpenDB() {{
 {T4}return new Promise(function(ok) {{
 {T5}try {{
 {T5}{T2}var r=indexedDB.open(DB_NAME,DB_VER);
-{T5}{T2}r.onupgradeneeded=function(e){{e.target.result.createObjectStore(ST)}};
+{T5}{T2}r.onupgradeneeded=function(e){{var db=e.target.result;if(!db.objectStoreNames.contains(ST))db.createObjectStore(ST)}};
 {T5}{T2}r.onsuccess=function(e){{ok(e.target.result)}};
 {T5}{T2}r.onerror=function(){{ok(null)}};
 {T5}}} catch(e){{ok(null)}}
@@ -928,6 +988,7 @@ new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
 {T5}{T2}area.style.display='block';bar.max=list.length;bar.value=0;
 {T5}{T2}for(var i=0;i<list.length;i++) {{
 {T5}{T3}var f=list[i],rp=f.webkitRelativePath||f.name;
+{T5}{T3}/* Strip the top-level directory name chosen by the user */
 {T5}{T3}var slash=rp.indexOf('/');if(slash>=0) rp=rp.substring(slash+1);
 {T5}{T3}if(!rp||rp.startsWith('.'))continue;
 {T5}{T3}try{{files[rp]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}
@@ -953,14 +1014,52 @@ new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
 {T5}}} catch(e) {{
 {T5}{T2}area.style.display='none';
 {T5}{T2}if(e.name==='AbortError') return null;
-{T5}{T2}console.warn('[OPM] Directory picker error, trying fallback:',e);
+{T5}{T2}console.warn('[MOHAAjs] Directory picker error, trying fallback:',e);
 {T5}}}
 {T4}}}
 {T4}return opmReadViaInput();
 {T3}}}
 
+{T3}/* ── Map picked base-path files into per-game MEMFS paths ── */
+{T3}/* The user selects the MOHAA install root (parent of main/mainta/maintt). */
+{T3}/* Files arrive as e.g. "main/Pak0.pk3", "mainta/Pak0.pk3", etc. */
+{T3}/* We keep the full relative structure so ALL game dirs are available. */
+{T3}function opmMapFilesToMemfs(rawFiles) {{
+{T4}var mapped={{}};
+{T4}var keys=Object.keys(rawFiles);
+{T4}var foundDirs={{}};
+{T4}for(var i=0;i<keys.length;i++) {{
+{T5}var rel=keys[i].replace(/\\\\/g,'/');
+{T5}/* Detect which game subdirs are present */
+{T5}var firstSlash=rel.indexOf('/');
+{T5}if(firstSlash>0) {{
+{T5}{T2}var topDir=rel.substring(0,firstSlash).toLowerCase();
+{T5}{T2}if(topDir==='main'||topDir==='mainta'||topDir==='maintt') foundDirs[topDir]=true;
+{T5}}}
+{T5}/* Keep file at its original relative path */
+{T5}mapped[rel]=rawFiles[keys[i]];
+{T4}}}
+{T4}var dirList=Object.keys(foundDirs);
+{T4}if(dirList.length>0) {{
+{T5}console.log('[MOHAAjs] Detected game directories: '+dirList.join(', '));
+{T4}}} else {{
+{T5}console.warn('[MOHAAjs] No main/mainta/maintt subdirectories found in selected folder!');
+{T5}console.warn('[MOHAAjs] Files will be placed as-is. Ensure you selected the MOHAA installation root.');
+{T4}}}
+{T4}return mapped;
+{T3}}}
+
 {T3}/* ── Engine starter ── */
 {T3}function startEngine() {{
+{T4}/* Pass com_target_game to the engine via URL args if not already set */
+{T4}var currentUrl=new URL(window.location.href);
+{T4}if(!currentUrl.searchParams.has('com_target_game')) {{
+{T5}currentUrl.searchParams.set('com_target_game',String(targetGame));
+{T5}window.history.replaceState(null,'',currentUrl.toString());
+{T4}}}
+{T4}/* Store for the preRun VFS walker to know which dirs to load */
+{T4}window.__opmTargetGame=targetGame;
+{T4}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
 {T4}setStatusMode('progress');
 {T4}engine.startGame({{
 {T5}'onProgress': function (current, total) {{
@@ -983,7 +1082,7 @@ new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
 {T3}// 1. Check IndexedDB cache
 {T3}var cached=await opmCacheLoad();
 {T3}if(cached) {{
-{T4}console.log('[OPM] Loaded '+Object.keys(cached).length+' files from IndexedDB cache');
+{T4}console.log('[MOHAAjs] Loaded '+Object.keys(cached).length+' files from IndexedDB cache');
 {T4}window.__opmLocalFiles=cached;
 {T4}startEngine();
 {T4}return;
@@ -996,18 +1095,24 @@ new_boot = f"""{T2}/* OpenMoHAA: Local File Loader + Server Gap-Fill */
 {T3}await new Promise(function(resolve) {{
 {T4}document.getElementById('opm-pick-btn').onclick=async function() {{
 {T5}this.disabled=true;
-{T5}var files=await opmPickFiles();
-{T5}if(files) {{
+{T5}var rawFiles=await opmPickFiles();
+{T5}if(rawFiles) {{
+{T5}{T2}/* Re-read target game in case user changed the dropdown */
+{T5}{T2}targetGame=parseInt(gameSel.value,10)||0;
+{T5}{T2}window.__opmTargetGame=targetGame;
+{T5}{T2}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
+{T5}{T2}/* Map raw files preserving main/mainta/maintt structure */
+{T5}{T2}var files=opmMapFilesToMemfs(rawFiles);
 {T5}{T2}var n=Object.keys(files).length;
-{T5}{T2}console.log('[OPM] Read '+n+' local files from disk');
+{T5}{T2}console.log('[MOHAAjs] Read '+n+' local files from disk (target: '+GAME_NAMES[targetGame]+')');
 {T5}{T2}window.__opmLocalFiles=files;
 {T5}{T2}loader.style.display='none';
-{T5}{T2}// Cache in background (non-blocking)
-{T5}{T2}opmCacheSave(files).then(function(){{console.log('[OPM] Cached '+n+' files to IndexedDB')}})
-{T5}{T3}.catch(function(e){{console.warn('[OPM] IndexedDB cache save failed',e)}});
+{T5}{T2}/* Cache ALL files in background (non-blocking) so subsequent loads are instant */
+{T5}{T2}opmCacheSave(files).then(function(){{console.log('[MOHAAjs] Cached '+n+' files to IndexedDB')}})
+{T5}{T3}.catch(function(e){{console.warn('[MOHAAjs] IndexedDB cache save failed',e)}});
 {T5}{T2}resolve();
 {T5}}} else {{
-{T5}{T2}this.disabled=false; // user cancelled — let them try again
+{T5}{T2}this.disabled=false; /* user cancelled \u2014 let them try again */
 {T5}}}
 {T4}}};
 {T4}document.getElementById('opm-skip-btn').onclick=function() {{
@@ -1292,6 +1397,7 @@ renames = [
     # still references the original names — renaming them in JS breaks linking.
 
     # Safe string-only renames
+    ('OpenMoHAA',                    'MOHAAjs'),
     ('godotengine.org',              'openmohaa.net'),
 ]
 
@@ -1300,7 +1406,7 @@ def apply_renames(txt):
         txt = txt.replace(old, new)
     # Only rename user-visible "Godot" text, NOT snake_case function names
     # which are WASM import symbols that must match the compiled binary.
-    txt = re.sub(r'\bGodot Engine\b', 'OpenMoHAA Engine', txt)
+    txt = re.sub(r'\bGodot Engine\b', 'MOHAAjs Engine', txt)
     txt = re.sub(r'\bGodot projects\b', 'projects', txt)
     # Rename PascalCase "Godot" only when NOT preceded by _ or lowercase
     # (to avoid mangled C++ names like _Z14godot_web_mainiPPc)
@@ -1356,7 +1462,8 @@ def clean_html(txt):
         'required to run this application on the Web are missing'
     )
     # Clean page title if still default
-    txt = txt.replace('OpenMoHAA Test', 'OpenMoHAA')
+    txt = txt.replace('OpenMoHAA Test', 'MOHAAjs')
+    txt = txt.replace('OpenMoHAA', 'MOHAAjs')
     return txt
 
 # ── Process all files ──
@@ -1391,7 +1498,8 @@ for wf in [worklet_file, pos_worklet_file]:
 # Manifest
 m = read(manifest_file)
 if m:
-    m = m.replace('OpenMoHAA Test', 'OpenMoHAA')
+    m = m.replace('OpenMoHAA Test', 'MOHAAjs')
+    m = m.replace('OpenMoHAA', 'MOHAAjs')
     write(manifest_file, m)
     counts['manifest'] = True
 
@@ -1440,11 +1548,21 @@ done
 sync_gdextension_web_entries "${WASM_ARTIFACTS[@]}"
 
 if [[ "$COPY_GAME_FILES" -eq 1 ]]; then
-    if [[ -d "$GAME_FILES_DIR" ]]; then
-        mkdir -p "$EXPORT_DIR/main"
-        rsync -a --delete --exclude='.*' "$GAME_FILES_DIR/" "$EXPORT_DIR/main/"
-        echo "Copied game files: $GAME_FILES_DIR -> $EXPORT_DIR/main"
-    else
+    # GAME_FILES_DIR should point to the MOHAA install root (parent of main/, mainta/, maintt/).
+    # If it points directly to main/, use its parent instead.
+    GAME_BASE_DIR="$GAME_FILES_DIR"
+    if [[ "$(basename "$GAME_BASE_DIR")" == "main" ]]; then
+        GAME_BASE_DIR="$(dirname "$GAME_BASE_DIR")"
+    fi
+    # Copy each game directory that exists
+    for gdir in main mainta maintt; do
+        if [[ -d "$GAME_BASE_DIR/$gdir" ]]; then
+            mkdir -p "$EXPORT_DIR/$gdir"
+            rsync -a --delete --exclude='.*' "$GAME_BASE_DIR/$gdir/" "$EXPORT_DIR/$gdir/"
+            echo "Copied game files: $GAME_BASE_DIR/$gdir -> $EXPORT_DIR/$gdir"
+        fi
+    done
+    if [[ ! -d "$GAME_BASE_DIR/main" && ! -d "$GAME_FILES_DIR" ]]; then
         echo "WARNING: Game files directory not found: $GAME_FILES_DIR"
     fi
 fi

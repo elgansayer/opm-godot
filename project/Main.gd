@@ -81,6 +81,10 @@ func _ready():
 			exec_cfg = "server.cfg"
 		if url_params.has("dedicated") and url_params["dedicated"] == "1":
 			launch_dedicated = true
+		if url_params.has("com_target_game"):
+			var tg = url_params["com_target_game"]
+			if tg in ["0", "1", "2"]:
+				extra_engine_cmds += " +set com_target_game " + tg
 		if url_params.has("connect"):
 			extra_engine_cmds += " +connect " + url_params["connect"]
 		if url_params.has("relay"):

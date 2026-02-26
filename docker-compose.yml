@@ -1,19 +1,48 @@
+# =============================================================================
+# OpenMoHAA Web — Docker Compose
+# =============================================================================
+# Two profiles:
+#
+#   DEV (default) — mounts local web/ build output + nginx config:
+#     ASSET_PATH=/path/to/mohaa-assets docker compose up
+#
+#   PROD — pulls pre-built GHCR image (same as Portainer):
+#     ASSET_PATH=/path/to/mohaa-assets docker compose --profile prod up
+#
+# Required env var:
+#   ASSET_PATH — host directory containing main/, mainta/, maintt/ with pk3s
+# =============================================================================
+
 services:
+  # --- Dev: mount local files, no image build needed ---
   web:
-    image: nginx:1.27-alpine
+    image: nginx:alpine
     container_name: opm-godot-web
     ports:
       - "8086:80"
+    environment:
+      - CDN_URL=${CDN_URL:-}
     volumes:
-      - ./exports/web:/usr/share/nginx/html:ro
-      - ./docker/web/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ${ASSET_PATH:-/tmp}:/gamedata:ro
+      - ./web:/srv/web:ro
+      - ./docker/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
+    restart: unless-stopped
+
+  # --- Prod: pre-built GHCR image (for Portainer / production) ---
+  web-prod:
+    image: ghcr.io/elgansayer/opm-godot:latest
+    container_name: opm-godot-web
+    profiles: [prod]
+    ports:
+      - "8086:80"
+    environment:
+      - CDN_URL=${CDN_URL:-}
+    volumes:
+      - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
     restart: unless-stopped
 
   relay:
     build: ./relay
     container_name: opm-godot-relay
-    # Host networking so UDP broadcast (LAN server scanning) reaches
-    # the real LAN interface, not just the Docker bridge.
     network_mode: host
     restart: unless-stopped

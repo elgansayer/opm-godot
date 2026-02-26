@@ -1,0 +1,56 @@
+# Full release pipeline: build all platforms, create GitHub Release.
+# Docker image is built+pushed by build-web.yml on every push to main.
+# Triggered on tag push (v*) and manual dispatch.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release"
+        required: false
+        default: "true"
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  # ─── Build native platforms ───
+  build-native:
+    uses: ./.github/workflows/build-native.yml
+
+  # ─── Build web ───
+  build-web:
+    uses: ./.github/workflows/build-web.yml
+
+  # ─── Create GitHub Release with all native artifacts ───
+  release:
+    needs: [build-native, build-web]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f | head -50
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/gdextension-linux-x86_64/*
+            artifacts/gdextension-macos-universal/*
+            artifacts/gdextension-windows-x86_64/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

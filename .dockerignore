@@ -1,0 +1,12 @@
+# Exclude everything not needed in the Docker image
+.git
+.github
+godot-cpp
+openmohaa
+project
+scripts
+opm-godot-web-export
+*.md
+*.sh
+.gitignore
+.gitmodules

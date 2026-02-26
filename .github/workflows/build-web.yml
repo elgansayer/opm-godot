@@ -1,0 +1,125 @@
+# Build WASM GDExtension, export Godot project for web, and push Docker image.
+# Triggered on push to main, PRs, and manual dispatch.
+name: Build Web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  EMSDK_VERSION: "3.1.64"
+  GODOT_VERSION: "4.2.2"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: elgansayer/opm-godot
+
+jobs:
+  build-web:
+    runs-on: ubuntu-22.04
+    name: web-wasm32
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SCons and dependencies
+        run: |
+          pip install scons
+          sudo apt-get update
+          sudo apt-get install -y bison flex
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+
+      - name: Generate parser sources
+        working-directory: openmohaa
+        run: |
+          PARSER_DIR="code/parser/generated"
+          if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
+            mkdir -p "$PARSER_DIR"
+            bison --defines="$PARSER_DIR/yyParser.hpp" -o "$PARSER_DIR/yyParser.cpp" code/parser/bison_source.txt
+            flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
+          fi
+
+      - name: Build WASM GDExtension
+        working-directory: openmohaa
+        run: scons platform=web target=template_debug -j2 dev_build=yes
+
+      - name: Verify WASM artifacts
+        run: |
+          ls -la openmohaa/bin/*.wasm
+          test -f openmohaa/bin/libopenmohaa.wasm
+
+      - name: Install Godot
+        run: |
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64.zip" -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp
+          sudo mv "/tmp/Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+
+      - name: Install Godot export templates
+        run: |
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.stable"
+          mkdir -p "$TEMPLATES_DIR"
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_export_templates.tpz" -O /tmp/templates.tpz
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$TEMPLATES_DIR/"
+
+      - name: Deploy WASM to project
+        run: |
+          mkdir -p project/bin
+          cp -f openmohaa/bin/libopenmohaa.wasm project/bin/
+
+      - name: Export Godot project for web
+        run: |
+          mkdir -p web
+          cd project
+          godot --headless --export-debug "Web" ../web/mohaa.html 2>&1 || true
+          test -f ../web/mohaa.html
+
+      - name: Apply JS patches
+        run: |
+          scripts/build-web.sh --patch-only
+        env:
+          EMSDK_DIR: ${{ env.EMSDK }}
+
+      - name: Upload web export artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-export
+          path: web/
+
+      # --- Docker image build + push (only on main branch, not PRs) ---
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/web/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
