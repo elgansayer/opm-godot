@@ -55,8 +55,13 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --serve)
-            # (Re-)deploy docker compose stack and exit; no build.
+            # Full build then (re-)deploy docker compose stack.
             SERVE_ONLY=1
+            shift
+            ;;
+        --serve-only)
+            # (Re-)deploy docker compose stack and exit; no build.
+            SERVE_ONLY=2
             shift
             ;;
         --asset-path)
@@ -116,7 +121,7 @@ if [[ ! -f "$EMSDK_ENV_SH" && "$SERVE_ONLY" -eq 0 && "$PATCH_ONLY" -eq 0 ]]; the
     exit 1
 fi
 
-if [[ "$SERVE_ONLY" -eq 1 && "$PATCH_ONLY" -eq 0 ]]; then
+if [[ "$SERVE_ONLY" -eq 2 && "$PATCH_ONLY" -eq 0 ]]; then
     serve_docker
     exit 0
 fi
@@ -414,18 +419,17 @@ preload_new = (
     "    console.log('[MOHAAjs] Wrote '+__lfKeys.length+' local files to MEMFS');"
     "    if(typeof window!=='undefined')window.__opmLocalFiles=null;"
     "  }"
-    # --- walk server for ALL game directories (gap-fill) ---
-    # Always load 'main' (base game), plus the expansion dir if target != 0.
-    "  var __gameDirs=['main'];"
+    # --- walk server for base game directory only (gap-fill) ---
+    # Only walk 'main/' on the server — expansion dirs (mainta/, maintt/)
+    # are provided entirely by local files / IndexedDB cache and do NOT
+    # exist on the web server, so walking them would produce 404 errors.
     "  var __tg=(typeof window!=='undefined'&&window.__opmTargetGame)||0;"
     "  var __gdMap={1:'mainta',2:'maintt'};"
-    "  if(__gdMap[__tg])__gameDirs.push(__gdMap[__tg]);"
-    "  for(var __gi=0;__gi<__gameDirs.length;__gi++){"
-    "    var __gd=__gameDirs[__gi];"
-    "    __mkdirs('/'+__gd);"
-    "    console.log('[MOHAAjs] Server gap-fill: scanning /'+__gd+'/ ...');"
-    "    await __walk(__gd+'/');"
-    "  }"
+    "  var __expDir=__gdMap[__tg];"
+    "  if(__expDir)__mkdirs('/'+__expDir);"
+    "  __mkdirs('/main');"
+    "  console.log('[MOHAAjs] Server gap-fill: scanning /main/ ...');"
+    "  await __walk('main/');"
     "  console.log('[MOHAAjs] VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
     "})().catch(e=>console.error('[MOHAAjs] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
     "});"
@@ -784,10 +788,14 @@ from pathlib import Path
 html_path = Path(sys.argv[1])
 src = html_path.read_text(encoding='utf-8', errors='ignore')
 
-# Idempotency
+# Idempotency: strip old picker content so we can re-inject with latest code
 if 'opm-loader' in src:
-    print("File picker already patched (idempotent)")
-    sys.exit(0)
+    import re
+    print("Stripping old file picker for re-injection...")
+    # Remove old CSS block (from marker comment to just before </style>)
+    src = re.sub(r'/\* ── MOHAAjs Local File Loader ── \*/.*?(?=</style>)', '', src, flags=re.DOTALL)
+    # Remove old HTML loader div (from <div id="opm-loader"> to its closing </div></div>)
+    src = re.sub(r'\s*<div id="opm-loader">.*?</div>\s*</div>\s*(?=\s*<script)', '\n', src, flags=re.DOTALL)
 
 # ── 1. Inject CSS before </style> ─────────────────────────────────────────
 picker_css = """
@@ -802,12 +810,14 @@ picker_css = """
 .opm-inner p{margin:.4rem 0;line-height:1.5}
 .opm-hint{font-size:.85rem;color:#888}
 .opm-hint code{background:#333;padding:.1rem .4rem;border-radius:3px}
-.opm-game-select{margin:.6rem 0;display:none}
+.opm-game-select{margin:.6rem 0}
 .opm-game-select label{font-size:.9rem;color:#aaa;margin-right:.4rem}
 .opm-game-select select{
   padding:.3rem .6rem;background:#333;color:#e0e0e0;border:1px solid #555;
   border-radius:4px;font-size:.9rem;
 }
+.opm-cache-status{font-size:.85rem;color:#7a7;margin:.3rem 0}
+#opm-pick-section{display:none}
 .opm-btn{
   display:inline-block;margin:1rem .5rem;padding:.7rem 2rem;
   background:#c0a060;color:#1a1a1a;border:none;border-radius:6px;
@@ -839,21 +849,25 @@ picker_html = """
 \t\t<div id="opm-loader">
 \t\t\t<div class="opm-inner">
 \t\t\t\t<h2>MOHAAjs</h2>
-\t\t\t\t<p>Load your Medal of Honor: Allied Assault game files</p>
-\t\t\t\t<p class="opm-hint"><strong>\u26a0\ufe0f Select the MOHAA <em>installation</em> folder</strong> \u2014 the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself!</p>
+\t\t\t\t<p>Medal of Honor: Allied Assault</p>
 \t\t\t\t<div class="opm-game-select" id="opm-game-select">
-\t\t\t\t\t<label for="opm-target-game">Target game:</label>
+\t\t\t\t\t<label for="opm-target-game">Select game:</label>
 \t\t\t\t\t<select id="opm-target-game">
 \t\t\t\t\t\t<option value="0">Allied Assault (main)</option>
 \t\t\t\t\t\t<option value="1">Spearhead (mainta)</option>
 \t\t\t\t\t\t<option value="2">Breakthrough (maintt)</option>
 \t\t\t\t\t</select>
 \t\t\t\t</div>
-\t\t\t\t<button id="opm-pick-btn" class="opm-btn">Select MOHAA Installation Folder</button>
-\t\t\t\t<input type="file" id="opm-input-fb" webkitdirectory multiple style="display:none">
-\t\t\t\t<div id="opm-prog-area">
-\t\t\t\t\t<progress id="opm-file-prog" style="width:100%"></progress>
-\t\t\t\t\t<p id="opm-prog-text">Reading files\u2026</p>
+\t\t\t\t<p id="opm-cache-status" class="opm-cache-status"></p>
+\t\t\t\t<button id="opm-play-btn" class="opm-btn">Play</button>
+\t\t\t\t<div id="opm-pick-section">
+\t\t\t\t\t<p class="opm-hint"><strong>\u26a0\ufe0f Select the MOHAA <em>installation</em> folder</strong> \u2014 the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself!</p>
+\t\t\t\t\t<button id="opm-pick-btn" class="opm-btn">Select MOHAA Installation Folder</button>
+\t\t\t\t\t<input type="file" id="opm-input-fb" webkitdirectory multiple style="display:none">
+\t\t\t\t\t<div id="opm-prog-area">
+\t\t\t\t\t\t<progress id="opm-file-prog" style="width:100%"></progress>
+\t\t\t\t\t\t<p id="opm-prog-text">Reading files\u2026</p>
+\t\t\t\t\t</div>
 \t\t\t\t</div>
 \t\t\t\t<button id="opm-skip-btn" class="opm-link">Skip \u2014 use server files only</button>
 \t\t\t\t<p class="opm-disclaimer">MOHAAjs is an independent fan project and is not affiliated with, endorsed by, or connected to Electronic Arts, the OpenMoHAA project, or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
@@ -870,259 +884,281 @@ else:
     print("WARNING: Could not find <script src=mohaa.js> for HTML injection")
 
 # ── 3. Replace the engine.startGame() boot block ──────────────────────────
-# We locate the block between two unique markers rather than matching exact
-# whitespace (tab indentation varies across Godot export versions).
+# On first patch: locate by original engine markers (setStatusMode/displayFailureNotice).
+# On re-patch: locate by our custom OPM_BOOT_START/OPM_BOOT_END markers.
+OPM_BOOT_MARKER_START = "/* OPM_BOOT_START */"
+OPM_BOOT_MARKER_END   = "/* OPM_BOOT_END */"
 BOOT_START = "setStatusMode('progress');"
 BOOT_END   = "}, displayFailureNotice);"
 
-si = src.find(BOOT_START)
-ei = src.find(BOOT_END, si) if si >= 0 else -1
+opm_si = src.find(OPM_BOOT_MARKER_START)
+opm_ei = src.find(OPM_BOOT_MARKER_END, opm_si) if opm_si >= 0 else -1
+if opm_si >= 0 and opm_ei >= 0:
+    si = opm_si
+    ei = opm_ei + len(OPM_BOOT_MARKER_END)
+    print("Found OPM boot markers for re-patch")
+else:
+    si = src.find(BOOT_START)
+    ei = src.find(BOOT_END, si) if si >= 0 else -1
+    if si >= 0 and ei >= 0:
+        ei += len(BOOT_END)
+        print("Found original engine boot markers for first-time patch")
+
 if si < 0 or ei < 0:
     print("WARNING: Could not locate engine.startGame() boot block")
     html_path.write_text(src, encoding='utf-8')
     sys.exit(0)
-
-ei += len(BOOT_END)
 
 T2 = '\t\t'
 T3 = '\t\t\t'
 T4 = '\t\t\t\t'
 T5 = '\t\t\t\t\t'
 
-new_boot = f"""{T2}/* MOHAAjs: Local File Loader + Server Gap-Fill + Multi-Game Support */
+new_boot = f"""/* OPM_BOOT_START */
+{T2}/* MOHAAjs: Game Selector + Per-Game Cache + Local File Loader */
 {T2}(async function opmBoot() {{
-{T3}var DB_NAME='opm-files',DB_VER=2,ST='f';
-
-{T3}/* ── Game directory mapping ── */
+{T3}var DB_VER=1,ST='f';
 {T3}var GAME_DIRS={{0:'main',1:'mainta',2:'maintt'}};
 {T3}var GAME_NAMES={{0:'Allied Assault',1:'Spearhead',2:'Breakthrough'}};
+{T3}/* Which caches to load for each game (base + expansion) */
+{T3}var GAME_DEPS={{0:['main'],1:['main','mainta'],2:['main','maintt']}};
+{T3}var targetGame=0;
+{T3}window.__opmTargetGame=0;
 
-{T3}/* ── Read com_target_game from URL ── */
+{T3}/* ── Pre-select from URL param ── */
 {T3}var urlParams=new URLSearchParams(window.location.search);
-{T3}var urlTargetGame=urlParams.get('com_target_game');
-{T3}var targetGame=0; /* default: Allied Assault (main) */
-{T3}if(urlTargetGame!==null) {{
-{T4}var parsed=parseInt(urlTargetGame,10);
-{T4}if(parsed>=0&&parsed<=2) targetGame=parsed;
-{T3}}}
-{T3}window.__opmTargetGame=targetGame;
-{T3}console.log('[MOHAAjs] Target game: '+targetGame+' ('+GAME_NAMES[targetGame]+', dir: '+GAME_DIRS[targetGame]+')');
+{T3}var urlTG=urlParams.get('com_target_game');
+{T3}if(urlTG!==null){{var p=parseInt(urlTG,10);if(p>=0&&p<=2)targetGame=p}}
 
-{T3}/* ── Update game selector UI from URL param ── */
 {T3}var gameSel=document.getElementById('opm-target-game');
-{T3}var gameSelArea=document.getElementById('opm-game-select');
-{T3}if(gameSel) {{
-{T4}gameSel.value=String(targetGame);
-{T4}gameSelArea.style.display='block';
-{T4}gameSel.onchange=function(){{targetGame=parseInt(this.value,10);window.__opmTargetGame=targetGame}};
-{T3}}}
+{T3}var loader=document.getElementById('opm-loader');
+{T3}var pickSection=document.getElementById('opm-pick-section');
+{T3}var playBtn=document.getElementById('opm-play-btn');
+{T3}var cacheStatus=document.getElementById('opm-cache-status');
+{T3}if(gameSel)gameSel.value=String(targetGame);
 
-{T3}/* ── IndexedDB helpers ── */
-{T3}function opmOpenDB() {{
-{T4}return new Promise(function(ok) {{
-{T5}try {{
-{T5}{T2}var r=indexedDB.open(DB_NAME,DB_VER);
-{T5}{T2}r.onupgradeneeded=function(e){{var db=e.target.result;if(!db.objectStoreNames.contains(ST))db.createObjectStore(ST)}};
-{T5}{T2}r.onsuccess=function(e){{ok(e.target.result)}};
-{T5}{T2}r.onerror=function(){{ok(null)}};
-{T5}}} catch(e){{ok(null)}}
-{T4}}});
-{T3}}}
-{T3}var idb=await opmOpenDB();
-
-{T3}function opmCacheLoad() {{
-{T4}if(!idb) return Promise.resolve(null);
-{T4}return new Promise(function(ok) {{
-{T5}try {{
-{T5}{T2}var tx=idb.transaction(ST,'readonly'),s=tx.objectStore(ST),out={{}},n=0;
-{T5}{T2}var cur=s.openCursor();
-{T5}{T2}cur.onsuccess=function(e){{var c=e.target.result;if(c){{out[c.key]=c.value;n++;c.continue()}}else ok(n?out:null)}};
-{T5}{T2}cur.onerror=function(){{ok(null)}};
-{T5}}} catch(e){{ok(null)}}
-{T4}}});
-{T3}}}
-
-{T3}function opmCacheSave(files) {{
-{T4}if(!idb) return Promise.resolve();
-{T4}var keys=Object.keys(files),bs=20;
-{T4}return (async function() {{
-{T5}for(var i=0;i<keys.length;i+=bs) {{
-{T5}{T2}var chunk=keys.slice(i,i+bs);
-{T5}{T2}await new Promise(function(ok){{
-{T5}{T3}try{{var tx=idb.transaction(ST,'readwrite'),s=tx.objectStore(ST);
-{T5}{T3}chunk.forEach(function(k){{s.put(files[k],k)}});
-{T5}{T3}tx.oncomplete=ok;tx.onerror=function(){{ok()}}}}catch(e){{ok()}}
-{T5}{T2}}});
-{T5}}}
-{T4}}})();
-{T3}}}
-
-{T3}function opmCacheClear() {{
-{T4}if(!idb) return Promise.resolve();
+{T3}/* ── Per-game IndexedDB helpers ── */
+{T3}function dbName(gd){{return 'opm-'+gd}}
+{T3}function openGameDB(gd){{
 {T4}return new Promise(function(ok){{
-{T5}try{{var tx=idb.transaction(ST,'readwrite');tx.objectStore(ST).clear();
-{T5}tx.oncomplete=ok;tx.onerror=function(){{ok()}}}}catch(e){{ok()}}
-{T4}}});
+{T5}try{{var r=indexedDB.open(dbName(gd),DB_VER);
+{T5}r.onupgradeneeded=function(e){{var db=e.target.result;if(!db.objectStoreNames.contains(ST))db.createObjectStore(ST)}};
+{T5}r.onsuccess=function(e){{ok(e.target.result)}};
+{T5}r.onerror=function(){{ok(null)}}}}catch(e){{ok(null)}}
+{T4}}})
+{T3}}}
+
+{T3}async function loadFromDB(gd){{
+{T4}var db=await openGameDB(gd);if(!db)return null;
+{T4}return new Promise(function(ok){{
+{T5}try{{var tx=db.transaction(ST,'readonly'),s=tx.objectStore(ST),out={{}},n=0;
+{T5}var cur=s.openCursor();
+{T5}cur.onsuccess=function(e){{var c=e.target.result;if(c){{out[c.key]=c.value;n++;c.continue()}}else{{db.close();ok(n?out:null)}}}};
+{T5}cur.onerror=function(){{db.close();ok(null)}}}}catch(e){{db.close();ok(null)}}
+{T4}}})
+{T3}}}
+
+{T3}async function saveToDB(gd,files){{
+{T4}var db=await openGameDB(gd);if(!db)return;
+{T4}var keys=Object.keys(files),bs=20;
+{T4}for(var i=0;i<keys.length;i+=bs){{
+{T5}var chunk=keys.slice(i,i+bs);
+{T5}await new Promise(function(done){{
+{T5}{T2}try{{var tx=db.transaction(ST,'readwrite'),s=tx.objectStore(ST);
+{T5}{T2}chunk.forEach(function(k){{s.put(files[k],k)}});
+{T5}{T2}tx.oncomplete=done;tx.onerror=function(){{done()}}}}catch(e){{done()}}
+{T5}}})
+{T4}}}
+{T4}db.close()
+{T3}}}
+
+{T3}async function hasCache(gd){{
+{T4}var db=await openGameDB(gd);if(!db)return false;
+{T4}return new Promise(function(ok){{
+{T5}try{{var tx=db.transaction(ST,'readonly');var req=tx.objectStore(ST).count();
+{T5}req.onsuccess=function(){{db.close();ok(req.result>0)}};
+{T5}req.onerror=function(){{db.close();ok(false)}}}}catch(e){{db.close();ok(false)}}
+{T4}}})
+{T3}}}
+
+{T3}async function loadGameCaches(game){{
+{T4}var deps=GAME_DEPS[game]||['main'],allFiles={{}};
+{T4}for(var i=0;i<deps.length;i++){{
+{T5}var files=await loadFromDB(deps[i]);
+{T5}if(files){{var ks=Object.keys(files);for(var j=0;j<ks.length;j++)allFiles[ks[j]]=files[ks[j]];
+{T5}console.log('[MOHAAjs] Loaded '+ks.length+' files from '+deps[i]+' cache')}}
+{T4}}}
+{T4}return Object.keys(allFiles).length?allFiles:null
+{T3}}}
+
+{T3}async function cacheByGameDir(rawFiles){{
+{T4}var buckets={{}};var keys=Object.keys(rawFiles);
+{T4}for(var i=0;i<keys.length;i++){{
+{T5}var rel=keys[i].replace(/\\\\/g,'/');
+{T5}var slash=rel.indexOf('/');
+{T5}if(slash>0){{
+{T5}{T2}var td=rel.substring(0,slash).toLowerCase();
+{T5}{T2}if(td==='main'||td==='mainta'||td==='maintt'){{
+{T5}{T3}if(!buckets[td])buckets[td]={{}};buckets[td][rel]=rawFiles[keys[i]];continue
+{T5}{T2}}}
+{T5}}}
+{T5}if(!buckets['main'])buckets['main']={{}};buckets['main'][rel]=rawFiles[keys[i]]
+{T4}}}
+{T4}var dirs=Object.keys(buckets);
+{T4}console.log('[MOHAAjs] Caching files for: '+dirs.join(', '));
+{T4}for(var d=0;d<dirs.length;d++){{
+{T5}var n=Object.keys(buckets[dirs[d]]).length;
+{T5}await saveToDB(dirs[d],buckets[dirs[d]]);
+{T5}console.log('[MOHAAjs] Cached '+n+' files to '+dirs[d])
+{T4}}}
+{T3}}}
+
+{T3}async function updateCacheStatus(){{
+{T4}var parts=[];
+{T4}for(var k=0;k<3;k++){{
+{T5}var gd=GAME_DIRS[k];
+{T5}if(await hasCache(gd))parts.push(GAME_NAMES[k]+' \\u2714')
+{T4}}}
+{T4}if(cacheStatus)cacheStatus.textContent=parts.length?'Cached: '+parts.join(', '):'No cached game files'
 {T3}}}
 
 {T3}/* ── File reading helpers ── */
-{T3}async function opmReadDirHandle(h,prefix) {{
+{T3}async function opmReadDirHandle(h,prefix){{
 {T4}var files={{}};
-{T4}for await (var entry of h.values()) {{
+{T4}for await(var entry of h.values()){{
 {T5}if(entry.name.startsWith('.'))continue;
 {T5}var p=prefix?prefix+'/'+entry.name:entry.name;
 {T5}if(entry.kind==='directory'){{Object.assign(files,await opmReadDirHandle(entry,p))}}
 {T5}else{{try{{var f=await entry.getFile();files[p]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}}}
 {T4}}}
-{T4}return files;
+{T4}return files
 {T3}}}
 
-{T3}async function opmReadViaInput() {{
-{T4}return new Promise(function(ok) {{
+{T3}async function opmReadViaInput(){{
+{T4}return new Promise(function(ok){{
 {T5}var inp=document.getElementById('opm-input-fb');
-{T5}inp.onchange=async function() {{
+{T5}inp.onchange=async function(){{
 {T5}{T2}var list=Array.from(inp.files),files={{}};
 {T5}{T2}var area=document.getElementById('opm-prog-area');
 {T5}{T2}var bar=document.getElementById('opm-file-prog');
 {T5}{T2}var txt=document.getElementById('opm-prog-text');
 {T5}{T2}area.style.display='block';bar.max=list.length;bar.value=0;
-{T5}{T2}for(var i=0;i<list.length;i++) {{
+{T5}{T2}for(var i=0;i<list.length;i++){{
 {T5}{T3}var f=list[i],rp=f.webkitRelativePath||f.name;
-{T5}{T3}/* Strip the top-level directory name chosen by the user */
-{T5}{T3}var slash=rp.indexOf('/');if(slash>=0) rp=rp.substring(slash+1);
+{T5}{T3}var slash=rp.indexOf('/');if(slash>=0)rp=rp.substring(slash+1);
 {T5}{T3}if(!rp||rp.startsWith('.'))continue;
 {T5}{T3}try{{files[rp]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}
-{T5}{T3}bar.value=i+1;txt.textContent='Reading: '+(i+1)+'/'+list.length;
+{T5}{T3}bar.value=i+1;txt.textContent='Reading: '+(i+1)+'/'+list.length
 {T5}{T2}}}
 {T5}{T2}area.style.display='none';
-{T5}{T2}ok(Object.keys(files).length?files:null);
+{T5}{T2}ok(Object.keys(files).length?files:null)
 {T5}}};
-{T5}inp.click();
-{T4}}});
+{T5}inp.click()
+{T4}}})
 {T3}}}
 
-{T3}async function opmPickFiles() {{
+{T3}async function opmPickFiles(){{
 {T4}var area=document.getElementById('opm-prog-area');
 {T4}var txt=document.getElementById('opm-prog-text');
-{T4}if(window.showDirectoryPicker) {{
-{T5}try {{
+{T4}if(window.showDirectoryPicker){{
+{T5}try{{
 {T5}{T2}area.style.display='block';txt.textContent='Reading files from folder\\u2026';
 {T5}{T2}var dh=await window.showDirectoryPicker({{mode:'read'}});
 {T5}{T2}var files=await opmReadDirHandle(dh,'');
 {T5}{T2}area.style.display='none';
-{T5}{T2}if(Object.keys(files).length) return files;
-{T5}}} catch(e) {{
+{T5}{T2}if(Object.keys(files).length)return files
+{T5}}}catch(e){{
 {T5}{T2}area.style.display='none';
-{T5}{T2}if(e.name==='AbortError') return null;
-{T5}{T2}console.warn('[MOHAAjs] Directory picker error, trying fallback:',e);
+{T5}{T2}if(e.name==='AbortError')return null;
+{T5}{T2}console.warn('[MOHAAjs] Directory picker error, trying fallback:',e)
 {T5}}}
 {T4}}}
-{T4}return opmReadViaInput();
+{T4}return opmReadViaInput()
 {T3}}}
 
-{T3}/* ── Map picked base-path files into per-game MEMFS paths ── */
-{T3}/* The user selects the MOHAA install root (parent of main/mainta/maintt). */
-{T3}/* Files arrive as e.g. "main/Pak0.pk3", "mainta/Pak0.pk3", etc. */
-{T3}/* We keep the full relative structure so ALL game dirs are available. */
-{T3}function opmMapFilesToMemfs(rawFiles) {{
-{T4}var mapped={{}};
-{T4}var keys=Object.keys(rawFiles);
-{T4}var foundDirs={{}};
-{T4}for(var i=0;i<keys.length;i++) {{
+{T3}function opmMapFilesToMemfs(rawFiles){{
+{T4}var mapped={{}};var keys=Object.keys(rawFiles);var foundDirs={{}};
+{T4}for(var i=0;i<keys.length;i++){{
 {T5}var rel=keys[i].replace(/\\\\/g,'/');
-{T5}/* Detect which game subdirs are present */
 {T5}var firstSlash=rel.indexOf('/');
-{T5}if(firstSlash>0) {{
+{T5}if(firstSlash>0){{
 {T5}{T2}var topDir=rel.substring(0,firstSlash).toLowerCase();
-{T5}{T2}if(topDir==='main'||topDir==='mainta'||topDir==='maintt') foundDirs[topDir]=true;
+{T5}{T2}if(topDir==='main'||topDir==='mainta'||topDir==='maintt')foundDirs[topDir]=true
 {T5}}}
-{T5}/* Keep file at its original relative path */
-{T5}mapped[rel]=rawFiles[keys[i]];
+{T5}mapped[rel]=rawFiles[keys[i]]
 {T4}}}
 {T4}var dirList=Object.keys(foundDirs);
-{T4}if(dirList.length>0) {{
-{T5}console.log('[MOHAAjs] Detected game directories: '+dirList.join(', '));
-{T4}}} else {{
-{T5}console.warn('[MOHAAjs] No main/mainta/maintt subdirectories found in selected folder!');
-{T5}console.warn('[MOHAAjs] Files will be placed as-is. Ensure you selected the MOHAA installation root.');
-{T4}}}
-{T4}return mapped;
+{T4}if(dirList.length>0)console.log('[MOHAAjs] Detected game directories: '+dirList.join(', '));
+{T4}else console.warn('[MOHAAjs] No main/mainta/maintt subdirs found in selection');
+{T4}return mapped
 {T3}}}
 
 {T3}/* ── Engine starter ── */
-{T3}function startEngine() {{
-{T4}/* Pass com_target_game to the engine via URL args if not already set */
+{T3}function startEngine(){{
 {T4}var currentUrl=new URL(window.location.href);
-{T4}if(!currentUrl.searchParams.has('com_target_game')) {{
-{T5}currentUrl.searchParams.set('com_target_game',String(targetGame));
-{T5}window.history.replaceState(null,'',currentUrl.toString());
-{T4}}}
-{T4}/* Store for the preRun VFS walker to know which dirs to load */
+{T4}currentUrl.searchParams.set('com_target_game',String(targetGame));
+{T4}window.history.replaceState(null,'',currentUrl.toString());
 {T4}window.__opmTargetGame=targetGame;
 {T4}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
 {T4}setStatusMode('progress');
 {T4}engine.startGame({{
-{T5}'onProgress': function (current, total) {{
-{T5}{T2}if (current > 0 && total > 0) {{
-{T5}{T3}statusProgress.value = current;
-{T5}{T3}statusProgress.max = total;
-{T5}{T2}}} else {{
-{T5}{T3}statusProgress.removeAttribute('value');
-{T5}{T3}statusProgress.removeAttribute('max');
-{T5}{T2}}}
-{T5}}},
-{T4}}}).then(function() {{
-{T5}setStatusMode('hidden');
-{T4}}}, displayFailureNotice);
+{T5}'onProgress':function(current,total){{
+{T5}{T2}if(current>0&&total>0){{statusProgress.value=current;statusProgress.max=total}}
+{T5}{T2}else{{statusProgress.removeAttribute('value');statusProgress.removeAttribute('max')}}
+{T5}}}
+{T4}}}).then(function(){{setStatusMode('hidden')}},displayFailureNotice)
 {T3}}}
 
-{T3}/* ── Boot logic ── */
-{T3}var loader=document.getElementById('opm-loader');
-
-{T3}// 1. Check IndexedDB cache
-{T3}var cached=await opmCacheLoad();
-{T3}if(cached) {{
-{T4}console.log('[MOHAAjs] Loaded '+Object.keys(cached).length+' files from IndexedDB cache');
-{T4}window.__opmLocalFiles=cached;
-{T4}startEngine();
-{T4}return;
-{T3}}}
-
-{T3}// 2. Show file picker UI
+{T3}/* ── Always show game picker ── */
 {T3}statusOverlay.style.visibility='hidden';
 {T3}loader.style.display='flex';
+{T3}if(pickSection)pickSection.style.display='none';
+{T3}await updateCacheStatus();
 
-{T3}await new Promise(function(resolve) {{
-{T4}document.getElementById('opm-pick-btn').onclick=async function() {{
-{T5}this.disabled=true;
-{T5}var rawFiles=await opmPickFiles();
-{T5}if(rawFiles) {{
-{T5}{T2}/* Re-read target game in case user changed the dropdown */
-{T5}{T2}targetGame=parseInt(gameSel.value,10)||0;
-{T5}{T2}window.__opmTargetGame=targetGame;
-{T5}{T2}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
-{T5}{T2}/* Map raw files preserving main/mainta/maintt structure */
-{T5}{T2}var files=opmMapFilesToMemfs(rawFiles);
-{T5}{T2}var n=Object.keys(files).length;
-{T5}{T2}console.log('[MOHAAjs] Read '+n+' local files from disk (target: '+GAME_NAMES[targetGame]+')');
-{T5}{T2}window.__opmLocalFiles=files;
+{T3}await new Promise(function(resolve){{
+{T4}playBtn.onclick=async function(){{
+{T5}targetGame=parseInt(gameSel.value,10)||0;
+{T5}window.__opmTargetGame=targetGame;
+{T5}playBtn.disabled=true;playBtn.textContent='Loading\\u2026';
+{T5}/* Check per-game caches */
+{T5}var cached=await loadGameCaches(targetGame);
+{T5}if(cached){{
+{T5}{T2}console.log('[MOHAAjs] Cache hit for '+GAME_NAMES[targetGame]);
+{T5}{T2}window.__opmLocalFiles=cached;
 {T5}{T2}loader.style.display='none';
-{T5}{T2}/* Cache ALL files in background (non-blocking) so subsequent loads are instant */
-{T5}{T2}opmCacheSave(files).then(function(){{console.log('[MOHAAjs] Cached '+n+' files to IndexedDB')}})
-{T5}{T3}.catch(function(e){{console.warn('[MOHAAjs] IndexedDB cache save failed',e)}});
-{T5}{T2}resolve();
-{T5}}} else {{
-{T5}{T2}this.disabled=false; /* user cancelled \u2014 let them try again */
+{T5}{T2}resolve();return
+{T5}}}
+{T5}/* No cache \u2014 show file picker */
+{T5}playBtn.style.display='none';
+{T5}if(pickSection)pickSection.style.display='block';
+{T5}document.getElementById('opm-pick-btn').onclick=async function(){{
+{T5}{T2}this.disabled=true;
+{T5}{T2}var rawFiles=await opmPickFiles();
+{T5}{T2}if(rawFiles){{
+{T5}{T3}targetGame=parseInt(gameSel.value,10)||0;
+{T5}{T3}window.__opmTargetGame=targetGame;
+{T5}{T3}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
+{T5}{T3}var files=opmMapFilesToMemfs(rawFiles);
+{T5}{T3}var n=Object.keys(files).length;
+{T5}{T3}console.log('[MOHAAjs] Read '+n+' local files (target: '+GAME_NAMES[targetGame]+')');
+{T5}{T3}window.__opmLocalFiles=files;
+{T5}{T3}loader.style.display='none';
+{T5}{T3}cacheByGameDir(files).catch(function(e){{console.warn('[MOHAAjs] Cache save failed',e)}});
+{T5}{T3}resolve()
+{T5}{T2}}}else{{this.disabled=false}}
 {T5}}}
 {T4}}};
-{T4}document.getElementById('opm-skip-btn').onclick=function() {{
+{T4}document.getElementById('opm-skip-btn').onclick=function(){{
+{T5}targetGame=parseInt(gameSel.value,10)||0;
+{T5}window.__opmTargetGame=targetGame;
 {T5}loader.style.display='none';
-{T5}resolve();
-{T4}}};
+{T5}resolve()
+{T4}}}
 {T3}}});
 
-{T3}startEngine();
-{T2}}})().catch(displayFailureNotice);"""
+{T3}startEngine()
+{T2}}})().catch(displayFailureNotice);
+/* OPM_BOOT_END */"""
 
 src = src[:si] + new_boot + src[ei:]
 print("Patched boot sequence with local file picker gate")
@@ -1611,4 +1647,8 @@ fi
 
 echo "Web build complete (target=$BUILD_TARGET)."
 echo "Export output: $EXPORT_HTML"
+
+if [[ "$SERVE_ONLY" -eq 1 ]]; then
+    serve_docker
+fi
 
