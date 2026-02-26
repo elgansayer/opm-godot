@@ -1,84 +1,168 @@
 # ShinMOHAA / MOHAAjs
 
-A modern, high-performance engine for **Medal of Honor: Allied Assault**, built for **Godot 4** as a GDExtension library. 
+A modern, high-performance engine for **Medal of Honor: Allied Assault**, built for **Godot 4** as a GDExtension library and **WebAssembly**. 
 
 ShinMOHAA brings the classic tactical shooter into the modern era, leveraging Godot's powerful rendering and input systems while maintaining bit-perfect compatibility with original game logic.
 
-## Highlights
-- **Godot 4 Native Power**: Runs as a high-performance GDExtension, integrated directly into the Godot editor.
-- **MOHAAjs (Web)**: Specialized WebAssembly client with optimized asset streaming and persistent IndexedDB caching.
-- **Cross-Expansion Support**: Native support for Allied Assault, Spearhead (`mainta`), and Breakthrough (`maintt`).
-- **Modernized Rendering**: Enhanced BSP support, lightmaps, shaders, and high-fidelity skeletal animations (TIKI).
-- **Multiplayer Ready**: Includes a WebSocket-to-UDP relay for seamless web-based multiplayer.
+---
 
-## Advantages
-- **Instant Play (Web)**: No installation required for the web client; just point to your asset folder and play in the browser.
-- **Cross-Platform**: Seamlessly runs on Linux, Windows, macOS, and Web with the same codebase.
-- **Persistent Storage**: Automated IndexedDB caching means assets are only downloaded or loaded once.
-- **Zero-Trust Security**: Browser-level sandboxing ensures a safe environment for players.
-- **Auto-Syncing**: Any server-side mods, maps, or files missing from the player's local installation are automatically downloaded and cached by the client.
-- **Developer Friendly**: Built with modern C++, Godot's GDExtension, and standard web technologies (HTML5/WASM).
+## 🚀 Highlights
 
-## Possibilities
-- **Enhanced Graphics**: Real-time shadows, PBR materials, and advanced post-processing via Godot's Vulkan/Forward+ renderers.
-- **Modding Revolution**: Use Godot's visual scripting or GDScript to create total conversions more easily than ever.
-- **VR Support**: Native OpenXR integration in Godot opens the door for a full MOHAA VR experience.
-- **AI Modernization**: Replace legacy pathfinding with Godot's NavigationServer and implement complex behaviors using **LimboAI** for state-of-the-art NPC decision making.
-- **Unified Multiplayer**: Cross-play between native desktop clients and browser-based players via the WebSocket relay.
-- **Mobile Export**: Potential for Android and iOS versions using Godot's mobile export templates.
-```
+- **Godot 4 Native Power**: High-performance GDExtension integration, bringing MOHAA into a modern editor environment.
+- **MOHAAjs (WebClient)**: A specialized WebAssembly client with optimized asset streaming and persistent IndexedDB caching.
+- **Modern Rendering**: PBR-ready materials, enhanced BSP support, and high-fidelity skeletal animations (TIKI).
+- **Morfuse Script Engine**: Full parity execution of `.scr` files for game logic and total conversions.
+- **Cross-Platform Reach**: Support for Windows, Linux, macOS, Android, iOS, and Web from a single codebase.
+- **Zero-Trust Security**: Browser-level sandboxing for the web client ensures a safe environment for players.
+- **Modding Revolution**: Use Godot's visual tools, GDScript, or C++ to extend the game beyond its original limits.
+
+---
+
+## 🗺️ Repository Map
+
+```text
 opm-godot/
-├── openmohaa/          # Core engine source & Godot GDExtension glue
-├── project/            # Main Godot 4 editor project
-├── exports/web/        # Templates and configurations for MOHAAjs (Web)
+├── openmohaa/          # Core engine source (C/C++)
+│   ├── code/           # Engine subsystems (fgame, qcommon, script, tiki, etc.)
+│   └── SConstruct      # Build configuration for GDExtension
+├── project/            # Godot 4 editor project (Scenes, UI, Shaders)
+├── web/                # Production web export and landing page
 ├── relay/              # WebSocket-to-UDP relay server (Node.js)
 ├── scripts/            # Build automation and deployment utilities
-└── web/                # Production web export directory
+├── docker/             # Containerization profiles for hosting
+└── exports/            # Platform-specific export templates
 ```
 
-## Architecture
+---
+
+## 🏗️ Architecture
+
 ```mermaid
 graph TD
     A[Browser / OS] --> B[Godot 4 Engine]
     B --> C[ShinMOHAA GDExtension]
-    C --> D[MOHAA Game Logic]
-    D --> E[Filesystem / PK3 Assets]
-    subgraph "MOHAAjs (Web)"
-    F[Landing Page] --> G[WASM Client]
-    G --> H[WS-UDP Relay]
+    C --> D[Morfuse Script Engine]
+    C --> E[Tiki Animation System]
+    C --> F[BSP Renderer]
+    D --> G[Game Logic]
+    subgraph "MOHAAjs Network"
+    H[WASM Client] <--> I[WebSocket Relay]
+    I <--> J[UDP Game Server]
     end
 ```
 
-## Quick Start
+The engine acts as a bridge between the original game logic and Godot's modern subsystems. Filesystem calls are mapped to Godot's VFS, and rendering commands are translated into high-level Godot Spatial nodes and Shaders.
 
-1. **Prerequisites**: Ensure you have Godot 4.3+, SCons, and a C++ compiler (GCC/Clang) installed.
-2. **Clone**: `git clone --recursive https://github.com/elgansayer/opm-godot.git`
-3. **Build**: Run `./build.sh` to compile the GDExtension.
-4. **Acquire Assets**: Copy your legal `.pk3` files into the appropriate `main/` folders.
-5. **Launch**: Open the `project/` folder in Godot or run `cd project && godot`.
+---
 
-## Component Details
+## 📋 Requirements
 
-### ShinMOHAA (Native)
-The native implementation is a C++ GDExtension that bridges the gap between the original engine's low-level logic and Godot's modern systems. It handles:
-- **BSP Rendering**: Opaque and transparent geometry with lightmap support.
-- **Tiki Animations**: Real-time skeletal animation and attachment systems.
-- **Script Engine**: Full execution of `.scr` files for game logic.
+### Development (Desktop)
+- **Godot 4.3+**
+- **C++ Compiler**: GCC 11+, Clang 14+, or MSVC 2022+
+- **SCons**: For GDExtension compilation
+- **Python 3.x**: Required for SCons
+- **Bison & Flex**: For script parser generation
 
-### MOHAAjs (Web)
-MOHAAjs is the WebAssembly-based client that runs directly in the browser. It features:
-- **Intelligent Loader**: Automatically detects and maps `main`, `mainta`, and `maintt` folders.
-- **Persistent Caching**: Uses IndexedDB to store `.pk3` files locally, significantly reducing subsequent load times.
-- **Shared Memory**: Leverages WASM threads and SharedArrayBuffer for smooth performance.
+### Hosting (Web)
+- **Node.js 18+**: For the WebSocket relay
+- **Docker & Docker Compose**: Recommended for production deployment
+- **Web Server**: Nginx or Apache with COOP/COEP headers enabled
 
-## Disclaimer & License
+---
 
-**Disclaimer**: This project is a non-commercial fan implementation and is not affiliated with or endorsed by Electronic Arts or 2015, Inc. “Medal of Honor: Allied Assault” and related trademarks are the property of their respective owners.
+## ⚡ Quick Start
 
-This project utilizes openmohaa, an open-source project licensed under GPLv2. The source code for this implementation is open-source and available under the terms of the GPLv2.
+### 1. Clone the Repository
+```bash
+git clone --recursive https://github.com/elgansayer/opm-godot.git
+cd opm-godot
+```
 
-Users must provide their own legally owned game files. All gameplay content is limited to files provided by the user.
+### 2. Build the GDExtension
+```bash
+./scripts/build-native.sh
+```
 
-**License**: The engine is an independent implementation based on open-source technology licensed under the **GNU General Public License v2**. 
+### 3. Add Game Assets
+Copy your legal `.pk3` files into `project/main/`. The loader also supports `mainta` (Spearhead) and `maintt` (Breakthrough).
 
-Built with ❤️ by the community
+### 4. Launch
+Open the `project/` folder in the Godot Editor or run:
+```bash
+godot --path project/
+```
+
+---
+
+## 🛠️ Component Details
+
+### `libopenmohaa` (GDExtension)
+The heart of the project. It encapsulates the original engine's `qcommon`, `server`, and `client` subsystems. It handles memory management, VFS mapping, and provides the bridge to Godot's `ClassDB`.
+
+### Morfuse
+The revamped script engine that executes legacy `.scr` files. It has been modernized for C++17 and provides deep integration with the Godot property system.
+
+### MOHAAjs (Web Client)
+A specialized build target that uses Emscripten. It features an **Intelligent Loader** that streams `.pk3` files on demand and caches them in **IndexedDB** for near-instant subsequent loads.
+
+---
+
+## 🖥️ Dedicated Server
+
+ShinMOHAA supports running in a headless "Dedicated" mode.
+
+### Running Headless (Native)
+```bash
+godot --path project/ --headless --args +set dedicated 1 +exec server.cfg
+```
+
+### Web Relay
+Because browsers cannot speak raw UDP, a **WebSocket Relay** is required for web-to-game communication:
+```bash
+cd relay
+npm install
+node mohaa_relay.js
+```
+
+---
+
+## 📱 Godot Exports
+
+Godot's powerful export system allows ShinMOHAA to be deployed almost anywhere:
+
+| Platform | Notes |
+| :--- | :--- |
+| **Windows/Linux/macOS** | Desktop binaries with full Vulkan/Forward+ support. |
+| **Web (MOHAAjs)** | Single-threaded or Multi-threaded builds; requires COOP/COEP headers. |
+| **Android** | Requires the Android SDK/NDK; supports touch interface mapping. |
+| **iOS** | Requires Xcode and an active Apple Developer account. |
+
+*Note: For mobile and consoles, ensure your assets are optimized and stored in a reachable path.*
+
+---
+
+## 📜 Useful Scripts
+
+- `build-native.sh`: Compiles the C++ GDExtension for your current platform.
+- `build-web.sh`: Compiles the project for Web/Emscripten.
+- `release.sh`: Packages build artifacts for distribution.
+- `test.sh`: Runs the unit test suite (`bin/test_*`).
+
+---
+
+## ❓ Troubleshooting
+
+- **"Missing PK3s"**: Ensure your `main/*.pk3` files are present. The engine will not start without base assets.
+- **WebSocket Connection Failure**: Ensure the `relay` is running and accessible if playing via the web.
+- **SharedArrayBuffer Error**: Web builds require `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers.
+
+---
+
+## ⚖️ Disclaimer & License
+
+**Disclaimer**: This project is a non-commercial fan implementation and is not affiliated with or endorsed by Electronic Arts or 2015, Inc. "Medal of Honor: Allied Assault" and related trademarks are the property of their respective owners.
+
+This project is licensed under the **GNU General Public License v2**.
+
+Built with ❤️ for the MOHAA community.
