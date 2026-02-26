@@ -982,7 +982,15 @@ new_boot = f"""/* OPM_BOOT_START */
 {T3}}}
 
 {T3}async function loadGameCaches(game){{
-{T4}var deps=GAME_DEPS[game]||['main'],allFiles={{}};
+{T4}var deps=GAME_DEPS[game]||['main'];
+{T4}/* ALL deps must be cached — partial hits are a cache miss */
+{T4}for(var i=0;i<deps.length;i++){{
+{T5}if(!(await hasCache(deps[i]))){{
+{T5}{T2}console.log('[MOHAAjs] Cache miss: '+deps[i]+' not cached');
+{T5}{T2}return null
+{T5}}}
+{T4}}}
+{T4}var allFiles={{}};
 {T4}for(var i=0;i<deps.length;i++){{
 {T5}var files=await loadFromDB(deps[i]);
 {T5}if(files){{var ks=Object.keys(files);for(var j=0;j<ks.length;j++)allFiles[ks[j]]=files[ks[j]];
@@ -1101,7 +1109,9 @@ new_boot = f"""/* OPM_BOOT_START */
 {T4}window.__opmTargetGame=targetGame;
 {T4}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
 {T4}setStatusMode('progress');
+{T4}var engineArgs=['+set','com_target_game',String(targetGame)];
 {T4}engine.startGame({{
+{T5}'args':engineArgs,
 {T5}'onProgress':function(current,total){{
 {T5}{T2}if(current>0&&total>0){{statusProgress.value=current;statusProgress.max=total}}
 {T5}{T2}else{{statusProgress.removeAttribute('value');statusProgress.removeAttribute('max')}}

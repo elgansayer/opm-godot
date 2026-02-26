@@ -3,7 +3,7 @@ extends Node
 var runner = null
 var screenshot_pending = false
 var screenshot_timer = 0.0
-const SCREENSHOT_DELAY = 1.5  # seconds after map load to take screenshot
+const SCREENSHOT_DELAY = 1.5 # seconds after map load to take screenshot
 var status_log_timer = 0.0
 var launch_dedicated = false
 # launch_map: empty = start at main menu; set via --map= or ?map= URL param
@@ -11,7 +11,7 @@ var launch_map = ""
 # exec_cfg: exec this config at startup (e.g. "server.cfg" loads its map)
 var exec_cfg = ""
 var last_state_logged = -999
-var web_net_tweaks_applied = false  # DEPRECATED: kept for compat, no longer used
+var web_net_tweaks_applied = false # DEPRECATED: kept for compat, no longer used
 
 func _ready():
 	print("Main: Script started.")
@@ -33,8 +33,8 @@ func _ready():
 	#   +<cmd> [args]    Any Quake-style +command forwarded to the engine
 	var user_args = OS.get_cmdline_user_args()
 	var dev_mode = false
-	var extra_engine_cmds = ""  # raw +command args forwarded to engine
-	var in_plus_cmd = false     # true while collecting args for a +command
+	var extra_engine_cmds = "" # raw +command args forwarded to engine
+	var in_plus_cmd = false # true while collecting args for a +command
 	for arg in user_args:
 		if arg == "--dedicated":
 			launch_dedicated = true
@@ -201,6 +201,11 @@ func _on_map_unloaded():
 
 func _on_engine_shutdown():
 	print("Main: SIGNAL engine_shutdown_requested")
+	if OS.has_feature("web") and Engine.has_singleton("JavaScriptBridge"):
+		var js = Engine.get_singleton("JavaScriptBridge")
+		if js:
+			js.eval("if(typeof onEngineQuit === 'function') onEngineQuit();")
+			print("Main: Called JS onEngineQuit()")
 
 func _unhandled_key_input(event: InputEvent):
 	if not (event is InputEventKey and event.pressed and not event.echo):
