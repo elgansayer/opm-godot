@@ -73,7 +73,9 @@ MOHAAjs is the WebAssembly-based client that runs directly in the browser. It fe
 
 ## Disclaimer & License
 
-**Disclaimer**: MOHAAjs is an independent fan project and is **not affiliated with, endorsed by, or connected to the OpenMoHAA project**, Electronic Arts (EA), or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.
+**Disclaimer**: This project is a non-commercial fan implementation and is not affiliated with or endorsed by Electronic Arts or 2015, Inc. “Medal of Honor: Allied Assault” and related trademarks are the property of their respective owners.
+
+This project utilizes openmohaa, an open-source project licensed under GPLv2. The source code for this implementation is open-source and available under the terms of the GPLv2.
 
 Users must provide their own legally owned game files. All gameplay content is limited to files provided by the user.
 
