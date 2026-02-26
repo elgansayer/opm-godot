@@ -82,9 +82,11 @@ jobs:
         working-directory: openmohaa
         shell: cmd
         run: |
-          if not exist "code\parser\generated" mkdir "code\parser\generated"
-          win_bison --defines="code\parser\generated\yyParser.hpp" -o "code\parser\generated\yyParser.cpp" code\parser\bison_source.txt
-          win_flex -Cem --nounistd -o "code\parser\generated\yyLexer.cpp" --header-file="code\parser\generated\yyLexer.h" code\parser\lex_source.txt
+          if not exist "code\parser\generated\yyParser.hpp" (
+            if not exist "code\parser\generated" mkdir "code\parser\generated"
+            win_bison --defines="code\parser\generated\yyParser.hpp" -o "code\parser\generated\yyParser.cpp" code\parser\bison_source.txt
+            win_flex -Cem --nounistd -o "code\parser\generated\yyLexer.cpp" --header-file="code\parser\generated\yyLexer.h" code\parser\lex_source.txt
+          )
 
       - name: Build GDExtension
         working-directory: openmohaa
