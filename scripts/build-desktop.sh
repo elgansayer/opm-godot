@@ -7,6 +7,13 @@ OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
 PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
 CGAME_DEPLOY_DIR="$REPO_ROOT/project/bin"
 
+if [[ $# -eq 0 ]]; then
+    echo "ERROR: platform target required (linux|windows|macos)" >&2
+    exit 1
+fi
+PLAT="$1"
+shift
+
 # Build OpenMoHAA GDExtension
 cd "$OPENMOHAA_DIR"
 
@@ -21,24 +28,39 @@ fi
 # If you edited widely included headers (e.g. qcommon.h), uncomment:
 # rm -f .sconsign.dblite
 
-scons platform=linux target=template_debug -j"$(nproc)" "$@"
+scons platform="$PLAT" target=template_debug -j"$(nproc)" "$@"
+
+# Determine artifact extensions based on platform
+EXT=".so"
+if [[ "$PLAT" == "windows" ]]; then
+    EXT=".dll"
+elif [[ "$PLAT" == "macos" ]]; then
+    EXT=".dylib"
+fi
 
 # Validate artifacts before deploy
-[[ -f bin/libopenmohaa.so ]]
+[[ -f "bin/libopenmohaa$EXT" ]] || [[ -f "bin/openmohaa$EXT" ]]
 
 # Deploy artifacts
 mkdir -p "$PROJECT_BIN_DIR" "$CGAME_DEPLOY_DIR"
-\cp -f bin/libopenmohaa.so "$PROJECT_BIN_DIR/libopenmohaa.so" || exit 1
 
-# Deploy cgame.so next to libopenmohaa.so (project/bin/) so the GDExtension
-# loader finds it via dladdr without polluting the main/ game directory.
-OLD_CGAME="$REPO_ROOT/openmohaa/bin/libcgame.so"
-if [[ -f bin/libcgame.so ]]; then
-    \cp -f bin/libcgame.so "$CGAME_DEPLOY_DIR/cgame.so" || exit 1
+if [[ -f "bin/libopenmohaa$EXT" ]]; then
+    \cp -f "bin/libopenmohaa$EXT" "$PROJECT_BIN_DIR/libopenmohaa$EXT" || exit 1
+elif [[ -f "bin/openmohaa$EXT" ]]; then
+    \cp -f "bin/openmohaa$EXT" "$PROJECT_BIN_DIR/openmohaa$EXT" || exit 1
+fi
+
+
+# Deploy cgame next to main extension so GDExtension loader finds it
+OLD_CGAME="$REPO_ROOT/openmohaa/bin/libcgame$EXT"
+if [[ -f "bin/libcgame$EXT" ]]; then
+    \cp -f "bin/libcgame$EXT" "$CGAME_DEPLOY_DIR/cgame$EXT" || exit 1
+elif [[ -f "bin/cgame$EXT" ]]; then
+    \cp -f "bin/cgame$EXT" "$CGAME_DEPLOY_DIR/cgame$EXT" || exit 1
 elif [[ -f "$OLD_CGAME" ]]; then
-    \cp -f "$OLD_CGAME" "$CGAME_DEPLOY_DIR/cgame.so" || exit 1
+    \cp -f "$OLD_CGAME" "$CGAME_DEPLOY_DIR/cgame$EXT" || exit 1
 else
-    echo "WARNING: libcgame.so not found; cgame.so not deployed"
+    echo "WARNING: libcgame$EXT not found; cgame$EXT not deployed"
 fi
 
 # Clean up old cgame.so from main/ if it exists (legacy location)
@@ -47,4 +69,3 @@ if [[ -f "$OLD_MAIN_CGAME" ]]; then
     rm -f "$OLD_MAIN_CGAME"
     echo "Removed legacy $OLD_MAIN_CGAME"
 fi
-
