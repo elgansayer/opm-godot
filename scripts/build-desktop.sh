@@ -17,6 +17,10 @@ shift
 # Build OpenMoHAA GDExtension
 cd "$OPENMOHAA_DIR"
 
+# Always clean prior binaries so stale .so files cannot survive
+rm -rf bin/ build/ .sconsign.dblite
+rm -f "$PROJECT_BIN_DIR/libopenmohaa"* "$CGAME_DEPLOY_DIR/cgame"*
+
 # Generate parser/lexer sources if missing (requires bison & flex)
 PARSER_DIR="code/parser/generated"
 if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
@@ -24,9 +28,6 @@ if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
     bison --defines="$PARSER_DIR/yyParser.hpp" -o "$PARSER_DIR/yyParser.cpp" code/parser/bison_source.txt
     flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
 fi
-
-# If you edited widely included headers (e.g. qcommon.h), uncomment:
-# rm -f .sconsign.dblite
 
 scons platform="$PLAT" target=template_debug -j"$(nproc)" "$@"
 

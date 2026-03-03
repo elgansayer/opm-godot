@@ -32,7 +32,7 @@ func _ready():
 	#   +connect <ip>    Connect to a server (forwarded to engine)
 	#   +<cmd> [args]    Any Quake-style +command forwarded to the engine
 	var user_args = OS.get_cmdline_user_args()
-	var dev_mode = false
+	var dev_mode = true
 	var extra_engine_cmds = "" # raw +command args forwarded to engine
 	var in_plus_cmd = false # true while collecting args for a +command
 	for arg in user_args:
@@ -101,7 +101,7 @@ func _ready():
 				print("Main: Auto-detected relay URL -> ", relay_url)
 
 	if runner:
-		var startup_args = "+set dedicated %d +set developer %d" % [
+		var startup_args = "+set dedicated %d +set developer %d +set cheats 1 +set theirisnomonkey 1" % [
 			1 if launch_dedicated else 0,
 			1 if dev_mode else 0
 		]
@@ -109,11 +109,15 @@ func _ready():
 			# Web: emscripten VFS root = game data dir; GameSpy off
 			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set r_fullscreen 0 +set ui_gamespy 0 +set sv_gamespy 0"
 
-		# Startup command: exec config takes priority over direct +map
+		# Startup command: exec config takes priority over direct map load.
+		# In debug client runs, prefer devmap so cheat-gated cvars remain writable.
 		if exec_cfg != "":
 			startup_args += " +exec " + exec_cfg
 		elif launch_map != "":
-			startup_args += " +map " + launch_map
+			if dev_mode and not launch_dedicated:
+				startup_args += " +devmap " + launch_map
+			else:
+				startup_args += " +map " + launch_map
 		# else: no startup command -> engine shows main menu
 
 		# Append any raw +command args forwarded from user args (e.g. +connect <ip>)
