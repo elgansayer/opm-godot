@@ -8,13 +8,6 @@
 
 config_version=5
 
-[display]
-
-window/size/viewport_width=1024
-window/size/viewport_height=768
-window/size/resizable=true
-window/stretch/mode="disabled"
-
 [animation]
 
 compatibility/default_parent_skeleton_in_mesh_instance_3d=true
@@ -26,6 +19,11 @@ run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 boot_splash/image="uid://cs2u0853tta0g"
 config/icon="res://icon.svg"
+
+[display]
+
+window/size/viewport_width=1024
+window/size/viewport_height=768
 
 [input]
 
