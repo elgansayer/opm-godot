@@ -8,6 +8,13 @@
 
 config_version=5
 
+[display]
+
+window/size/viewport_width=1024
+window/size/viewport_height=768
+window/size/resizable=true
+window/stretch/mode="disabled"
+
 [animation]
 
 compatibility/default_parent_skeleton_in_mesh_instance_3d=true
