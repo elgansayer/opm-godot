@@ -142,7 +142,45 @@ Godot's powerful export system allows ShinMOHAA to be deployed almost anywhere:
 
 ---
 
-## 📜 Useful Scripts
+## �️ Display Settings
+
+### Resolution Modes (`r_mode`)
+
+Use the built-in resolution list or custom sizes:
+
+```
+set r_mode 3           // 640x480 (classic)
+set r_mode 6           // 1024x768
+set r_mode 9           // 1600x1200 (high-res)
+set r_mode -1          // Custom resolution
+set r_customwidth 1920
+set r_customheight 1080
+vid_restart
+```
+
+### Fullscreen Aspect Ratio (`r_fullscreenAspect`)
+
+Controls how the engine renders in fullscreen on displays with different aspect ratios:
+
+| Value | Mode | Behaviour |
+|-------|------|-----------|
+| **0** (default) | Keep | Renders at r_mode resolution, adds pillarboxes/letterboxes to maintain aspect. Best for retro feel. |
+| **1** | Stretch | Renders at r_mode resolution, stretches to fill display. May distort on aspect mismatch. |
+| **2** | Native | Ignores r_mode in fullscreen, renders at display's native resolution. Sharpest but HUD size won't change with r_mode. |
+
+**Recommended for widescreen:** Use `r_mode -1` with your display's exact dimensions (e.g. 2560×1080). Then any `r_fullscreenAspect` setting produces the same result—perfect 1:1 fill with no distortion.
+
+```
+set r_mode -1
+set r_customwidth 2560
+set r_customheight 1080
+set r_fullscreen 1
+vid_restart
+```
+
+---
+
+## �📜 Useful Scripts
 
 - `build-native.sh`: Compiles the C++ GDExtension for your current platform.
 - `build-web.sh`: Compiles the project for Web/Emscripten.
