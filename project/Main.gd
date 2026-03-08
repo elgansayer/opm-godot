@@ -196,6 +196,9 @@ func _on_engine_error(message: String):
 
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
+	if OS.has_feature("headless") or DisplayServer.get_name() == "headless":
+		print("Main: Headless mode detected, skipping auto screenshot.")
+		return
 	screenshot_pending = true
 	screenshot_timer = 0.0
 	print("Main: Screenshot scheduled in ", SCREENSHOT_DELAY, "s")
@@ -277,7 +280,14 @@ func _process(delta):
 				" players=", runner.get_player_count())
 
 func take_screenshot(label: String):
-	var img = get_viewport().get_texture().get_image()
+	if OS.has_feature("headless") or DisplayServer.get_name() == "headless":
+		print("Main: Screenshot skipped in headless mode.")
+		return
+	var tex = get_viewport().get_texture()
+	if tex == null:
+		printerr("Main: Screenshot skipped, viewport texture unavailable")
+		return
+	var img = tex.get_image()
 	if img:
 		var path = "/tmp/godot_screenshot_" + label + ".png"
 		var err = img.save_png(path)
