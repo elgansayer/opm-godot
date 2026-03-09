@@ -49,5 +49,6 @@ Thumbs.db
 project/gdb.txt
 node_modules/
 tmp/
+test-results/
 openmohaa/.cmake-native/
 opm-godot-web-export/
