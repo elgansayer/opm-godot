@@ -7,12 +7,115 @@ OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
 PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
 CGAME_DEPLOY_DIR="$REPO_ROOT/project/bin"
 
+detect_jobs() {
+    # Prefer native tool on each host OS, then fall back safely.
+    if command -v nproc >/dev/null 2>&1; then
+        nproc
+        return
+    fi
+
+    if command -v getconf >/dev/null 2>&1; then
+        local jobs
+        jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+        if [[ -n "${jobs:-}" ]] && [[ "$jobs" =~ ^[0-9]+$ ]] && [[ "$jobs" -gt 0 ]]; then
+            echo "$jobs"
+            return
+        fi
+    fi
+
+    if command -v sysctl >/dev/null 2>&1; then
+        local jobs
+        jobs="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+        if [[ -n "${jobs:-}" ]] && [[ "$jobs" =~ ^[0-9]+$ ]] && [[ "$jobs" -gt 0 ]]; then
+            echo "$jobs"
+            return
+        fi
+    fi
+
+    # Conservative fallback when CPU count detection is unavailable.
+    echo 4
+}
+
+extract_osxcross_sdk_tags() {
+    local bin_dir="$1"
+    ls -1 "$bin_dir"/*-apple-*-clang 2>/dev/null \
+        | sed -E 's#^.*/(x86_64|arm64)-apple-([^-]+)-clang$#\2#' \
+        | sort -u
+}
+
 if [[ $# -eq 0 ]]; then
     echo "ERROR: platform target required (linux|windows|macos)" >&2
     exit 1
 fi
 PLAT="$1"
 shift
+
+case "$PLAT" in
+    linux|windows|macos)
+        ;;
+    *)
+        echo "ERROR: unsupported platform '$PLAT' (expected linux|windows|macos)" >&2
+        exit 1
+        ;;
+esac
+
+HOST_UNAME="$(uname -s)"
+EXTRA_SCONS_ARGS=("$@")
+if [[ "$PLAT" == "macos" ]] && [[ "$HOST_UNAME" != "Darwin" ]]; then
+    # godot-cpp/tools/macos.py only enables non-Darwin macOS builds via OSXCROSS_ROOT.
+    if [[ -z "${OSXCROSS_ROOT:-}" ]]; then
+        echo "ERROR: macos builds require a macOS host toolchain (or explicit osxcross setup)." >&2
+        echo "Run this target on macOS, or export OSXCROSS_ROOT for osxcross cross-compile." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$OSXCROSS_ROOT/target/bin" ]]; then
+        echo "ERROR: OSXCROSS_ROOT is set but toolchain bin dir is missing:" >&2
+        echo "  $OSXCROSS_ROOT/target/bin" >&2
+        exit 1
+    fi
+
+    if ! compgen -G "$OSXCROSS_ROOT/target/bin/*-apple-*-clang" >/dev/null; then
+        echo "ERROR: no osxcross compiler binaries found under:" >&2
+        echo "  $OSXCROSS_ROOT/target/bin" >&2
+        exit 1
+    fi
+
+    OSXCROSS_SDK_ARG=""
+    for arg in "${EXTRA_SCONS_ARGS[@]}"; do
+        if [[ "$arg" == osxcross_sdk=* ]]; then
+            OSXCROSS_SDK_ARG="${arg#osxcross_sdk=}"
+            break
+        fi
+    done
+
+    if [[ -z "$OSXCROSS_SDK_ARG" ]]; then
+        mapfile -t sdk_tags < <(extract_osxcross_sdk_tags "$OSXCROSS_ROOT/target/bin")
+        if [[ "${#sdk_tags[@]}" -eq 0 ]]; then
+            echo "ERROR: failed to infer osxcross SDK tag from compiler names." >&2
+            exit 1
+        fi
+
+        OSXCROSS_SDK_ARG="${sdk_tags[0]}"
+        if [[ "${#sdk_tags[@]}" -gt 1 ]]; then
+            echo "WARNING: multiple osxcross SDK tags detected: ${sdk_tags[*]}" >&2
+            echo "WARNING: defaulting to '$OSXCROSS_SDK_ARG'; pass osxcross_sdk=<tag> to override." >&2
+        fi
+
+        EXTRA_SCONS_ARGS+=("osxcross_sdk=$OSXCROSS_SDK_ARG")
+        echo "Using auto-detected osxcross_sdk=$OSXCROSS_SDK_ARG"
+    fi
+
+    if [[ ! -x "$OSXCROSS_ROOT/target/bin/x86_64-apple-$OSXCROSS_SDK_ARG-clang" ]] \
+       && [[ ! -x "$OSXCROSS_ROOT/target/bin/arm64-apple-$OSXCROSS_SDK_ARG-clang" ]]; then
+        echo "ERROR: osxcross_sdk='$OSXCROSS_SDK_ARG' does not match installed compiler prefixes." >&2
+        echo "Available SDK tags:" >&2
+        extract_osxcross_sdk_tags "$OSXCROSS_ROOT/target/bin" | sed 's/^/  - /' >&2
+        exit 1
+    fi
+fi
+
+JOBS="$(detect_jobs)"
 
 # Build OpenMoHAA GDExtension
 cd "$OPENMOHAA_DIR"
@@ -29,7 +132,7 @@ if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
     flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
 fi
 
-scons platform="$PLAT" target=template_debug -j"$(nproc)" "$@"
+scons platform="$PLAT" target=template_debug -j"$JOBS" "${EXTRA_SCONS_ARGS[@]}"
 
 # Determine artifact extensions based on platform
 EXT=".so"

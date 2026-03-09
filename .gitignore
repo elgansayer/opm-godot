@@ -52,3 +52,4 @@ tmp/
 test-results/
 openmohaa/.cmake-native/
 opm-godot-web-export/
+scripts/env.macos-cross.sh

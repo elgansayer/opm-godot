@@ -49,8 +49,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/gdextension-linux-x86_64/*
-            artifacts/gdextension-macos-universal/*
-            artifacts/gdextension-windows-x86_64/*
+            artifacts/gdextension-*/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

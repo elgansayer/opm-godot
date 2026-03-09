@@ -12,6 +12,7 @@ on:
 
 jobs:
   build:
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,21 +20,35 @@ jobs:
           - platform: linux
             os: ubuntu-22.04
             arch: x86_64
-            artifact_ext: .so
-            lib_name: libopenmohaa.so
-            cgame_name: libcgame.so
+            experimental: false
+          - platform: linux
+            os: ubuntu-24.04-arm
+            arch: arm64
+            experimental: false
+          - platform: macos
+            os: macos-13
+            arch: x86_64
+            experimental: false
           - platform: macos
             os: macos-14
-            arch: universal
-            artifact_ext: .dylib
-            lib_name: libopenmohaa.dylib
-            cgame_name: libcgame.dylib
+            arch: arm64
+            experimental: false
           - platform: windows
             os: windows-2022
             arch: x86_64
-            artifact_ext: .dll
-            lib_name: openmohaa.dll
-            cgame_name: cgame.dll
+            experimental: false
+          - platform: windows
+            os: windows-2022
+            arch: arm64
+            experimental: true
+          - platform: android
+            os: ubuntu-22.04
+            arch: arm64
+            experimental: true
+          - platform: android
+            os: ubuntu-22.04
+            arch: x86_64
+            experimental: true
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.platform }}-${{ matrix.arch }}
@@ -49,14 +64,27 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Java (Android)
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android NDK (Android)
+        if: matrix.platform == 'android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
       - name: Install SCons
         run: pip install scons
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'linux'
+        if: matrix.platform == 'linux' || matrix.platform == 'android'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc g++ zlib1g-dev bison flex
+          sudo apt-get install -y gcc g++ zlib1g-dev bison flex zip unzip
 
       - name: Install macOS dependencies
         if: matrix.platform == 'macos'
@@ -89,14 +117,20 @@ jobs:
           )
 
       - name: Build GDExtension
+        if: matrix.platform != 'windows'
         working-directory: openmohaa
-        run: scons platform=${{ matrix.platform }} target=template_debug -j2 dev_build=yes
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j2 dev_build=yes
+
+      - name: Build GDExtension (Windows)
+        if: matrix.platform == 'windows'
+        working-directory: openmohaa
+        shell: pwsh
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j2 dev_build=yes
 
       - name: Upload GDExtension artifact
         uses: actions/upload-artifact@v4
         with:
           name: gdextension-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            openmohaa/bin/${{ matrix.lib_name }}
-            openmohaa/bin/${{ matrix.cgame_name }}
-          if-no-files-found: error
+            openmohaa/bin/*
+          if-no-files-found: warn

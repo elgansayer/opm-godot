@@ -64,6 +64,11 @@ The engine acts as a bridge between the original game logic and Godot's modern s
 - **Python 3.x**: Required for SCons
 - **Bison & Flex**: For script parser generation
 
+### macOS Builds (Native and Cross-Compile)
+- Native macOS builds are supported directly with `./build.sh macos`.
+- Linux cross-compile to macOS is supported only with **osxcross** (must set `OSXCROSS_ROOT`).
+- Without `OSXCROSS_ROOT` on Linux, `./build.sh macos` will fail by design.
+
 ### Hosting (Web)
 - **Node.js 18+**: For the WebSocket relay
 - **Docker & Docker Compose**: Recommended for production deployment
@@ -81,8 +86,42 @@ cd opm-godot
 
 ### 2. Build the GDExtension
 ```bash
-./scripts/build-native.sh
+./build.sh linux
 ```
+
+### 2b. Build for macOS
+
+Native macOS host:
+```bash
+# Install toolchain dependencies once
+xcode-select --install
+brew install scons bison flex
+
+# Build and deploy dylibs into project/bin
+./build.sh macos
+```
+
+Linux host with osxcross:
+```bash
+# Validate your environment first
+./scripts/setup-macos-build.sh
+
+# Generate a reusable env file (auto-detects common osxcross paths)
+./scripts/configure-macos-cross-env.sh
+source scripts/env.macos-cross.sh
+
+# Example environment (paths/version depend on your osxcross install)
+export OSXCROSS_ROOT=/opt/osxcross
+
+# Optional but recommended to avoid universal-link surprises in cross builds
+./build.sh macos arch=x86_64
+# or
+./build.sh macos arch=arm64
+```
+
+Notes:
+- `osxcross_sdk` defaults to `darwin16` in `godot-cpp`; set `osxcross_sdk=<your-sdk-tag>` if needed.
+- If you can choose, native macOS is the simplest and most reliable path today.
 
 ### 3. Add Game Assets
 Copy your legal `.pk3` files into `project/main/`. The loader also supports `mainta` (Spearhead) and `maintt` (Breakthrough).
@@ -182,10 +221,12 @@ vid_restart
 
 ## �📜 Useful Scripts
 
-- `build-native.sh`: Compiles the C++ GDExtension for your current platform.
-- `build-web.sh`: Compiles the project for Web/Emscripten.
-- `release.sh`: Packages build artifacts for distribution.
-- `test.sh`: Runs the unit test suite (`bin/test_*`).
+- `build.sh <target>`: Main entry point (`linux`, `windows`, `macos`, `web`, `deploy`, `test`).
+- `scripts/build-desktop.sh <platform>`: Desktop builder invoked by `build.sh`.
+- `scripts/setup-macos-build.sh`: macOS/native or Linux/osxcross preflight checks.
+- `scripts/configure-macos-cross-env.sh`: Generates `scripts/env.macos-cross.sh` for repeatable cross builds.
+- `scripts/build-web.sh`: Web/Emscripten build pipeline.
+- `scripts/test.sh`: Headless smoke test wrapper.
 
 ---
 
