@@ -101,10 +101,16 @@ func _ready():
 				print("Main: Auto-detected relay URL -> ", relay_url)
 
 	if runner:
-		var startup_args = "+set dedicated %d +set developer %d +set cheats 1 +set theirisnomonkey 1" % [
+		var startup_args = "+set dedicated %d +set developer %d +set cheats 1 +set thereisnomonkey 1" % [
 			1 if launch_dedicated else 0,
 			1 if dev_mode else 0
 		]
+		# In non-dedicated dev mode, force single-player gametype so the
+		# player spawns directly instead of entering spectator mode.
+		# The user's saved config (omconfig.cfg) may have "g_gametype 1"
+		# which persists and causes RF_DONTDRAW → invisible FPS model.
+		if not launch_dedicated:
+			startup_args += " +set g_gametype 0"
 		if OS.has_feature("web"):
 			# Web: emscripten VFS root = game data dir; GameSpy off
 			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set r_fullscreen 0 +set ui_gamespy 0 +set sv_gamespy 0"
