@@ -52,12 +52,16 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.platform }}-${{ matrix.arch }}
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+          persist-credentials: false
 
       - name: Check Submodule Status
         run: git submodule status
