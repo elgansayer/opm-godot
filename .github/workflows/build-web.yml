@@ -20,6 +20,9 @@ jobs:
   build-web:
     runs-on: ubuntu-22.04
     name: web-wasm32
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
@@ -39,7 +42,8 @@ jobs:
 
       - name: Install SCons and dependencies
         run: |
-          pip install scons
+          python -m pip install --upgrade pip
+          pip install scons || pip install scons --break-system-packages
           sudo apt-get update
           sudo apt-get install -y bison flex
 
@@ -68,6 +72,7 @@ jobs:
       - name: Verify WASM artifacts
         run: |
           ls -la openmohaa/bin/*.wasm
+          mv openmohaa/bin/libopenmohaa*.wasm openmohaa/bin/libopenmohaa.wasm
           test -f openmohaa/bin/libopenmohaa.wasm
 
       - name: Install Godot

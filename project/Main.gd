@@ -229,6 +229,16 @@ func _unhandled_key_input(event: InputEvent):
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 
+	# Keep this at Main.gd level so Ctrl+Enter always works even if input map bindings change.
+	if event.ctrl_pressed and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
+		var ctrl_enter_mode = DisplayServer.window_get_mode()
+		if ctrl_enter_mode == DisplayServer.WINDOW_MODE_FULLSCREEN:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		else:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		print("Main: Fullscreen toggled (Ctrl+Enter)")
+		return
+
 	if event.is_action("toggle_mouse_capture"):
 		if runner:
 			var captured = runner.is_mouse_captured()
