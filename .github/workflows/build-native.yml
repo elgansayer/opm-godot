@@ -77,10 +77,15 @@ jobs:
           java-version: '17'
 
       - name: Set up Android NDK (Android)
+        id: setup-ndk
         if: matrix.platform == 'android'
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r25c
+
+      - name: Set up MSVC (Windows)
+        if: matrix.platform == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install SCons
         run: pip install scons
@@ -127,13 +132,16 @@ jobs:
       - name: Build GDExtension
         if: matrix.platform != 'windows'
         working-directory: openmohaa
-        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j2 dev_build=yes
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes
+        env:
+          ANDROID_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Build GDExtension (Windows)
         if: matrix.platform == 'windows'
         working-directory: openmohaa
         shell: pwsh
-        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j2 dev_build=yes
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes
 
       - name: Upload GDExtension artifact
         uses: actions/upload-artifact@v4
