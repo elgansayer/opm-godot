@@ -28,11 +28,11 @@ jobs:
           - platform: macos
             os: macos-14
             arch: x86_64
-            experimental: false
+            experimental: true
           - platform: macos
             os: macos-14
             arch: arm64
-            experimental: false
+            experimental: true
           - platform: windows
             os: windows-2022
             arch: x86_64
@@ -81,7 +81,7 @@ jobs:
         if: matrix.platform == 'android'
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r25c
+          ndk-version: 23.2.8568313
 
       - name: Set up MSVC (Windows)
         if: matrix.platform == 'windows'
@@ -134,19 +134,23 @@ jobs:
         working-directory: openmohaa
         run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes
         env:
-          ANDROID_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
 
       - name: Build GDExtension (Windows)
         if: matrix.platform == 'windows'
         working-directory: openmohaa
         shell: pwsh
-        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes CCFLAGS="/TP"
+
+      - name: Zip GDExtension artifacts
+        run: |
+          cd openmohaa/bin
+          zip -r ../../gdextension-${{ matrix.platform }}-${{ matrix.arch }}.zip .
+          cd ../..
 
       - name: Upload GDExtension artifact
         uses: actions/upload-artifact@v4
         with:
           name: gdextension-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            openmohaa/bin/*
+          path: gdextension-${{ matrix.platform }}-${{ matrix.arch }}.zip
           if-no-files-found: warn

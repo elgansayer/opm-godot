@@ -99,11 +99,14 @@ jobs:
           export EMSDK_DIR="${EMSDK:-$HOME/emsdk}"
           scripts/build-web.sh --patch-only
 
+      - name: Zip web export
+        run: zip -r openmohaa-web.zip web/
+
       - name: Upload web export artifact
         uses: actions/upload-artifact@v4
         with:
           name: web-export
-          path: web/
+          path: openmohaa-web.zip
 
       # --- Docker image build + push (only on main branch, not PRs) ---
       - name: Log in to GHCR
