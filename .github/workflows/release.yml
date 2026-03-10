@@ -21,10 +21,12 @@ jobs:
   # ─── Build native platforms ───
   build-native:
     uses: ./.github/workflows/build-native.yml
+    secrets: inherit
 
   # ─── Build web ───
   build-web:
     uses: ./.github/workflows/build-web.yml
+    secrets: inherit
 
   # ─── Create GitHub Release with all native artifacts ───
   release:
