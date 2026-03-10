@@ -58,6 +58,9 @@ jobs:
             flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
           fi
 
+      - name: Patch sources for web build
+        run: python3 scripts/patch-build.py --platform web
+
       - name: Build WASM GDExtension
         working-directory: openmohaa
         run: scons platform=web target=template_debug -j1 dev_build=yes disable_exceptions=no

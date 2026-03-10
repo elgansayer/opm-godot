@@ -81,7 +81,12 @@ jobs:
         if: matrix.platform == 'android'
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r23c
+          # r25c corresponds to version 25.2.9519653.
+          # link-to-sdk symlinks it into $ANDROID_HOME/ndk/25.2.9519653/ so that
+          # the SConstruct (which reads ANDROID_NDK_VERSION from the env) can
+          # find the toolchain at $ANDROID_HOME/ndk/$ANDROID_NDK_VERSION/.
+          ndk-version: r25c
+          link-to-sdk: true
 
       - name: Set up MSVC (Windows)
         if: matrix.platform == 'windows'
@@ -133,6 +138,10 @@ jobs:
         if: matrix.platform == 'android'
         run: ls -R /usr/local/lib/android/sdk/ndk || true
 
+      - name: Patch sources for Windows build
+        if: matrix.platform == 'windows'
+        run: python scripts/patch-build.py --platform windows
+
       - name: Build GDExtension
         if: matrix.platform != 'windows'
         working-directory: openmohaa
@@ -147,11 +156,18 @@ jobs:
         shell: pwsh
         run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
 
-      - name: Zip GDExtension artifacts
+      - name: Zip GDExtension artifacts (non-Windows)
+        if: matrix.platform != 'windows'
         run: |
           cd openmohaa/bin
           zip -r ../../gdextension-${{ matrix.platform }}-${{ matrix.arch }}.zip .
           cd ../..
+
+      - name: Zip GDExtension artifacts (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "openmohaa/bin/*" -DestinationPath "gdextension-${{ matrix.platform }}-${{ matrix.arch }}.zip"
 
       - name: Upload GDExtension artifact
         uses: actions/upload-artifact@v4
