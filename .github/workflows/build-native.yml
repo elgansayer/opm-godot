@@ -76,6 +76,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android NDK (Android)
+        id: setup-ndk
+        if: matrix.platform == 'android'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r23c
+
       - name: Set up MSVC (Windows)
         if: matrix.platform == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -127,7 +134,8 @@ jobs:
         working-directory: openmohaa
         run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes
         env:
-          ANDROID_NDK_ROOT: ${{ matrix.platform == 'android' && '/usr/local/lib/android/sdk/ndk/25.2.9519653' || '' }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_HOME: ""
 
       - name: Build GDExtension (Windows)
         if: matrix.platform == 'windows'
