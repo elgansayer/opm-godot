@@ -229,14 +229,18 @@ func _unhandled_key_input(event: InputEvent):
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 
-	# Keep this at Main.gd level so Ctrl+Enter always works even if input map bindings change.
-	if event.ctrl_pressed and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
-		var ctrl_enter_mode = DisplayServer.window_get_mode()
-		if ctrl_enter_mode == DisplayServer.WINDOW_MODE_FULLSCREEN:
+	# Keep this at Main.gd level so Meta+Enter always works even if input map bindings change.
+	if event.meta_pressed and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
+		var is_now_fs = DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
+		if is_now_fs:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 		else:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-		print("Main: Fullscreen toggled (Ctrl+Enter)")
+		# Keep the engine's r_fullscreen cvar in sync with the Godot window mode
+		# so that vid_restart preserves the correct fullscreen state.
+		if runner and runner.is_engine_initialized():
+			runner.execute_command("set r_fullscreen %d" % (0 if is_now_fs else 1))
+		print("Main: Fullscreen toggled (Meta+Enter)")
 		return
 
 	if event.is_action("toggle_mouse_capture"):
@@ -251,11 +255,14 @@ func _unhandled_key_input(event: InputEvent):
 			runner.set_hud_visible(not runner.is_hud_visible())
 			print("Main: HUD toggled -> ", runner.is_hud_visible())
 	elif event.is_action("toggle_fullscreen"):
-		var mode = DisplayServer.window_get_mode()
-		if mode == DisplayServer.WINDOW_MODE_FULLSCREEN:
-			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-		else:
+		var fs_mode = DisplayServer.window_get_mode()
+		var going_fs = fs_mode != DisplayServer.WINDOW_MODE_FULLSCREEN
+		if going_fs:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
+		else:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		if runner and runner.is_engine_initialized():
+			runner.execute_command("set r_fullscreen %d" % (1 if going_fs else 0))
 		print("Main: Fullscreen toggled")
 	elif event.keycode == KEY_F10:
 		# F10 -- exec server.cfg (listen server: host + play on dm/mohdm1)

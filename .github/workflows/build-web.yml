@@ -1,12 +1,8 @@
 # Build WASM GDExtension, export Godot project for web, and push Docker image.
-# Triggered on push to main, PRs, and manual dispatch.
+# Triggered on release (via workflow_call) or manual dispatch.
 name: Build Web
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
   workflow_call:
 

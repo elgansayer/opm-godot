@@ -18,19 +18,30 @@ permissions:
   contents: write
 
 jobs:
-  # ─── Build native platforms ───
-  build-native:
-    uses: ./.github/workflows/build-native.yml
+  # ─── Build each platform ───
+  build-linux:
+    uses: ./.github/workflows/build-linux.yml
     secrets: inherit
 
-  # ─── Build web ───
+  build-macos:
+    uses: ./.github/workflows/build-macos.yml
+    secrets: inherit
+
+  build-windows:
+    uses: ./.github/workflows/build-windows.yml
+    secrets: inherit
+
+  build-android:
+    uses: ./.github/workflows/build-android.yml
+    secrets: inherit
+
   build-web:
     uses: ./.github/workflows/build-web.yml
     secrets: inherit
 
-  # ─── Create GitHub Release with all native artifacts ───
+  # ─── Create GitHub Release with all artifacts ───
   release:
-    needs: [build-native, build-web]
+    needs: [build-linux, build-macos, build-windows, build-android, build-web]
     runs-on: ubuntu-22.04
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
 

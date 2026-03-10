@@ -27,6 +27,7 @@ function usage() {
     echo "Other:"
     echo "  clean     Remove all build artefacts and deployed binaries"
     echo "  test      Run a basic headless smoke test"
+    echo "  test-all  Build, deploy, run ALL tests (smoke + viewmodel + resolution)"
     echo ""
     echo "Example:"
     echo "  ./build.sh linux"
@@ -65,6 +66,9 @@ case "$TARGET" in
         ;;
     test)
         exec "$(dirname "$0")/scripts/test.sh" "$@"
+        ;;
+    test-all)
+        exec "$(dirname "$0")/scripts/test-all.sh" "$@"
         ;;
     -h|--help)
         usage

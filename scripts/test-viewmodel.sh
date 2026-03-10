@@ -138,21 +138,21 @@ echo ""
 # Show FAIL lines if any
 if [[ "$FAIL_COUNT" -gt 0 ]]; then
     echo "--- FAIL details ---"
-    grep '\[VIEWMODEL-VALIDATE\] FAIL' "$LOG_FILE" | head -20
+    awk '/\[VIEWMODEL-VALIDATE\] FAIL/ { print; if (++n == 20) exit }' "$LOG_FILE"
     echo ""
 fi
 
 # Show WARN lines if any
 if [[ "$WARN_COUNT" -gt 0 ]]; then
     echo "--- WARN details ---"
-    grep '\[VIEWMODEL-VALIDATE\] WARN' "$LOG_FILE" | head -10
+    awk '/\[VIEWMODEL-VALIDATE\] WARN/ { print; if (++n == 10) exit }' "$LOG_FILE"
     echo ""
 fi
 
 # Show FPS-DIAG changes (surface transitions)
 if [[ "$NODRAW_CHANGES" -gt 0 ]]; then
     echo "--- Surface state changes ---"
-    grep '\[FPS-DIAG\] CHANGE' "$LOG_FILE" | head -20
+    awk '/\[FPS-DIAG\] CHANGE/ { print; if (++n == 20) exit }' "$LOG_FILE"
     echo ""
 fi
 

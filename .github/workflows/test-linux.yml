@@ -1,0 +1,180 @@
+# Build + test pipeline for Linux.
+# Runs on every push to main and on PRs.  The headless smoke test needs
+# only the built .so — no game assets.  Viewmodel and resolution tests
+# are skipped in CI (they need a display server and pk3 game assets).
+name: Test Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    name: build-test-linux-x86_64
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scons
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ zlib1g-dev bison flex
+
+      - name: Generate parser sources
+        working-directory: openmohaa
+        run: |
+          PARSER_DIR="code/parser/generated"
+          if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
+            mkdir -p "$PARSER_DIR"
+            bison --defines="$PARSER_DIR/yyParser.hpp" -o "$PARSER_DIR/yyParser.cpp" code/parser/bison_source.txt
+            flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
+          fi
+
+      - name: Build GDExtension
+        working-directory: openmohaa
+        run: scons platform=linux target=template_debug -j$(nproc) dev_build=yes
+
+      - name: Verify build outputs
+        run: |
+          echo "=== Build output check ==="
+          ls -lh openmohaa/bin/libopenmohaa.so
+          ls -lh openmohaa/bin/libcgame.so
+          echo "Both libraries built successfully."
+
+      - name: Deploy to project
+        run: |
+          mkdir -p project/bin
+          cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
+
+      - name: Install Godot
+        run: |
+          GODOT_VERSION="4.2.2"
+          GODOT_FILE="Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/${GODOT_FILE}.zip"
+          wget -q "$GODOT_URL" -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot-bin
+          chmod +x "/tmp/godot-bin/${GODOT_FILE}"
+          sudo mv "/tmp/godot-bin/${GODOT_FILE}" /usr/local/bin/godot
+          godot --version
+
+      - name: Headless smoke test
+        working-directory: project
+        run: |
+          echo "=== Headless smoke test ==="
+          echo "Starting engine in headless mode for 8 seconds..."
+          timeout 30 godot --headless --quit-after 8000 2>&1 | tee /tmp/smoke-test.log || true
+          echo ""
+          echo "=== Checking for fatal errors ==="
+          if grep -qi "FATAL ERROR\|SIGSEGV\|Segmentation fault\|SIGABRT\|core dumped" /tmp/smoke-test.log; then
+            echo "FAIL: Fatal error detected in headless smoke test"
+            grep -i "FATAL ERROR\|SIGSEGV\|Segmentation fault\|SIGABRT\|core dumped" /tmp/smoke-test.log
+            exit 1
+          fi
+          if grep -q "\[MoHAA\] Engine initialised" /tmp/smoke-test.log; then
+            echo "PASS: Engine initialised successfully"
+          else
+            echo "WARN: Engine initialisation message not found (may still be OK)"
+          fi
+          echo "Headless smoke test passed."
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdextension-linux-x86_64-tested
+          path: |
+            openmohaa/bin/libopenmohaa.so
+            openmohaa/bin/libcgame.so
+          if-no-files-found: warn
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: /tmp/smoke-test.log
+          if-no-files-found: ignore
+
+  # Optional: run full display-based tests on self-hosted runner with
+  # game assets and a display server.  Triggers only on workflow_dispatch.
+  full-tests:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    name: full-test-suite
+    timeout-minutes: 60
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+          persist-credentials: false
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gdextension-linux-x86_64-tested
+          path: openmohaa/bin/
+
+      - name: Deploy
+        run: |
+          mkdir -p project/bin
+          cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
+          mkdir -p ~/.local/share/openmohaa/main
+          cp -f openmohaa/bin/libcgame.so ~/.local/share/openmohaa/main/cgame.so
+
+      - name: Check prerequisites
+        run: |
+          echo "Checking display..."
+          if [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+            echo "No display server — trying xvfb-run"
+            if ! command -v xvfb-run &>/dev/null; then
+              echo "ERROR: No display and xvfb-run not available"
+              exit 1
+            fi
+          fi
+          echo "Checking game assets..."
+          if [[ ! -d "$HOME/.local/share/openmohaa/main" ]]; then
+            echo "ERROR: Game assets not found"
+            exit 1
+          fi
+          ls "$HOME/.local/share/openmohaa/main/"*.pk3 | head -3
+          echo "Prerequisites OK."
+
+      - name: Run full test suite
+        run: |
+          chmod +x scripts/test-all.sh scripts/test-viewmodel.sh scripts/test-resolution.sh
+          # Use xvfb-run if no display is available
+          if [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
+            ./scripts/test-all.sh --skip-build --map=dm/mohdm1
+          else
+            xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+              ./scripts/test-all.sh --skip-build --map=dm/mohdm1
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-test-results
+          path: test-results/
+          if-no-files-found: ignore

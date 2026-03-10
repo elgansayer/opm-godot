@@ -1,0 +1,78 @@
+# Build GDExtension for Windows (x86_64 and arm64).
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            experimental: false
+          - arch: arm64
+            experimental: true
+
+    runs-on: windows-2022
+    name: windows-${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+          persist-credentials: false
+
+      - name: Check Submodule Status
+        run: git submodule status
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install SCons
+        run: |
+          python -m pip install --upgrade pip
+          pip install scons || pip install scons --break-system-packages
+
+      - name: Install Windows dependencies
+        run: choco install winflexbison3 -y
+
+      - name: Generate parser sources
+        working-directory: openmohaa
+        shell: cmd
+        run: |
+          if not exist "code\parser\generated\yyParser.hpp" (
+            if not exist "code\parser\generated" mkdir "code\parser\generated"
+            win_bison --defines="code\parser\generated\yyParser.hpp" -o "code\parser\generated\yyParser.cpp" code\parser\bison_source.txt
+            win_flex -Cem --nounistd -o "code\parser\generated\yyLexer.cpp" --header-file="code\parser\generated\yyLexer.h" code\parser\lex_source.txt
+          )
+
+      - name: Patch sources for Windows build
+        run: python scripts/patch-build.py --platform windows
+
+      - name: Build GDExtension
+        working-directory: openmohaa
+        shell: pwsh
+        run: scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
+
+      - name: Zip GDExtension artifacts
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "openmohaa/bin/*" -DestinationPath "gdextension-windows-${{ matrix.arch }}.zip"
+
+      - name: Upload GDExtension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gdextension-windows-${{ matrix.arch }}
+          path: gdextension-windows-${{ matrix.arch }}.zip
+          if-no-files-found: warn
