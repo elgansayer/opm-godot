@@ -30,6 +30,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check Submodule Status
+        run: git submodule status
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -94,9 +97,8 @@ jobs:
 
       - name: Apply JS patches
         run: |
+          export EMSDK_DIR="${EMSDK:-$HOME/emsdk}"
           scripts/build-web.sh --patch-only
-        env:
-          EMSDK_DIR: ${{ env.EMSDK }}
 
       - name: Upload web export artifact
         uses: actions/upload-artifact@v4

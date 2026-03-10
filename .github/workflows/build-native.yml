@@ -24,7 +24,7 @@ jobs:
           - platform: linux
             os: ubuntu-24.04-arm
             arch: arm64
-            experimental: false
+            experimental: true
           - platform: macos
             os: macos-13
             arch: x86_64
@@ -59,6 +59,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check Submodule Status
+        run: git submodule status
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -88,7 +91,10 @@ jobs:
 
       - name: Install macOS dependencies
         if: matrix.platform == 'macos'
-        run: brew install bison flex
+        run: |
+          brew install bison flex
+          echo "$(brew --prefix bison)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix flex)/bin" >> $GITHUB_PATH
 
       - name: Install Windows dependencies
         if: matrix.platform == 'windows'

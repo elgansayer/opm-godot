@@ -96,11 +96,14 @@ FPS_DIAG_COUNT=0
 NODRAW_CHANGES=0
 
 if [[ -f "$LOG_FILE" ]]; then
-    FAIL_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] FAIL' "$LOG_FILE" 2>/dev/null || echo 0)
-    WARN_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] WARN' "$LOG_FILE" 2>/dev/null || echo 0)
-    INFO_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] INFO' "$LOG_FILE" 2>/dev/null || echo 0)
-    FPS_DIAG_COUNT=$(grep -c '\[FPS-DIAG\]' "$LOG_FILE" 2>/dev/null || echo 0)
-    NODRAW_CHANGES=$(grep -c '\[FPS-DIAG\] CHANGE' "$LOG_FILE" 2>/dev/null || echo 0)
+    # Note: use VAR=$(...) || VAR=0 pattern, NOT $( ... || echo 0).
+    # grep -c outputs "0" with exit code 1 on no match; || echo 0 would
+    # append another "0", giving "0\n0" which breaks arithmetic.
+    FAIL_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] FAIL' "$LOG_FILE" 2>/dev/null) || FAIL_COUNT=0
+    WARN_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] WARN' "$LOG_FILE" 2>/dev/null) || WARN_COUNT=0
+    INFO_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] INFO' "$LOG_FILE" 2>/dev/null) || INFO_COUNT=0
+    FPS_DIAG_COUNT=$(grep -c '\[FPS-DIAG\]' "$LOG_FILE" 2>/dev/null) || FPS_DIAG_COUNT=0
+    NODRAW_CHANGES=$(grep -c '\[FPS-DIAG\] CHANGE' "$LOG_FILE" 2>/dev/null) || NODRAW_CHANGES=0
 fi
 
 # Write summary
