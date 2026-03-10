@@ -60,7 +60,7 @@ jobs:
 
       - name: Build WASM GDExtension
         working-directory: openmohaa
-        run: scons platform=web target=template_debug -j1 dev_build=yes
+        run: scons platform=web target=template_debug -j1 dev_build=yes disable_exceptions=no
 
       - name: Verify WASM artifacts
         run: |
