@@ -43,6 +43,12 @@ jobs:
       - name: List artifacts
         run: find artifacts/ -type f | head -50
 
+      - name: Zip Web Build
+        run: |
+          cd artifacts/web-export
+          zip -r ../../openmohaa-web.zip .
+          cd ../..
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -52,5 +58,6 @@ jobs:
           prerelease: false
           files: |
             artifacts/gdextension-*/*
+            openmohaa-web.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
