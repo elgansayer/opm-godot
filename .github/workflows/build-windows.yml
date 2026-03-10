@@ -1,4 +1,4 @@
-# Build GDExtension for Windows (x86_64 and arm64).
+# Build GDExtension for Windows (x86_64).
 name: Build Windows
 
 on:
@@ -14,8 +14,6 @@ jobs:
         include:
           - arch: x86_64
             experimental: false
-          - arch: arm64
-            experimental: true
 
     runs-on: windows-2022
     name: windows-${{ matrix.arch }}

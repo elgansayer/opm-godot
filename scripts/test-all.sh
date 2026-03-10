@@ -142,8 +142,20 @@ if [[ -d "$HOME/.local/share/openmohaa/main" ]]; then
     fi
 fi
 
+HAS_DOCKER=false
+if command -v docker &>/dev/null; then
+    HAS_DOCKER=true
+fi
+
+HAS_NODE=false
+if command -v node &>/dev/null && command -v npm &>/dev/null; then
+    HAS_NODE=true
+fi
+
 echo "Display:  $(if $HAS_DISPLAY; then echo "yes"; else echo "no (viewmodel/resolution tests will be skipped)"; fi)"
 echo "Assets:   $(if $HAS_GAME_ASSETS; then echo "yes"; else echo "no (viewmodel/resolution tests will be skipped)"; fi)"
+echo "Docker:   $(if $HAS_DOCKER; then echo "yes"; else echo "no (web preflight will be skipped)"; fi)"
+echo "Node:     $(if $HAS_NODE; then echo "yes"; else echo "no (web browser E2E will be skipped)"; fi)"
 echo ""
 
 # ─── Step 1: Build ───
@@ -210,7 +222,29 @@ fi
 run_test "Headless smoke test" \
     godot --path "$PROJECT_DIR" --headless --quit-after 8000
 
-# Test 3: Viewmodel/NODRAW regression
+# Test 3: Web stack preflight
+if [[ "$HAS_DOCKER" = false ]]; then
+    skip_test "Web stack preflight" "Docker not available"
+elif [[ "$HAS_GAME_ASSETS" = false ]]; then
+    skip_test "Web stack preflight" "No game assets"
+else
+    run_test "Web stack preflight" \
+        "$SCRIPT_DIR/test-web.sh"
+fi
+
+# Test 4: Web browser E2E
+if [[ "$HAS_DOCKER" = false ]]; then
+    skip_test "Web browser E2E" "Docker not available"
+elif [[ "$HAS_NODE" = false ]]; then
+    skip_test "Web browser E2E" "Node/npm not available"
+elif [[ "$HAS_GAME_ASSETS" = false ]]; then
+    skip_test "Web browser E2E" "No game assets"
+else
+    run_test "Web browser E2E" \
+        "$SCRIPT_DIR/test-web-e2e.sh"
+fi
+
+# Test 5: Viewmodel/NODRAW regression
 if [[ "$HEADLESS_ONLY" = true ]]; then
     skip_test "Viewmodel/NODRAW regression" "--headless-only flag"
 elif [[ "$HAS_DISPLAY" = false ]]; then
@@ -222,7 +256,7 @@ else
         "$SCRIPT_DIR/test-viewmodel.sh" --map="$MAP" --duration="$VIEWMODEL_DURATION"
 fi
 
-# Test 4: Resolution/HUD scaling
+# Test 6: Resolution/HUD scaling
 if [[ "$HEADLESS_ONLY" = true ]]; then
     skip_test "Resolution/HUD scaling" "--headless-only flag"
 elif [[ "$HAS_DISPLAY" = false ]]; then

@@ -202,6 +202,11 @@ func _on_engine_error(message: String):
 
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
+	if OS.has_feature("web") and Engine.has_singleton("JavaScriptBridge"):
+		var js = Engine.get_singleton("JavaScriptBridge")
+		if js:
+			# Expose map-load state for deterministic browser E2E tests.
+			js.eval("window.__opmMapLoaded = " + JSON.stringify(map_name) + ";")
 	if OS.has_feature("headless") or DisplayServer.get_name() == "headless":
 		print("Main: Headless mode detected, skipping auto screenshot.")
 		return

@@ -494,6 +494,28 @@ map dm/mohdm1
 cd project && godot --headless --quit-after 5000
 ```
 
+### Web Preflight Test
+
+```bash
+# Verifies local web stack and map-loading prerequisites:
+# - nginx serves mohaa.html/mohaa.js/main/cgame.so
+# - COOP/COEP headers are present
+# - /assets/main JSON listing works
+# - pak0..pak6 are discoverable for server-side preload
+./scripts/test-web.sh
+```
+
+### Web Browser E2E Test
+
+```bash
+# Runs full browser automation with Playwright:
+# - starts/verifies local web stack
+# - opens mohaa.html with a startup map
+# - clicks through loader UI
+# - waits for deterministic map-loaded signal
+./scripts/test-web-e2e.sh
+```
+
 ### Web Relay
 
 Browsers cannot send raw UDP packets, so web clients connect through a lightweight Node.js WebSocket relay:

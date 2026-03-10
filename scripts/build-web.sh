@@ -106,12 +106,32 @@ serve_docker() {
         echo "ERROR: ASSET_PATH is not set. Pass --asset-path /path/to/game/files or export ASSET_PATH." >&2
         exit 1
     fi
+
+    if [[ ! -d "$asset_path/main" ]]; then
+        echo "ERROR: asset path '$asset_path' does not contain a main/ directory." >&2
+        exit 1
+    fi
+
+    # Fail fast on missing base game data to avoid a silent web boot that never loads a map.
+    local missing_paks=()
+    local pak
+    for pak in 0 1 2 3 4 5 6; do
+        if ! find "$asset_path/main" -maxdepth 1 -type f -iname "pak${pak}.pk3" | grep -q .; then
+            missing_paks+=("pak${pak}.pk3")
+        fi
+    done
+    if [[ ${#missing_paks[@]} -gt 0 ]]; then
+        echo "ERROR: Missing required AA pak files under '$asset_path/main': ${missing_paks[*]}" >&2
+        echo "       Web map loading requires a complete base set (pak0..pak6)." >&2
+        exit 1
+    fi
+
     echo "Deploying docker compose stack (asset path: $asset_path)..."
     cd "$REPO_ROOT"
     # Force-remove any lingering containers by name to avoid the 'already in use' conflict,
     # then bring the stack up with --force-recreate so existing containers are replaced atomically.
     docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
-    ASSET_PATH="$asset_path" docker compose up -d --build --force-recreate
+    ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose up -d --build --force-recreate
     echo "Stack is up. Web: http://localhost:8086"
 }
 

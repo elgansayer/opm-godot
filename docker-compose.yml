@@ -21,7 +21,7 @@ services:
     ports:
       - "8086:80"
     environment:
-      - CDN_URL=${CDN_URL:-}
+      - CDN_URL=${CDN_URL:-/assets}
     volumes:
       - ./web:/srv/web:ro
       - ./docker/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -36,7 +36,7 @@ services:
     ports:
       - "8086:80"
     environment:
-      - CDN_URL=${CDN_URL:-}
+      - CDN_URL=${CDN_URL:-/assets}
     volumes:
       - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
     restart: unless-stopped
