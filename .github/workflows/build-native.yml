@@ -129,12 +129,17 @@ jobs:
             win_flex -Cem --nounistd -o "code\parser\generated\yyLexer.cpp" --header-file="code\parser\generated\yyLexer.h" code\parser\lex_source.txt
           )
 
+      - name: List Android NDKs
+        if: matrix.platform == 'android'
+        run: ls -R /usr/local/lib/android/sdk/ndk || true
+
       - name: Build GDExtension
         if: matrix.platform != 'windows'
         working-directory: openmohaa
-        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no ANDROID_HOME=""
+        run: scons platform=${{ matrix.platform }} arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
         env:
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_VERSION: 25.2.9519653
 
       - name: Build GDExtension (Windows)
         if: matrix.platform == 'windows'
