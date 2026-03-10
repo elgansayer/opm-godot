@@ -99,6 +99,19 @@ def patch_sys_main_windows(src_root: Path) -> None:
         content = patched
         print(f"[patch] sys_main.c: fixed {count} 'return getenv(...)' cast(s)")
 
+    # --- 2b. Cast va() return value (const char * → char *) ---
+    # q_shared.h declares va() as returning 'const char *', but many callers
+    # in sys_main.c need to return or assign to 'char *'.  MSVC with /TP
+    # (treat C as C++) rejects the implicit const-stripping as a hard error.
+    patched, count = re.subn(
+        r'\breturn\s+va\s*\(',
+        'return (char *)va(',
+        content
+    )
+    if count:
+        content = patched
+        print(f"[patch] sys_main.c: fixed {count} 'return va(...)' const cast(s)")
+
     # --- 3. Cast enum initialisation (cpuFeatures_t var = 0 or 0x0) ---
     # MSVC requires an explicit cast from int to enum.
     # Handles literal 0 and hex 0x0 forms; applying inside a comment is safe.
