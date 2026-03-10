@@ -81,7 +81,7 @@ jobs:
         if: matrix.platform == 'android'
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: 23.2.8568313
+          ndk-version: 23.1.7779620
 
       - name: Set up MSVC (Windows)
         if: matrix.platform == 'windows'
