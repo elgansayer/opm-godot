@@ -11,7 +11,7 @@ var launch_map = ""
 # exec_cfg: exec this config at startup (e.g. "server.cfg" loads its map)
 var exec_cfg = ""
 var last_state_logged = -999
-var web_net_tweaks_applied = false # DEPRECATED: kept for compat, no longer used
+var web_net_tweaks_applied = false
 
 func _ready():
 	print("Main: Script started.")
