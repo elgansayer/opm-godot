@@ -325,6 +325,32 @@ extra_files_js = ','.join(
 # Grow wasm memory before loadDylibs so the GDExtension side module (which
 # declares initial=1628 pages) can be instantiated.  Use >>> (unsigned right
 # shift) to avoid signed-int overflow at 2GB.  Target 2048 pages (128 MB).
+# Also inject a polyfill for std::__2::__hash_memory before loadDylibs so the
+# Emscripten dynamic linker can resolve the symbol when instantiating
+# libopenmohaa.wasm.  The symbol is used by std::hash<std::string> (called
+# from std::unordered_map<std::string,…>) in libopenmohaa.wasm which was
+# compiled with a newer libc++ (std::__2) while Godot 4.2's web template was
+# compiled with libc++ std::__1 — causing the symbol to be unresolved at
+# run-time and triggering an infinite stub-call hang during BSP world load.
+_HASH_POLY = (
+    "if(typeof globalThis['_ZNSt3__213__hash_memoryEPKvm']==='undefined'){"
+    "globalThis['_ZNSt3__213__hash_memoryEPKvm']=function(ptr,size){"
+    # FNV-1a hash — matches std::hash<std::string> semantics well enough for
+    # std::unordered_map correctness; exact libc++ algorithm not required.
+    "var h=2166136261,m=16777619,mem=HEAPU8||new Uint8Array(wasmMemory.buffer);"
+    "for(var i=0;i<(size>>>0);++i){h=(h^mem[(ptr+i)>>>0])>>>0;h=Math.imul(h,m)>>>0;}"
+    "return h;};"
+    "console.log('OpenMoHAA: injected std::__2::__hash_memory polyfill');}"
+)
+# Belt-and-suspenders: push cgame.so into dynamicLibraries right before loadDylibs().
+# This runs AFTER Module["dynamicLibraries"] is already copied into dynamicLibraries,
+# so it guarantees cgame.so is loaded regardless of whether the GodotExtension class
+# constructor patch (further below) succeeded or not.
+_CGAME_PUSH = (
+    "if(!dynamicLibraries.includes('main/cgame.so')){"
+    "dynamicLibraries.push('main/cgame.so');"
+    "console.log('OpenMoHAA: pre-registered main/cgame.so in dynamicLibraries');}"
+)
 mem_old = "LDSO.init();loadDylibs();"
 mem_new = (
     "LDSO.init();"
@@ -332,31 +358,97 @@ mem_new = (
     "if(__wm_pages<2048){"
     "try{wasmMemory.grow(2048-__wm_pages);updateMemoryViews()}"
     "catch(e){console.warn('OpenMoHAA: memory pre-grow failed',e)}}"
+    + _HASH_POLY +
+    _CGAME_PUSH +
     "loadDylibs();"
 )
-if mem_old in src:
+_HAS_HASH = "_ZNSt3__213__hash_memoryEPKvm" in src
+_HAS_CGAME = "dynamicLibraries.includes('main/cgame.so')" in src
+if _HAS_HASH and _HAS_CGAME:
+    print("__hash_memory polyfill + cgame.so push already injected (idempotent)")
+elif mem_old in src:
     src = src.replace(mem_old, mem_new, 1)
-    print("Patched mohaa.js: memory pre-grow before loadDylibs (2048 pages)")
+    print("Patched mohaa.js: memory pre-grow + __hash_memory polyfill + cgame.so push before loadDylibs")
 elif "__wm_pages" in src:
-    print("Memory pre-grow already patched (idempotent)")
+    # Memory pre-grow already applied in a previous build; inject missing pieces.
+    for _warn in ("'OpenMoHAA: memory pre-grow failed',e)}}", "'MOHAAjs: memory pre-grow failed',e)}}"):
+        _old_frag = _warn + "loadDylibs();"
+        _new_parts = _warn
+        if not _HAS_HASH:
+            _new_parts += _HASH_POLY
+        if not _HAS_CGAME:
+            _new_parts += _CGAME_PUSH
+        _new_frag = _new_parts + "loadDylibs();"
+        if _old_frag in src and _new_frag != _old_frag:
+            src = src.replace(_old_frag, _new_frag, 1)
+            _parts = []
+            if not _HAS_HASH: _parts.append("__hash_memory polyfill")
+            if not _HAS_CGAME: _parts.append("cgame.so push")
+            print(f"Patched mohaa.js: injected {' + '.join(_parts)} (memory pre-grow was already applied)")
+            break
+    else:
+        if _HAS_HASH and not _HAS_CGAME:
+            # Hash polyfill present; try to anchor cgame push directly before loadDylibs.
+            # Try both non-obfuscated (OpenMoHAA) and obfuscated (MOHAAjs) variants of
+            # the log string, since --patch-only re-runs on an already-obfuscated file.
+            for _prefix in ("OpenMoHAA", "MOHAAjs"):
+                _cgame_anchor = f"console.log('{_prefix}: injected std::__2::__hash_memory polyfill');}}loadDylibs();"
+                _cgame_anchor_new = f"console.log('{_prefix}: injected std::__2::__hash_memory polyfill');}}" + _CGAME_PUSH + "loadDylibs();"
+                if _cgame_anchor in src:
+                    src = src.replace(_cgame_anchor, _cgame_anchor_new, 1)
+                    print("Patched mohaa.js: injected cgame.so push (anchored to hash polyfill tail)")
+                    break
+            else:
+                print("WARNING: Memory pre-grow already applied but could not anchor missing patches")
+        else:
+            print("WARNING: Memory pre-grow already applied but could not anchor __hash_memory polyfill + cgame.so push")
 else:
-    print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow skipped")
+    print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow + polyfill skipped")
 
 preload_old = "var moduleRtn;var Module=moduleArg;var ENVIRONMENT_IS_WEB="
 preload_new = (
     "var moduleRtn;var Module=moduleArg;"
+    "if(typeof window!=='undefined'){window.__opmStdout=window.__opmStdout||[];window.__opmMapLoadedLog='';}"
+    "(function(){"
+    "  var __wrap=function(name){"
+    "    var prev=Module[name];"
+    "    Module[name]=function(){"
+    "      var msg=Array.prototype.slice.call(arguments).join(' ');"
+    "      if(typeof window!=='undefined'){"
+    "        window.__opmStdout.push(msg);"
+    "        if(msg.indexOf('Main: SIGNAL map_loaded ->')!==-1)window.__opmMapLoadedLog=msg;"
+    "      }"
+    "      if(typeof prev==='function')return prev.apply(this,arguments);"
+    "      if(name==='printErr'){console.error(msg)}else{console.log(msg)}"
+    "    };"
+    "  };"
+    "  __wrap('print');"
+    "  __wrap('printErr');"
+    "})();"
     "Module['preRun']=Module['preRun']||[];"
     "Module['preRun'].push(()=>{"
     "if(typeof FS==='undefined'||typeof fetch==='undefined'||typeof addRunDependency!=='function'||typeof removeRunDependency!=='function'){return;}"
     "var __dep='openmohaa-vfs-preload'; addRunDependency(__dep);"
     "(async()=>{"
-    "  var cfg=(typeof OPM_CONFIG!=='undefined'?OPM_CONFIG:{}),cdn=cfg['CDN_URL']||'';"
+    "  var cfg=(typeof OPM_CONFIG!=='undefined'?OPM_CONFIG:{}),cdn=cfg['CDN_URL']||'/assets';"
     "  if(cdn&&!cdn.endsWith('/'))cdn+='/';"
     "  var cache=null; try{cache=await caches.open('mohaajs-assets-v1')}catch(e){console.warn('[MOHAAjs] Cache API unavailable',e)}"
     # --- helper: ensure MEMFS directory exists ---
     "  var __mkdirs=(path)=>{"
     "    var p='',ps=path.split('/').filter(Boolean);"
     "    for(var i=0;i<ps.length;i++){p+='/'+ps[i];try{FS.mkdir(p)}catch(e){}}"
+    "  };"
+    # --- helper: write file + lowercase pak alias when needed ---
+    "  var __writeFileWithPakAlias=(dst,data)=>{"
+    "    FS.writeFile(dst,data,{canRead:true,canWrite:false});"
+    "    var m=dst.match(/^(.*\/)([^\/]+)$/);"
+    "    if(!m)return;"
+    "    var dir=m[1],base=m[2];"
+    "    if(!/^pak\d+\.pk3$/i.test(base))return;"
+    "    var lowerBase=base.toLowerCase();"
+    "    if(lowerBase===base)return;"
+    "    var alias=dir+lowerBase;"
+    "    try{if(!FS.analyzePath(alias).exists){FS.writeFile(alias,data,{canRead:true,canWrite:false})}}catch(e){}"
     "  };"
     # --- helper: fetch directory listing as JSON array ---
     "  var __listDir=async(relDir)=>{"
@@ -384,7 +476,7 @@ preload_new = (
     "  var __sem=0,__maxSem=30,__semQ=[];"
     "  var __acquire=()=>__sem<__maxSem?(++__sem,Promise.resolve()):new Promise(r=>{__semQ.push(r)});"
     "  var __release=()=>{__sem--;if(__semQ.length){__sem++;(__semQ.shift())()}};"
-    # --- recursive walk: discover + download simultaneously ---
+    # --- bounded root scan: fetch only required archives/configs ---
     "  var total=0,loaded=0,failed=0;"
     "  var __walk=async(relDir)=>{"
     "    var entries=await __listDir(relDir);"
@@ -392,32 +484,28 @@ preload_new = (
     "    for(var i=0;i<entries.length;i++){"
     "      var e=entries[i],name=e.name;"
     "      if(name.startsWith('.'))continue;"
-    # skip native binaries (Linux .so, Windows .dll, macOS .dylib) — useless on web
+    # root-only fetch: skip subdirectories and focus on pack/config files.
+    "      if(e.type==='directory')continue;"
     "      var ln=name.toLowerCase();"
-    "      if(ln.endsWith('.so')||ln.endsWith('.dll')||ln.endsWith('.dylib'))continue;"
+    "      if(!(ln.endsWith('.pk3')||ln.endsWith('.cfg')))continue;"
     "      var rel=relDir+name;"
-    "      if(e.type==='directory'){"
-    "        __mkdirs('/'+rel);"
-    "        promises.push(__walk(rel+'/'));"
-    "      }else{"
-    "        total++;"
-    "        promises.push((async(r)=>{"
-    "          await __acquire();"
-    "          try{"
-    "            if(FS.analyzePath('/'+r).exists){loaded++;return}"
-    "            var result=await __fetchOne(r);"
-    "            if(result){"
-    "              var cut=result.dst.lastIndexOf('/');"
-    "              if(cut>0)__mkdirs(result.dst.slice(0,cut));"
-    "              FS.writeFile(result.dst,result.data,{canRead:true,canWrite:false});"
-    "              loaded++;"
-    "            }else{failed++}"
-    "          }catch(e){failed++}"
-    "          finally{__release()}"
-    "          if((loaded+failed)%200===0||loaded+failed===total)"
-    "            console.log('[MOHAAjs] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
-    "        })(rel));"
-    "      }"
+    "      total++;"
+    "      promises.push((async(r)=>{"
+    "        await __acquire();"
+    "        try{"
+    "          if(FS.analyzePath('/'+r).exists){loaded++;return}"
+    "          var result=await __fetchOne(r);"
+    "          if(result){"
+    "            var cut=result.dst.lastIndexOf('/');"
+    "            if(cut>0)__mkdirs(result.dst.slice(0,cut));"
+    "            __writeFileWithPakAlias(result.dst,result.data);"
+    "            loaded++;"
+    "          }else{failed++}"
+    "        }catch(e){failed++}"
+    "        finally{__release()}"
+    "        if((loaded+failed)%200===0||loaded+failed===total)"
+    "          console.log('[MOHAAjs] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
+    "      })(rel));"
     "    }"
     "    await Promise.all(promises);"
     "  };"
@@ -434,7 +522,7 @@ preload_new = (
     "      var __ldst='/'+__lrel;"
     "      var __lcut=__ldst.lastIndexOf('/');"
     "      if(__lcut>0)__mkdirs(__ldst.slice(0,__lcut));"
-    "      try{FS.writeFile(__ldst,__lf[__lrel],{canRead:true,canWrite:false})}catch(e){}"
+    "      try{__writeFileWithPakAlias(__ldst,__lf[__lrel])}catch(e){}"
     "    }"
     "    console.log('[MOHAAjs] Wrote '+__lfKeys.length+' local files to MEMFS');"
     "    if(typeof window!=='undefined')window.__opmLocalFiles=null;"
@@ -612,12 +700,13 @@ else:
 dynlib_old = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs),"
 dynlib_new = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs).concat(['main/cgame.so']),"
 if dynlib_new in src:
-    print("dynamicLibraries already patched (idempotent)")
+    print("dynamicLibraries class constructor already patched (idempotent)")
 elif dynlib_old in src:
     src = src.replace(dynlib_old, dynlib_new, 1)
-    print("Patched mohaa.js dynamicLibraries to pre-register cgame.so")
+    print("Patched mohaa.js dynamicLibraries class constructor to pre-register cgame.so")
 else:
-    print("WARNING: Could not find dynamicLibraries marker in mohaa.js; cgame pre-registration skipped")
+    # Not a fatal error: cgame.so is also pushed via _CGAME_PUSH in the mem block above.
+    print("NOTE: GodotExtension class constructor dynamicLibraries marker not found; relying on direct push above")
 
 # Wrap loadDylibs() iterations with try/catch so a failed lib (e.g. compile error) does
 # not escape as an unhandled rejection and prevents removeRunDependency("loadDylibs") from
@@ -1134,6 +1223,19 @@ new_boot = f"""/* OPM_BOOT_START */
 {T4}window.__opmGameDir=GAME_DIRS[targetGame]||'main';
 {T4}setStatusMode('progress');
 {T4}var engineArgs=['+set','com_target_game',String(targetGame)];
+{T4}var qMap=urlParams.get('map');
+{T4}if(qMap)engineArgs.push('+map',qMap);
+{T4}var qExec=urlParams.get('exec');
+{T4}if(qExec)engineArgs.push('+exec',qExec);
+{T4}if(urlParams.get('server')==='1'&&!qExec)engineArgs.push('+exec','server.cfg');
+{T4}if(urlParams.get('dedicated')==='1')engineArgs.push('--dedicated');
+{T4}var qConnect=urlParams.get('connect');
+{T4}if(qConnect)engineArgs.push('+connect',qConnect);
+{T4}var qRelay=urlParams.get('relay');
+{T4}if(qRelay){{
+{T5}qRelay=qRelay.replace('ws://','').replace('wss://','');
+{T5}engineArgs.push('+set','net_ws_relay',qRelay);
+{T4}}}
 {T4}engine.startGame({{
 {T5}'args':engineArgs,
 {T5}'onProgress':function(current,total){{

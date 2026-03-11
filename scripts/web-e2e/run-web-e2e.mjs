@@ -13,6 +13,9 @@ url.searchParams.set('com_target_game', targetGame);
 
 const errors = [];
 const logs = [];
+const httpIssues = [];
+let pageClosed = false;
+let pageCrashed = false;
 
 const browser = await chromium.launch({
   headless: true,
@@ -21,19 +24,56 @@ const browser = await chromium.launch({
 const context = await browser.newContext();
 const page = await context.newPage();
 
+// Benign patterns: browser resource 404s, Cache API blips, service worker noise
+const BENIGN_CONSOLE = [
+  /Failed to load resource:.*404/i,
+  /Failed to load resource:.*403/i,
+  /Failed to execute 'put' on 'Cache'/i,
+  /Service[- ]?[Ww]orker/i,
+  /favicon/i,
+];
+const isBenign = (text) => BENIGN_CONSOLE.some((re) => re.test(text));
+
 page.on('console', (msg) => {
   const text = msg.text();
   logs.push(text);
-  if (msg.type() === 'error') {
+  if (msg.type() === 'error' && !isBenign(text)) {
     errors.push(`console error: ${text}`);
   }
-  if (/ENGINE ERROR|OpenMoHAA unresolved symbol|FAILED to load/i.test(text)) {
+  // Only flag genuine engine/WASM load failures, not browser asset 404s
+  if (/ENGINE ERROR|OpenMoHAA unresolved symbol|FAILED to load.*\.wasm|FAILED to load.*cgame/i.test(text)) {
     errors.push(`runtime error marker: ${text}`);
   }
 });
 
+page.on('requestfailed', (request) => {
+  const failure = request.failure();
+  httpIssues.push(`request failed: ${request.method()} ${request.url()} :: ${failure?.errorText || 'unknown'}`);
+});
+
+page.on('response', (response) => {
+  const status = response.status();
+  if (status >= 400) {
+    httpIssues.push(`http ${status}: ${response.request().method()} ${response.url()}`);
+  }
+});
+
 page.on('pageerror', (err) => {
-  errors.push(`page error: ${err?.message || String(err)}`);
+  const msg = err?.message || String(err);
+  // Skip benign browser/Cache API errors that don't affect engine execution
+  if (!isBenign(msg)) {
+    errors.push(`page error: ${msg}`);
+  }
+});
+
+page.on('close', () => {
+  pageClosed = true;
+  errors.push('page close event fired');
+});
+
+page.on('crash', () => {
+  pageCrashed = true;
+  errors.push('page crash event fired');
 });
 
 try {
@@ -54,12 +94,43 @@ try {
     await page.click('#opm-skip-btn');
   }
 
+  const startupInfo = await page.evaluate(() => ({
+    startupArgs: typeof window.__opmStartupArgs === 'string' ? window.__opmStartupArgs : '',
+    launchMap: typeof window.__opmLaunchMap === 'string' ? window.__opmLaunchMap : '',
+    search: window.location.search,
+  }));
+  console.log(`[web-e2e] Startup args: ${startupInfo.startupArgs}`);
+  console.log(`[web-e2e] Launch map var: ${startupInfo.launchMap}`);
+  console.log(`[web-e2e] URL search: ${startupInfo.search}`);
+  const startupStdout = await page.evaluate(() => {
+    const arr = Array.isArray(window.__opmStdout) ? window.__opmStdout : [];
+    return arr.filter((line) => /Startup args|Startup map|Extra engine cmds|Starting at main menu/.test(String(line))).slice(-20);
+  }).catch(() => []);
+  if (startupStdout.length > 0) {
+    console.log('[web-e2e] Startup stdout markers:');
+    console.log(startupStdout.join('\n'));
+  }
+
   console.log('[web-e2e] Waiting for map-loaded signal');
-  await page.waitForFunction(() => typeof window.__opmMapLoaded === 'string' && window.__opmMapLoaded.length > 0, null, {
+  await page.waitForFunction(() => {
+    if (typeof window.__opmEngineError === 'string' && window.__opmEngineError.length > 0) {
+      throw new Error(`engine error: ${window.__opmEngineError}`);
+    }
+    const jsBridgeSignal = typeof window.__opmMapLoaded === 'string' && window.__opmMapLoaded.length > 0;
+    const stdoutSignal = typeof window.__opmMapLoadedLog === 'string' && window.__opmMapLoadedLog.length > 0;
+    return jsBridgeSignal || stdoutSignal;
+  }, null, {
     timeout: timeoutMs,
   });
 
-  const loadedMap = await page.evaluate(() => window.__opmMapLoaded || '');
+  const loadedMap = await page.evaluate(() => {
+    if (typeof window.__opmMapLoaded === 'string' && window.__opmMapLoaded.length > 0) {
+      return window.__opmMapLoaded;
+    }
+    const line = typeof window.__opmMapLoadedLog === 'string' ? window.__opmMapLoadedLog : '';
+    const i = line.indexOf('->');
+    return i >= 0 ? line.slice(i + 2).trim() : '';
+  });
   console.log(`[web-e2e] Map loaded: ${loadedMap}`);
 
   if (!loadedMap.toLowerCase().includes(targetMap.toLowerCase())) {
@@ -72,11 +143,31 @@ try {
 
   console.log('[web-e2e] PASS');
 } catch (err) {
-  const tail = logs.slice(-40).join('\n');
+  const tail = logs.slice(-200).join('\n');
   console.error('[web-e2e] FAIL:', err?.message || String(err));
+  if (pageCrashed) {
+    console.error('[web-e2e] Page crashed during run');
+  }
+  if (pageClosed) {
+    console.error('[web-e2e] Page closed during run');
+  }
+  if (httpIssues.length > 0) {
+    console.error('[web-e2e] HTTP/request issues:');
+    console.error(httpIssues.join('\n'));
+  }
   if (tail) {
     console.error('[web-e2e] Recent console output:');
     console.error(tail);
+  }
+  if (!page.isClosed()) {
+    const stdoutTail = await page.evaluate(() => {
+      const arr = Array.isArray(window.__opmStdout) ? window.__opmStdout : [];
+      return arr.slice(-80);
+    }).catch(() => []);
+    if (stdoutTail.length > 0) {
+      console.error('[web-e2e] Recent engine/stdout output:');
+      console.error(stdoutTail.join('\n'));
+    }
   }
   process.exitCode = 1;
 } finally {

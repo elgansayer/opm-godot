@@ -30,11 +30,28 @@ detect_browser() {
         "$(command -v microsoft-edge 2>/dev/null || true)" \
         "$(command -v microsoft-edge-stable 2>/dev/null || true)"; do
         if [[ -n "$candidate" && -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
+            if "$candidate" --version >/dev/null 2>&1; then
+                echo "$candidate"
+                return 0
+            fi
         fi
     done
     return 1
+}
+
+run_in_docker_playwright() {
+    local image="mcr.microsoft.com/playwright:v1.52.0-jammy"
+    echo "[web-e2e] Running in Docker Playwright image: $image"
+    docker run --rm \
+        --network host \
+        -v "$REPO_ROOT:/work" \
+        -w /work/scripts/web-e2e \
+        -e BASE_URL="$BASE_URL" \
+        -e TARGET_MAP="$TARGET_MAP" \
+        -e COM_TARGET_GAME="$COM_TARGET_GAME" \
+        -e E2E_TIMEOUT_MS="$E2E_TIMEOUT_MS" \
+        "$image" \
+        bash -lc "npm install --silent && node run-web-e2e.mjs"
 }
 
 echo "[web-e2e] Preconditions"
@@ -43,11 +60,11 @@ require_cmd npm
 require_cmd docker
 
 SYSTEM_BROWSER="$(detect_browser || true)"
-if [[ -z "$SYSTEM_BROWSER" ]]; then
-    echo "ERROR: no supported system browser found (chromium/chrome/edge)." >&2
-    exit 2
+if [[ -n "$SYSTEM_BROWSER" ]]; then
+    echo "[web-e2e] Using browser: $SYSTEM_BROWSER"
+else
+    echo "[web-e2e] No usable local browser found; Docker fallback will be used"
 fi
-echo "[web-e2e] Using browser: $SYSTEM_BROWSER"
 
 if [[ ! -f "$E2E_DIR/package.json" ]]; then
     echo "ERROR: missing Playwright package definition at $E2E_DIR/package.json" >&2
@@ -58,14 +75,20 @@ echo "[web-e2e] Running web preflight"
 ASSET_PATH="$ASSET_PATH" "$SCRIPT_DIR/test-web.sh"
 
 echo "[web-e2e] Installing npm dependencies (if needed)"
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix "$E2E_DIR" install --silent
+if [[ -n "$SYSTEM_BROWSER" ]]; then
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix "$E2E_DIR" install --silent
+fi
 
 echo "[web-e2e] Running browser E2E"
-BASE_URL="$BASE_URL" \
-TARGET_MAP="$TARGET_MAP" \
-COM_TARGET_GAME="$COM_TARGET_GAME" \
-E2E_TIMEOUT_MS="$E2E_TIMEOUT_MS" \
-BROWSER_EXECUTABLE="$SYSTEM_BROWSER" \
-node "$E2E_DIR/run-web-e2e.mjs"
+if [[ -n "$SYSTEM_BROWSER" ]]; then
+    BASE_URL="$BASE_URL" \
+    TARGET_MAP="$TARGET_MAP" \
+    COM_TARGET_GAME="$COM_TARGET_GAME" \
+    E2E_TIMEOUT_MS="$E2E_TIMEOUT_MS" \
+    BROWSER_EXECUTABLE="$SYSTEM_BROWSER" \
+    node "$E2E_DIR/run-web-e2e.mjs"
+else
+    run_in_docker_playwright
+fi
 
 echo "[web-e2e] PASS"

@@ -142,6 +142,20 @@ if [[ -d "$HOME/.local/share/openmohaa/main" ]]; then
     fi
 fi
 
+HAS_SH_ASSETS=false
+if [[ -d "$HOME/.local/share/openmohaa/mainta" ]]; then
+    if ls "$HOME/.local/share/openmohaa/mainta/"*.pk3 >/dev/null 2>&1; then
+        HAS_SH_ASSETS=true
+    fi
+fi
+
+HAS_BT_ASSETS=false
+if [[ -d "$HOME/.local/share/openmohaa/maintt" ]]; then
+    if ls "$HOME/.local/share/openmohaa/maintt/"*.pk3 >/dev/null 2>&1; then
+        HAS_BT_ASSETS=true
+    fi
+fi
+
 HAS_DOCKER=false
 if command -v docker &>/dev/null; then
     HAS_DOCKER=true
@@ -153,7 +167,9 @@ if command -v node &>/dev/null && command -v npm &>/dev/null; then
 fi
 
 echo "Display:  $(if $HAS_DISPLAY; then echo "yes"; else echo "no (viewmodel/resolution tests will be skipped)"; fi)"
-echo "Assets:   $(if $HAS_GAME_ASSETS; then echo "yes"; else echo "no (viewmodel/resolution tests will be skipped)"; fi)"
+echo "Assets:   $(if $HAS_GAME_ASSETS; then echo "yes (MOHAA)"; else echo "no (MOHAA assets missing)"; fi)"
+echo "SH assets:$(if $HAS_SH_ASSETS; then echo " yes (Spearhead mainta/)"; else echo " no (Spearhead E2E will be skipped)"; fi)"
+echo "BT assets:$(if $HAS_BT_ASSETS; then echo " yes (Breakthrough maintt/)"; else echo " no (Breakthrough E2E will be skipped)"; fi)"
 echo "Docker:   $(if $HAS_DOCKER; then echo "yes"; else echo "no (web preflight will be skipped)"; fi)"
 echo "Node:     $(if $HAS_NODE; then echo "yes"; else echo "no (web browser E2E will be skipped)"; fi)"
 echo ""
@@ -241,6 +257,32 @@ elif [[ "$HAS_GAME_ASSETS" = false ]]; then
     skip_test "Web browser E2E" "No game assets"
 else
     run_test "Web browser E2E" \
+        "$SCRIPT_DIR/test-web-e2e.sh"
+fi
+
+# Test 4a: Web browser E2E — Spearhead
+if [[ "$HAS_DOCKER" = false ]]; then
+    skip_test "Web E2E — Spearhead" "Docker not available"
+elif [[ "$HAS_NODE" = false ]]; then
+    skip_test "Web E2E — Spearhead" "Node/npm not available"
+elif [[ "$HAS_SH_ASSETS" = false ]]; then
+    skip_test "Web E2E — Spearhead" "No Spearhead assets (mainta/)"
+else
+    run_test "Web E2E — Spearhead" \
+        env COM_TARGET_GAME=1 TARGET_MAP=DM/MP_Bahnhof_DM \
+        "$SCRIPT_DIR/test-web-e2e.sh"
+fi
+
+# Test 4b: Web browser E2E — Breakthrough
+if [[ "$HAS_DOCKER" = false ]]; then
+    skip_test "Web E2E — Breakthrough" "Docker not available"
+elif [[ "$HAS_NODE" = false ]]; then
+    skip_test "Web E2E — Breakthrough" "Node/npm not available"
+elif [[ "$HAS_BT_ASSETS" = false ]]; then
+    skip_test "Web E2E — Breakthrough" "No Breakthrough assets (maintt/)"
+else
+    run_test "Web E2E — Breakthrough" \
+        env COM_TARGET_GAME=2 TARGET_MAP=DM/mp_bahnhof_dm \
         "$SCRIPT_DIR/test-web-e2e.sh"
 fi
 
