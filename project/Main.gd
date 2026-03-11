@@ -23,7 +23,7 @@ func _ready():
 	print("Main: 'MoHAARunner' found in ClassDB.")
 	runner = ClassDB.instantiate("MoHAARunner")
 
-	# Parse command-line args (after --):
+	# Parse command-line args:
 	#   --dedicated      Launch as dedicated server
 	#   --client         Force client mode
 	#   --map=<name>     Startup map override
@@ -32,7 +32,12 @@ func _ready():
 	#   --dev / --nodev  Toggle developer mode
 	#   +connect <ip>    Connect to a server (forwarded to engine)
 	#   +<cmd> [args]    Any Quake-style +command forwarded to the engine
-	var user_args = OS.get_cmdline_user_args()
+	# Both forms work (with or without -- separator):
+	#   ./openmohaa.x86_64 +set com_target_game 1
+	#   ./openmohaa.x86_64 -- +set com_target_game 1
+	# We use get_cmdline_args() which includes all args; the parsing loop
+	# only matches known patterns so unknown Godot flags are safely skipped.
+	var user_args = OS.get_cmdline_args()
 	var dev_mode = true
 	var extra_engine_cmds = "" # raw +command args forwarded to engine
 	var i = 0
@@ -112,11 +117,6 @@ func _ready():
 		if OS.has_feature("web"):
 			# Web: emscripten VFS root = game data dir; GameSpy off
 			startup_args += " +set fs_basepath . +set fs_homedatapath . +set fs_homepath . +set r_fullscreen 0 +set ui_gamespy 0 +set sv_gamespy 0"
-			# JavaScriptBridge may be unavailable in threaded web exports, so URL
-			# query parsing can fail. Fall back to a known map to avoid being stuck
-			# in menu state with no world loaded.
-			if exec_cfg == "" and launch_map == "" and not launch_dedicated:
-				launch_map = "dm/mohdm1"
 
 		# Startup command: exec config takes priority over direct map load.
 		# In debug client runs, prefer devmap so cheat-gated cvars remain writable.

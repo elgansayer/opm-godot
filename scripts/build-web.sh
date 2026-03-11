@@ -1133,6 +1133,13 @@ if [[ -n "$CGAME_ARTIFACT" ]]; then
     mkdir -p "$EXPORT_DIR/main"
     cp -f "$CGAME_ARTIFACT" "$EXPORT_DIR/main/cgame.so"
     echo "Deployed: $(basename "$CGAME_ARTIFACT") -> $EXPORT_DIR/main/cgame.so"
+    # Also deploy to expansion game dirs so SH/BT can find cgame.so.
+    # The binary is identical for all three games.
+    for _expdir in mainta maintt; do
+        mkdir -p "$EXPORT_DIR/$_expdir"
+        cp -f "$CGAME_ARTIFACT" "$EXPORT_DIR/$_expdir/cgame.so"
+        echo "Deployed: $(basename "$CGAME_ARTIFACT") -> $EXPORT_DIR/$_expdir/cgame.so"
+    done
     # Sanity check: WASM files start with \0asm magic; warn if the file is
     # still an ELF (native) binary which Emscripten dlopen cannot load.
     if file "$EXPORT_DIR/main/cgame.so" 2>/dev/null | grep -q "ELF"; then
