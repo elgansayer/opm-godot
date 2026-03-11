@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ASSET_PATH="${ASSET_PATH:-$HOME/.local/share/openmohaa}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8086}"
+WEB_VARIANT="${WEB_VARIANT:-release}"
 
 require_cmd() {
     local cmd="$1"
@@ -54,7 +55,7 @@ done
 
 echo "[web-test] Building and starting web stack"
 cd "$REPO_ROOT"
-./scripts/build-web.sh --serve-only --asset-path "$ASSET_PATH" >/tmp/opm-web-serve.log 2>&1 || {
+./scripts/build-web.sh --serve-only --asset-path "$ASSET_PATH" --"$WEB_VARIANT" >/tmp/opm-web-serve.log 2>&1 || {
     cat /tmp/opm-web-serve.log >&2
     exit 1
 }

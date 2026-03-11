@@ -568,6 +568,13 @@ elif "openmohaa-pk3-preload" in src or "openmohaa-vfs-preload" in src:
         print("Patched mohaa.js async preRun VFS preload (replaced old preloader)")
     else:
         print("WARNING: Found preloader dep ID but could not locate preloader block boundary")
+elif "var ENVIRONMENT_IS_WEB=" in src:
+    # Godot 4.6+ layout: moduleRtn is inside a separate IIFE, no longer adjacent
+    # to var Module=moduleArg. Inject VFS preload + stdout wrapper before
+    # var ENVIRONMENT_IS_WEB= (Module is already defined at this point).
+    _payload = preload_new.split("var moduleRtn;var Module=moduleArg;", 1)[-1]
+    src = src.replace("var ENVIRONMENT_IS_WEB=", _payload, 1)
+    print("Patched mohaa.js async preRun VFS preload (fresh, Godot 4.6+ layout)")
 else:
     print("WARNING: Could not find Module preRun injection marker in mohaa.js; preload patch skipped")
 
@@ -1047,7 +1054,9 @@ ws_bridge_js = r"""
 # Inject the bridge early in the JS file. The exact position doesn't matter
 # since we use globalThis (always available), not Module.
 marker = "var ENVIRONMENT_IS_WEB="
-if marker in src:
+if "OpenMoHAA WebSocket Relay Bridge" in src:
+    print("WebSocket relay bridge already injected (idempotent)")
+elif marker in src:
     src = src.replace(marker, ws_bridge_js + marker, 1)
     print("Patched mohaa.js with WebSocket relay bridge functions (globalThis)")
 else:

@@ -24,13 +24,16 @@ const browser = await chromium.launch({
 const context = await browser.newContext();
 const page = await context.newPage();
 
-// Benign patterns: browser resource 404s, Cache API blips, service worker noise
+// Benign patterns: browser resource 404s, Cache API blips, service worker noise,
+// Emscripten pthreads main-thread blocking warning, Godot audio autoplay rejections
 const BENIGN_CONSOLE = [
   /Failed to load resource:.*404/i,
   /Failed to load resource:.*403/i,
   /Failed to execute 'put' on 'Cache'/i,
   /Service[- ]?[Ww]orker/i,
   /favicon/i,
+  /Blocking on the main thread is very dangerous/i,
+  /^Uncaught \(in promise\)\s*$/i,
 ];
 const isBenign = (text) => BENIGN_CONSOLE.some((re) => re.test(text));
 
