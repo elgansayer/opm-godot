@@ -42,6 +42,7 @@ function usage() {
     echo "  package     Create distributable archive from current outputs"
     echo "  sign-android  Run Android signing wrapper"
     echo "  sign-ios      Run iOS signing wrapper"
+    echo "  matrix      Run full CMake build/export matrix validation"
     echo "  all         Build linux/windows/macos engine targets"
     echo ""
     echo "Deploy/Test Targets:"
@@ -162,6 +163,9 @@ case "$TARGET" in
         ;;
     sign-ios)
         run_cmake_target "ios-$VARIANT" "opm-sign-ios" "${cmake_overrides[@]}"
+        ;;
+    matrix)
+        exec "$(dirname "$0")/scripts/test-build-matrix.sh" "${PASSTHROUGH_ARGS[@]}"
         ;;
     all)
         full_clean

@@ -61,6 +61,18 @@ esac
 
 HOST_UNAME="$(uname -s)"
 EXTRA_SCONS_ARGS=("$@")
+BUILD_TARGET="template_debug"
+
+# Allow callers (CMake/build.sh) to override target=template_release cleanly.
+FILTERED_SCONS_ARGS=()
+for arg in "${EXTRA_SCONS_ARGS[@]}"; do
+    if [[ "$arg" == target=* ]]; then
+        BUILD_TARGET="${arg#target=}"
+        continue
+    fi
+    FILTERED_SCONS_ARGS+=("$arg")
+done
+EXTRA_SCONS_ARGS=("${FILTERED_SCONS_ARGS[@]}")
 if [[ "$PLAT" == "macos" ]] && [[ "$HOST_UNAME" != "Darwin" ]]; then
     # godot-cpp/tools/macos.py only enables non-Darwin macOS builds via OSXCROSS_ROOT.
     if [[ -z "${OSXCROSS_ROOT:-}" ]]; then
@@ -132,7 +144,7 @@ if [[ ! -f "$PARSER_DIR/yyParser.hpp" ]]; then
     flex -Cem --nounistd -o "$PARSER_DIR/yyLexer.cpp" --header-file="$PARSER_DIR/yyLexer.h" code/parser/lex_source.txt
 fi
 
-scons platform="$PLAT" target=template_debug -j"$JOBS" "${EXTRA_SCONS_ARGS[@]}"
+scons platform="$PLAT" target="$BUILD_TARGET" -j"$JOBS" "${EXTRA_SCONS_ARGS[@]}"
 
 # Determine artifact extensions based on platform
 EXT=".so"

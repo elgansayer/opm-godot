@@ -59,7 +59,7 @@ case "$PLATFORM" in
         output="$WEB_OUTPUT_DEFAULT"
         ;;
     linux)
-        preset="Linux/X11"
+        preset="Linux"
         output="$PROJECT_DIR/bin/openmohaa.x86_64"
         ;;
     windows)
@@ -92,6 +92,45 @@ if [[ -n "$OUTPUT_OVERRIDE" ]]; then
 fi
 
 mkdir -p "$(dirname -- "$output")"
+
+PRESETS_FILE="$PROJECT_DIR/export_presets.cfg"
+if [[ -f "$PRESETS_FILE" ]]; then
+    if ! grep -q "^name=\"$preset\"" "$PRESETS_FILE"; then
+        echo "ERROR: Godot export preset '$preset' is not defined in $PRESETS_FILE" >&2
+        exit 1
+    fi
+fi
+
+case "$PLATFORM" in
+    web)
+        [[ -f "$PROJECT_DIR/bin/libopenmohaa.wasm" ]] || {
+            echo "ERROR: Missing web extension artefact: $PROJECT_DIR/bin/libopenmohaa.wasm" >&2
+            echo "Run './build.sh web' (or web cmake opm-engine) before export." >&2
+            exit 1
+        }
+        ;;
+    linux)
+        [[ -f "$PROJECT_DIR/bin/libopenmohaa.so" || -f "$PROJECT_DIR/bin/openmohaa.so" ]] || {
+            echo "ERROR: Missing Linux extension artefact in $PROJECT_DIR/bin" >&2
+            echo "Run './build.sh linux' before export." >&2
+            exit 1
+        }
+        ;;
+    windows)
+        [[ -f "$PROJECT_DIR/bin/libopenmohaa.dll" || -f "$PROJECT_DIR/bin/openmohaa.dll" ]] || {
+            echo "ERROR: Missing Windows extension artefact in $PROJECT_DIR/bin" >&2
+            echo "Run './build.sh windows' before export." >&2
+            exit 1
+        }
+        ;;
+    macos)
+        [[ -f "$PROJECT_DIR/bin/libopenmohaa.dylib" || -f "$PROJECT_DIR/bin/openmohaa.dylib" ]] || {
+            echo "ERROR: Missing macOS extension artefact in $PROJECT_DIR/bin" >&2
+            echo "Run './build.sh macos' before export." >&2
+            exit 1
+        }
+        ;;
+esac
 
 echo "Godot export"
 echo "  platform: $PLATFORM"

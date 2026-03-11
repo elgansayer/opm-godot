@@ -671,6 +671,7 @@ All engine settings follow the original MOHAA CVar system. Commonly used CVars:
 | `scripts/sign-android.sh` | Thin Android signing wrapper using `apksigner` if configured |
 | `scripts/sign-ios.sh` | Thin iOS signing/provisioning wrapper using `xcodebuild` if configured |
 | `scripts/package-build.sh` | Thin packaging wrapper for current build outputs |
+| `scripts/test-build-matrix.sh` | Cross-platform configure/build/export matrix validator |
 | `scripts/setup-macos-build.sh` | macOS/native or Linux/osxcross preflight checks |
 | `scripts/configure-macos-cross-env.sh` | Generates `scripts/env.macos-cross.sh` for repeatable cross-builds |
 | `scripts/deploy.sh` | Deploys web build + pushes image to GHCR / Portainer |
@@ -701,6 +702,41 @@ cmake --build build-cmake/web-release --target opm-export
 Preset families are provided for `linux`, `windows`, `macos`, `web`, `android`, and `ios`.
 
 `build.sh` is a thin frontend that dispatches to these presets/targets.
+
+### Platform Build Commands
+
+```bash
+# Linux engine build
+./build.sh linux --debug
+
+# Windows engine build (requires appropriate cross/native toolchain)
+./build.sh windows --debug
+
+# macOS engine build (native macOS host or osxcross with OSXCROSS_ROOT)
+./build.sh macos --debug
+
+# Web engine only
+./build.sh web --debug
+
+# Web full export pipeline
+./build.sh web-export --debug
+
+# Export only (after engine artefacts are present)
+./build.sh export --platform linux --debug
+./build.sh export --platform windows --debug
+./build.sh export --platform macos --debug
+./build.sh export --platform web --debug
+```
+
+### Matrix Validation
+
+```bash
+# Full matrix (debug + release) across configured platforms
+./build.sh matrix
+
+# Faster pass for current changes
+./build.sh matrix --debug-only
+```
 
 ### Typical Edit–Build–Test Cycle
 

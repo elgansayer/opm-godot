@@ -50,6 +50,33 @@ run_step() {
     fi
 }
 
+run_skip() {
+    local label="$1"
+    local reason="$2"
+    echo ""
+    echo "==> $label"
+    echo "SKIP: $label ($reason)"
+    RESULTS+=("SKIP | $label | $reason")
+}
+
+has_export_preset() {
+    local preset_name="$1"
+    local presets_file="$REPO_ROOT/project/export_presets.cfg"
+    [[ -f "$presets_file" ]] && grep -q "^name=\"${preset_name}\"" "$presets_file"
+}
+
+export_preset_for_platform() {
+    case "$1" in
+        web) echo "Web" ;;
+        linux) echo "Linux" ;;
+        windows) echo "Windows Desktop" ;;
+        macos) echo "macOS" ;;
+        android) echo "Android" ;;
+        ios) echo "iOS" ;;
+        *) echo "" ;;
+    esac
+}
+
 RESULTS=()
 FAIL_COUNT=0
 
@@ -59,10 +86,19 @@ for variant in "${VARIANTS[@]}"; do
         run_step "configure ${preset}" "cmake --preset ${preset} -DOPM_BUILD_VARIANT=${variant}"
 
         # Engine target is wired for linux/windows/macos/web; android/ios are placeholder no-ops for now.
-        run_step "engine ${preset}" "cmake --build build-cmake/${preset} --target opm-engine"
+        if [[ "$platform" == "macos" && "$(uname -s)" != "Darwin" && -z "${OSXCROSS_ROOT:-}" ]]; then
+            run_skip "engine ${preset}" "OSXCROSS_ROOT not set on non-macOS host"
+        else
+            run_step "engine ${preset}" "cmake --build build-cmake/${preset} --target opm-engine"
+        fi
 
         # Export target is always wired.
-        run_step "export ${preset}" "cmake --build build-cmake/${preset} --target opm-export"
+        export_preset_name="$(export_preset_for_platform "$platform")"
+        if [[ -z "$export_preset_name" ]] || ! has_export_preset "$export_preset_name"; then
+            run_skip "export ${preset}" "no '$export_preset_name' preset in project/export_presets.cfg"
+        else
+            run_step "export ${preset}" "cmake --build build-cmake/${preset} --target opm-export"
+        fi
 
         if [[ "$platform" == "web" && "$RUN_WEB_FULL" -eq 1 ]]; then
             run_step "web full export ${preset}" "cmake --build build-cmake/${preset} --target opm-web-export"
