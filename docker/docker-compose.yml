@@ -4,10 +4,10 @@
 # Two profiles:
 #
 #   DEV (default) — mounts local dist/web/<variant>/ build output:
-#     WEB_DIST=./dist/web/debug ASSET_PATH=/path/to/mohaa-assets docker compose up
+#     WEB_DIST=./dist/web/debug ASSET_PATH=/path/to/mohaa-assets docker compose -f docker/docker-compose.yml up
 #
 #   PROD — pulls pre-built GHCR image (same as Portainer):
-#     ASSET_PATH=/path/to/mohaa-assets docker compose --profile prod up
+#     ASSET_PATH=/path/to/mohaa-assets docker compose -f docker/docker-compose.yml --profile prod up
 #
 # Required env vars:
 #   ASSET_PATH — host directory containing main/, mainta/, maintt/ with pk3s
@@ -24,8 +24,8 @@ services:
     environment:
       - CDN_URL=${CDN_URL:-/assets}
     volumes:
-      - ${WEB_DIST:-./dist/web/debug}:/srv/web:ro
-      - ./docker/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${WEB_DIST:-../dist/web/debug}:/srv/web:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
     restart: unless-stopped
 
@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   relay:
-    build: ./relay
+    build: ../relay
     container_name: opm-godot-relay
     network_mode: host
     restart: unless-stopped

@@ -19,12 +19,12 @@ Build the web export and launch it in Docker with the correct asset path, all in
 
 3. Start the Docker stack with the asset path:
    ```bash
-   ASSET_PATH=/home/elgan/mohaa-web-base docker compose up -d
+   ASSET_PATH=/home/elgan/mohaa-web-base docker compose -f docker/docker-compose.yml up -d
    ```
 
 4. Verify containers are running:
    ```bash
-   docker compose ps
+   docker compose -f docker/docker-compose.yml ps
    ```
 
 5. Ask if any engine args are needed:
@@ -41,12 +41,12 @@ Build the web export and launch it in Docker with the correct asset path, all in
 7. Report:
    - URL opened (http://localhost:8086/mohaa.html with any query params)
    - Container status
-   - How to stop: `docker compose down`
-   - How to view logs: `docker compose logs -f`
+   - How to stop: `docker compose -f docker/docker-compose.yml down`
+   - How to view logs: `docker compose -f docker/docker-compose.yml logs -f`
 
 ## Troubleshooting
 
 - If nginx fails to start, verify `/home/elgan/mohaa-web-base/main/` contains pk3 files
 - If relay fails, check if port 12300 is already in use: `ss -tlnp | grep 12300`
 - If the page loads but game doesn't start, run `/patch-status` to check web patches
-- To force-rebuild containers: `ASSET_PATH=/home/elgan/mohaa-web-base docker compose up -d --force-recreate`
+- To force-rebuild containers: `ASSET_PATH=/home/elgan/mohaa-web-base docker compose -f docker/docker-compose.yml up -d --force-recreate`

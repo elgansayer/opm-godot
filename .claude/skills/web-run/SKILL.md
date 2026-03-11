@@ -11,11 +11,11 @@ Build the web export and launch it locally in Docker with correct asset paths.
    - Verify `web/mohaa.html` exists after build
 4. Start the Docker stack:
    ```bash
-   ASSET_PATH=<path> docker compose up -d
+   ASSET_PATH=<path> docker compose -f docker/docker-compose.yml up -d
    ```
 5. Verify containers are running:
    ```bash
-   docker compose ps
+   docker compose -f docker/docker-compose.yml ps
    ```
 6. Ask if any engine args should be passed (e.g., `+set com_target_game 2`, `+map dm/mohdm1`)
 7. Open the browser:
@@ -25,7 +25,7 @@ Build the web export and launch it locally in Docker with correct asset paths.
 8. Report:
    - URL: http://localhost:8086/mohaa.html (with any query params)
    - Container status
-   - How to stop: `docker compose down`
+   - How to stop: `docker compose -f docker/docker-compose.yml down`
 
 ## Troubleshooting
 

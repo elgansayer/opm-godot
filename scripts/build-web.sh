@@ -14,7 +14,6 @@ EXPORT_JS=""   # computed after arg parsing
 WEB_TEMPLATE_DIR="$REPO_ROOT/scripts/web_assets/templates"
 WEB_HTML_RENDERER="$REPO_ROOT/scripts/web_assets/render_html_template.py"
 PROJECT_GDEXT="$PROJECT_DIR/openmohaa.gdextension"
-GAME_FILES_DIR="${GAME_FILES_DIR:-$HOME/.local/share/openmohaa}"
 
 if [[ -f "$REPO_ROOT/openmohaa/SConstruct" ]]; then
     OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
@@ -29,12 +28,10 @@ EMSDK_DIR="${EMSDK_DIR:-$HOME/emsdk}"
 BUILD_TARGET="template_debug"
 CHECK_ONLY=0
 EXPORT_AFTER_BUILD=1
-COPY_GAME_FILES=1
 PATCH_ONLY=0
 SERVE_ONLY=0
 ASSET_PATH="${ASSET_PATH:-}"
 BUILD_ONLY=0
-MINIMAL_MODE=0
 EXTRA_SCONS_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -60,7 +57,6 @@ while [[ $# -gt 0 ]]; do
         --patch-only)
             PATCH_ONLY=1
             EXPORT_AFTER_BUILD=0
-            COPY_GAME_FILES=0
             shift
             ;;
         --serve)
@@ -77,12 +73,6 @@ while [[ $# -gt 0 ]]; do
             # Compile only: no export, no runtime patching, no asset staging.
             BUILD_ONLY=1
             EXPORT_AFTER_BUILD=0
-            COPY_GAME_FILES=0
-            shift
-            ;;
-        --minimal)
-            # Minimal/proper export: keep build + Godot export only, skip custom JS/HTML patching.
-            MINIMAL_MODE=1
             shift
             ;;
         --asset-path)
@@ -93,25 +83,12 @@ while [[ $# -gt 0 ]]; do
             ASSET_PATH="$2"
             shift 2
             ;;
-        --no-game-files)
-            COPY_GAME_FILES=0
-            shift
-            ;;
         --emsdk)
             if [[ $# -lt 2 ]]; then
                 echo "ERROR: --emsdk requires a path" >&2
                 exit 1
             fi
             EMSDK_DIR="$2"
-            shift 2
-            ;;
-        --game-files)
-            if [[ $# -lt 2 ]]; then
-                echo "ERROR: --game-files requires a path" >&2
-                exit 1
-            fi
-            GAME_FILES_DIR="$2"
-            COPY_GAME_FILES=1
             shift 2
             ;;
         *)
@@ -155,7 +132,7 @@ serve_docker() {
     echo "Deploying docker compose stack (asset path: $asset_path)..."
     cd "$REPO_ROOT"
     docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
-    WEB_DIST="$EXPORT_DIR" ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose up -d --build --force-recreate
+    WEB_DIST="$EXPORT_DIR" ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose -f docker/docker-compose.yml up -d --build --force-recreate
     echo "Stack is up. Web: http://localhost:8086"
 }
 
@@ -645,36 +622,9 @@ stub_new = (
     "var ptr=(typeof _cxaLast!=='undefined'?_cxaLast:0)||stubs.__cxaLast||0;"
     "if(typeof setTempRet0!=='undefined'){setTempRet0(0)}else if(typeof _setTempRet0!=='undefined'){_setTempRet0(0)}"
     "return ptr};}"
-    "resolved||=resolveSymbol(prop);"
-    "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
-    "if(!resolved){"
-    "var __baseProp=String(prop||'');"
-    "var __trimmed=__baseProp.replace(/^_+/, '');"
-    "var __candidates=[__baseProp,'_'+__baseProp,__trimmed,'_'+__trimmed];"
-    "for(var __i=0;__i<__candidates.length&&!resolved;__i++){"
-    "var __name=__candidates[__i];"
-    "if(!__name){continue}"
-    "if(typeof __name==='string'&&typeof resolveSymbol==='function'){resolved=resolveSymbol(__name)||resolved}"
-    "if(!resolved&&typeof Module!=='undefined'&&Module){resolved=Module[__name]||resolved}"
-    "if(!resolved&&typeof globalThis!=='undefined'&&globalThis){resolved=globalThis[__name]||resolved}"
-    "}"
-    "}"
-    "if(!resolved&&prop==='emscripten_longjmp'){"
-    "var __throwLongjmp=resolveSymbol('emscripten_throw_longjmp');"
-    "var __cLongjmp=(typeof ___c_longjmp!=='undefined'&&___c_longjmp)||(typeof __c_longjmp!=='undefined'&&__c_longjmp)||resolveSymbol('__c_longjmp')||resolveSymbol('___c_longjmp')||(typeof globalThis!=='undefined'&&(globalThis.___c_longjmp||globalThis.__c_longjmp));"
-    "var __wasmLongjmp=(typeof ___wasm_longjmp!=='undefined'&&___wasm_longjmp)||(typeof __wasm_longjmp!=='undefined'&&__wasm_longjmp)||resolveSymbol('__wasm_longjmp')||resolveSymbol('___wasm_longjmp');"
-    "if(typeof __cLongjmp==='number'&&typeof wasmTable!=='undefined'){var __cLongjmpFn=wasmTable.get(__cLongjmp|0);if(__cLongjmpFn){__cLongjmp=__cLongjmpFn}}"
-    "if(typeof __wasmLongjmp==='number'&&typeof wasmTable!=='undefined'){var __wasmLongjmpFn=wasmTable.get(__wasmLongjmp|0);if(__wasmLongjmpFn){__wasmLongjmp=__wasmLongjmpFn}}"
-    "if(typeof __throwLongjmp==='function'){"
-    "resolved=(env,val)=>__throwLongjmp(env|0,val|0)"
-    "}else if(typeof __cLongjmp==='function'){"
-    "resolved=(env,val)=>__cLongjmp(env|0,val|0)"
-    "}else if(typeof __wasmLongjmp==='function'){"
-    "resolved=(env,val)=>__wasmLongjmp(env|0,val|0)"
-    "}else{"
-    "resolved=(env,val)=>{throw new Error('OpenMoHAA missing usable emscripten longjmp helper')}"
-    "}"
-    "}"
+    # invoke_* must be resolved BEFORE resolveSymbol — resolveSymbol asserts
+    # (aborts) on missing symbols without {optional:true}, but Godot's main
+    # module never exports invoke_* since it doesn't use -fexceptions.
     "if(!resolved&&prop.startsWith('invoke_')){"
     "resolved=(...invokeArgs)=>{"
     "var fnIndex=invokeArgs[0]|0;"
@@ -687,6 +637,63 @@ stub_new = (
     "if(typeof _setThrew==='function'){_setThrew(1,0)}else if(typeof setThrew==='function'){setThrew(1,0)}"
     "return 0"
     "}"
+    "}"
+    "}"
+    # emscripten_throw_longjmp — side module may import this directly (not
+    # only via the emscripten_longjmp handler). In JS exception mode it
+    # throws Infinity, which invoke_* catches and calls _setThrew(1,0).
+    "if(!resolved&&(prop==='emscripten_throw_longjmp'||prop==='_emscripten_throw_longjmp')){"
+    "resolved=()=>{throw Infinity}"
+    "}"
+    # emscripten_longjmp must also be resolved before resolveSymbol for the
+    # same reason — it may not exist in the main module's symbol table.
+    "if(!resolved&&prop==='emscripten_longjmp'){"
+    "var __throwLongjmp=()=>{throw Infinity};"
+    "var __cLongjmp=(typeof ___c_longjmp!=='undefined'&&___c_longjmp)||(typeof __c_longjmp!=='undefined'&&__c_longjmp);"
+    "try{__cLongjmp=__cLongjmp||resolveSymbol('__c_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
+    "try{__cLongjmp=__cLongjmp||resolveSymbol('___c_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
+    "__cLongjmp=__cLongjmp||(typeof globalThis!=='undefined'&&(globalThis.___c_longjmp||globalThis.__c_longjmp));"
+    "var __wasmLongjmp=(typeof ___wasm_longjmp!=='undefined'&&___wasm_longjmp)||(typeof __wasm_longjmp!=='undefined'&&__wasm_longjmp);"
+    "try{__wasmLongjmp=__wasmLongjmp||resolveSymbol('__wasm_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
+    "try{__wasmLongjmp=__wasmLongjmp||resolveSymbol('___wasm_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
+    "if(typeof __cLongjmp==='number'&&typeof wasmTable!=='undefined'){var __cLongjmpFn=wasmTable.get(__cLongjmp|0);if(__cLongjmpFn){__cLongjmp=__cLongjmpFn}}"
+    "if(typeof __wasmLongjmp==='number'&&typeof wasmTable!=='undefined'){var __wasmLongjmpFn=wasmTable.get(__wasmLongjmp|0);if(__wasmLongjmpFn){__wasmLongjmp=__wasmLongjmpFn}}"
+    "if(typeof __cLongjmp==='function'){"
+    "resolved=(env,val)=>__cLongjmp(env|0,val|0)"
+    "}else if(typeof __wasmLongjmp==='function'){"
+    "resolved=(env,val)=>__wasmLongjmp(env|0,val|0)"
+    "}else{"
+    "resolved=(env,val)=>__throwLongjmp()"
+    "}"
+    "}"
+    # Before calling resolveSymbol (which asserts/aborts on missing symbols),
+    # try globalThis and Module lookups first. This finds opm_ws_* bridge
+    # functions and any other JS-injected symbols without triggering abort().
+    "if(!resolved){"
+    "var __baseProp=String(prop||'');"
+    "var __trimmed=__baseProp.replace(/^_+/, '');"
+    "var __candidates=[__baseProp,'_'+__baseProp,__trimmed,'_'+__trimmed];"
+    "for(var __i=0;__i<__candidates.length&&!resolved;__i++){"
+    "var __name=__candidates[__i];"
+    "if(!__name){continue}"
+    "if(!resolved&&typeof Module!=='undefined'&&Module){resolved=Module[__name]||resolved}"
+    "if(!resolved&&typeof globalThis!=='undefined'&&globalThis){resolved=globalThis[__name]||resolved}"
+    "}"
+    "}"
+    # Wrap resolveSymbol in try-catch — newer Emscripten asserts (aborts) on
+    # missing symbols when called without {optional:true}. Reset ABORT flag
+    # since abort() sets it before throwing.
+    "if(!resolved){try{resolved=resolveSymbol(prop)}catch(e){if(typeof ABORT!=='undefined')ABORT=false}}"
+    "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
+    # If resolveSymbol failed, try resolveSymbol with name variants as last resort.
+    "if(!resolved){"
+    "var __baseProp2=String(prop||'');"
+    "var __trimmed2=__baseProp2.replace(/^_+/, '');"
+    "var __candidates2=[__baseProp2,'_'+__baseProp2,__trimmed2,'_'+__trimmed2];"
+    "for(var __i2=0;__i2<__candidates2.length&&!resolved;__i2++){"
+    "var __name2=__candidates2[__i2];"
+    "if(!__name2||__name2===prop){continue}"
+    "if(typeof __name2==='string'&&typeof resolveSymbol==='function'){try{resolved=resolveSymbol(__name2)||resolved}catch(e){if(typeof ABORT!=='undefined')ABORT=false}}"
     "}"
     "}"
     "if(typeof resolved==='number'){"
@@ -702,7 +709,7 @@ stub_new = (
     "if(typeof resolved!=='function'){console.error('OpenMoHAA non-callable runtime import',prop,typeof resolved,resolved,args);"
     "throw new Error('OpenMoHAA non-callable runtime import: '+prop)}"
     "try{return resolved(...args)}catch(e){"
-    "if(prop==='emscripten_longjmp'){throw e}"
+    "if(prop==='emscripten_longjmp'||prop==='emscripten_throw_longjmp'||prop==='_emscripten_throw_longjmp'||e===Infinity){throw e}"
     "console.error('OpenMoHAA runtime import threw',prop,e,e&&e.message,e&&e.stack,args);"
     "throw e}}"
 )
@@ -1053,10 +1060,6 @@ PYWS
 cd "$OPENMOHAA_DIR"
 
 if [[ "$PATCH_ONLY" -eq 1 ]]; then
-    if [[ "$MINIMAL_MODE" -eq 1 ]]; then
-        echo "Patch-only + minimal mode requested: nothing to patch."
-        exit 0
-    fi
     echo "Patch-only mode: re-applying JS/HTML patches to existing export..."
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
@@ -1107,28 +1110,8 @@ if [[ "$BUILD_ONLY" -eq 1 ]]; then
     exit 0
 fi
 
-if [[ "$COPY_GAME_FILES" -eq 1 ]]; then
-    # GAME_FILES_DIR should point to the MOHAA install root (parent of main/, mainta/, maintt/).
-    # If it points directly to main/, use its parent instead.
-    GAME_BASE_DIR="$GAME_FILES_DIR"
-    if [[ "$(basename "$GAME_BASE_DIR")" == "main" ]]; then
-        GAME_BASE_DIR="$(dirname "$GAME_BASE_DIR")"
-    fi
-    # Copy each game directory that exists
-    for gdir in main mainta maintt; do
-        if [[ -d "$GAME_BASE_DIR/$gdir" ]]; then
-            mkdir -p "$EXPORT_DIR/$gdir"
-            rsync -a --delete --exclude='.*' "$GAME_BASE_DIR/$gdir/" "$EXPORT_DIR/$gdir/"
-            echo "Copied game files: $GAME_BASE_DIR/$gdir -> $EXPORT_DIR/$gdir"
-        fi
-    done
-    if [[ ! -d "$GAME_BASE_DIR/main" && ! -d "$GAME_FILES_DIR" ]]; then
-        echo "WARNING: Game files directory not found: $GAME_FILES_DIR"
-    fi
-fi
-
 # Ensure web export always uses the freshly built cgame module from this build,
-# not a potentially stale copy from GAME_FILES_DIR.
+# not a stale file in dist/web from previous runs.
 # For web builds SCons+emcc may produce libcgame.wasm (WASM SIDE_MODULE) or
 # libcgame.so (same WASM content with .so extension).  Check both.
 CGAME_ARTIFACT=""
@@ -1161,12 +1144,10 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
         godot --headless --path "$PROJECT_DIR" --export-debug Web "$EXPORT_HTML"
     fi
 
-    if [[ "$MINIMAL_MODE" -eq 0 ]]; then
-        MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
-        patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
-        render_web_html_from_templates
-        patch_web_ws_relay
-    fi
+    MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
+    patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
+    render_web_html_from_templates
+    patch_web_ws_relay
 fi
 
 echo "Web build complete (target=$BUILD_TARGET)."

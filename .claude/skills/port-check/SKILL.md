@@ -16,14 +16,14 @@ Verify that ports needed by the Docker stack are not already in use.
    ```
 3. Check if it's our own Docker containers:
    ```bash
-   docker compose ps
+   docker compose -f docker/docker-compose.yml ps
    ```
 4. Report:
    - Port 8086: free / in use by (process)
    - Port 12300: free / in use by (process)
 5. If ports are occupied by old containers, offer to restart:
    ```bash
-   docker compose down && docker compose up -d
+   docker compose -f docker/docker-compose.yml down && docker compose -f docker/docker-compose.yml up -d
    ```
 
 ## Notes

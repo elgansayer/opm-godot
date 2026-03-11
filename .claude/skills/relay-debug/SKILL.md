@@ -6,7 +6,7 @@ Start or troubleshoot the Node.js WebSocket relay that bridges web clients to ga
 
 1. Check if relay is already running:
    ```bash
-   docker compose ps relay 2>/dev/null
+   docker compose -f docker/docker-compose.yml ps relay 2>/dev/null
    # or check for standalone process
    pgrep -f mohaa_relay
    ```
@@ -20,11 +20,11 @@ Start or troubleshoot the Node.js WebSocket relay that bridges web clients to ga
    ss -tlnp | grep 12300
    ```
 4. Options:
-   - **Via Docker**: `docker compose up relay` (uses network_mode: host)
+   - **Via Docker**: `docker compose -f docker/docker-compose.yml up relay` (uses network_mode: host)
    - **Standalone**: `cd relay && node mohaa_relay.js`
 5. Show relay logs:
    ```bash
-   docker compose logs -f relay
+   docker compose -f docker/docker-compose.yml logs -f relay
    ```
 6. Troubleshoot common issues:
    - Port 12300 already in use → identify and kill conflicting process

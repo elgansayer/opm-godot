@@ -115,10 +115,10 @@ opm-godot/
 ├── web/                    # Production web export and landing page
 ├── relay/                  # WebSocket-to-UDP relay server (Node.js)
 ├── scripts/                # Build automation and deployment utilities
-├── docker/                 # Containerisation profiles for hosting
+├── docker/                 # Web containerisation (Docker Compose, nginx config)
+│   └── docker-compose.yml  # Dev + prod Docker Compose profiles
 ├── build.sh                # Top-level build & deploy script
-├── launch.sh               # Game launcher (Linux native or web Docker stack)
-└── docker-compose.yml      # Dev + prod Docker Compose profiles
+└── launch.sh               # Game launcher (Linux native or web Docker stack)
 ```
 
 ---
@@ -289,21 +289,27 @@ cd opm-godot
 > The `--recursive` flag initialises the `godot-cpp` submodule (branch 4.2).
 > The `openmohaa/` directory is regular tracked source, **not** a submodule.
 
-### 2. Install Build Tools (Ubuntu / Debian example)
+### 2. Install Build Tools (Linux example)
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev
+sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev ninja-build cmake
 pip install scons
 ```
 
-### 3. Build the GDExtension
+### 3. Build the GDExtension (no wrapper scripts)
 
 ```bash
-./build.sh linux
+cd openmohaa
+scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
+cd ..
+
+mkdir -p project/bin
+cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
+cp -f openmohaa/bin/libcgame.so project/bin/cgame.so
 ```
 
-This compiles `libopenmohaa.so` and `cgame.so` and copies them into `project/bin/`.
+This compiles `libopenmohaa.so` and `libcgame.so` and stages them in `project/bin/`.
 
 ### 4. Add Game Assets
 
@@ -315,10 +321,11 @@ cp /path/to/mohaa/main/*.pk3 ~/.local/share/openmohaa/main/
 ### 5. Launch
 
 ```bash
-./launch.sh linux
+cd project
+godot --editor
 ```
 
-Or open the `project/` folder directly in the Godot 4 editor.
+For Windows and macOS commands, see [Platform Build Guides](#-platform-build-guides).
 
 ---
 
@@ -328,11 +335,18 @@ Or open the `project/` folder directly in the Godot 4 editor.
 
 ```bash
 # Install dependencies (Ubuntu / Debian)
-sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev
+sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev ninja-build cmake
 pip install scons
 
 # Build
-./build.sh linux
+cd openmohaa
+scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
+cd ..
+
+# Stage for Godot project
+mkdir -p project/bin
+cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
+cp -f openmohaa/bin/libcgame.so project/bin/cgame.so
 
 # Output files
 #   openmohaa/bin/libopenmohaa.so   (~57 MB debug)
@@ -344,38 +358,88 @@ pip install scons
 To build a release (optimised, smaller) binary:
 
 ```bash
-cd openmohaa && scons platform=linux target=template_release -j$(nproc)
+cd openmohaa
+scons platform=linux target=template_release -j"$(nproc)"
+```
+
+Optional Godot export without helper scripts:
+
+```bash
+cd project
+godot --headless --export-debug "Linux" ../dist/linux/debug/openmohaa.x86_64
 ```
 
 ### Windows
 
-Cross-compilation from Linux using MinGW-w64:
+Native build (MSYS2 MINGW64 shell):
 
 ```bash
-sudo apt-get install -y mingw-w64
-./build.sh windows
+# Install MSYS2 packages once (inside MSYS2 MINGW64 shell):
+# pacman -S --needed mingw-w64-x86_64-toolchain mingw-w64-x86_64-python winflexbison
+
+# Then build from repo root in that shell:
+cd openmohaa
+scons platform=windows target=template_debug dev_build=yes -j8
+cd ..
+
+mkdir -p project/bin
+cp -f openmohaa/bin/openmohaa.dll project/bin/openmohaa.dll
+cp -f openmohaa/bin/cgame.dll project/bin/cgame.dll
 ```
 
-Or natively on Windows (requires MSVC 2022 or MinGW in PATH):
+Cross-build from Linux using MinGW-w64:
 
 ```bash
-# From a Developer Command Prompt or Git Bash
-./build.sh windows
+sudo apt-get install -y mingw-w64 bison flex
+pip install scons
+
+cd openmohaa
+scons platform=windows target=template_debug dev_build=yes -j"$(nproc)"
+cd ..
+
+mkdir -p project/bin
+cp -f openmohaa/bin/openmohaa.dll project/bin/openmohaa.dll
+cp -f openmohaa/bin/cgame.dll project/bin/cgame.dll
+
+# MinGW runtime DLLs may be required at runtime in project/bin
+for dll in libstdc++-6.dll libgcc_s_seh-1.dll; do
+  p="$(x86_64-w64-mingw32-g++ -print-file-name="$dll")"
+  [ -f "$p" ] && cp -f "$p" project/bin/
+done
 ```
 
-Output: `project/bin/openmohaa.dll` and `project/bin/cgame.dll`.
+Optional Godot export without helper scripts:
+
+```powershell
+cd project
+godot --headless --export-debug "Windows Desktop" ..\dist\windows\debug\openmohaa.exe
+```
 
 ### macOS (native)
 
 ```bash
 # Install Xcode command-line tools and Homebrew dependencies once
 xcode-select --install
-brew install scons bison flex
+brew install scons bison flex cmake ninja
+export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
 
-# Build universal (arm64 + x86_64) dylibs
-./build.sh macos
+# Build (use arch=universal by default, or arch=arm64 / arch=x86_64)
+cd openmohaa
+scons platform=macos target=template_debug arch=universal dev_build=yes -j"$(sysctl -n hw.ncpu)"
+cd ..
+
+mkdir -p project/bin
+cp -f openmohaa/bin/libopenmohaa.dylib project/bin/libopenmohaa.dylib
+cp -f openmohaa/bin/libcgame.dylib project/bin/cgame.dylib
 
 # Output: project/bin/libopenmohaa.dylib, project/bin/cgame.dylib
+```
+
+Optional Godot export without helper scripts:
+
+```bash
+cd project
+godot --headless --export-debug "macOS" ../dist/macos/debug/openmohaa.app
 ```
 
 ### macOS (cross-compile from Linux)
@@ -383,23 +447,25 @@ brew install scons bison flex
 Cross-compiling macOS binaries from Linux requires [osxcross](https://github.com/tpoechtrager/osxcross).
 
 ```bash
-# Step 1 — validate your environment
-./scripts/setup-macos-build.sh
+# Setup osxcross toolchain in your environment first
+export OSXCROSS_ROOT=/path/to/osxcross
+export PATH="$OSXCROSS_ROOT/target/bin:$PATH"
 
-# Step 2 — generate a reusable environment file
-./scripts/configure-macos-cross-env.sh
-source scripts/env.macos-cross.sh   # sets OSXCROSS_ROOT, PATH, etc.
+# Build (pick one architecture per build)
+cd openmohaa
+scons platform=macos target=template_debug arch=x86_64 osxcross_sdk=darwin16 -j"$(nproc)"
+# or: arch=arm64
+cd ..
 
-# Step 3 — build (specify arch explicitly to avoid universal-link issues)
-./build.sh macos arch=x86_64
-# or
-./build.sh macos arch=arm64
+mkdir -p project/bin
+cp -f openmohaa/bin/libopenmohaa.dylib project/bin/libopenmohaa.dylib
+cp -f openmohaa/bin/libcgame.dylib project/bin/cgame.dylib
 ```
 
 > **Notes**
 > - `osxcross_sdk` defaults to `darwin16`; override with `osxcross_sdk=<your-sdk-tag>` if needed.
 > - If you have access to a Mac, a native build is simpler and more reliable.
-> - Without `OSXCROSS_ROOT` on Linux, `./build.sh macos` will fail by design.
+> - Without `OSXCROSS_ROOT` on Linux, macOS cross-builds fail.
 
 ### Web / MOHAAjs (Emscripten/WASM)
 
@@ -411,16 +477,23 @@ source ~/emsdk/emsdk_env.sh
 cd -
 
 # Step 2 — compile web wasm artefacts only (debug by default)
-./build.sh web
+cd openmohaa
+scons platform=web target=template_debug -j"$(nproc)"
+cd ..
+
+mkdir -p project/bin
+cp -f openmohaa/bin/libopenmohaa.wasm project/bin/libopenmohaa.wasm
 
 # Step 3 — compile optimised release wasm artefacts
-./build.sh web --release
+cd openmohaa
+scons platform=web target=template_release -j"$(nproc)"
+cd ..
 
 # Step 4 — run full web export + template asset pipeline
-./scripts/build-web.sh --release
+cd project
+godot --headless --export-release "Web" ../dist/web/release/mohaa.html
 
-# build.sh output: openmohaa/bin/*openmohaa*.wasm
-# build-web.sh output: web/mohaa.html, web/mohaa.js, web/mohaa.wasm, web/mohaa.pck
+# output: dist/web/release/mohaa.html + related .js/.wasm/.pck
 ```
 
 After building, host the `web/` directory with a server that sends the required security headers (see [Web Hosting & Docker](#-web-hosting--docker)).
@@ -493,8 +566,6 @@ map dm/mohdm1
 ### Headless Smoke Test
 
 ```bash
-./build.sh test
-# or
 cd project && godot --headless --quit-after 5000
 ```
 
@@ -536,7 +607,7 @@ The relay forwards WebSocket frames to/from the game server's UDP port (default 
 
 ## 🐳 Web Hosting & Docker
 
-A `docker-compose.yml` at the repository root provides two deployment profiles.
+A `docker/docker-compose.yml` provides two deployment profiles for the web version.
 
 ### Dev Profile (default)
 
@@ -547,7 +618,7 @@ Mounts your local `web/` build output and game assets directly — no image buil
 export ASSET_PATH=/path/to/mohaa-assets
 
 # Start nginx + relay
-docker compose up
+docker compose -f docker/docker-compose.yml up
 ```
 
 The game is served at **http://localhost:8086/mohaa.html**.
@@ -558,7 +629,7 @@ Pulls the latest pre-built image from the GitHub Container Registry — suitable
 
 ```bash
 export ASSET_PATH=/path/to/mohaa-assets
-docker compose --profile prod up -d
+docker compose -f docker/docker-compose.yml --profile prod up -d
 ```
 
 ### Required HTTP Headers
@@ -665,7 +736,7 @@ All engine settings follow the original MOHAA CVar system. Commonly used CVars:
 | `build.sh <target>` | Top-level entry point: `linux`, `windows`, `macos`, `web`, `deploy`, `clean`, `test` |
 | `launch.sh <platform>` | Launch helper: `linux` (native Godot) or `web` (Docker stack + browser) |
 | `scripts/build-desktop.sh <platform>` | Desktop SCons builder invoked by `build.sh` |
-| `scripts/build-web.sh [--release] [--minimal]` | Web pipeline; `--minimal` keeps only build + Godot export |
+| `scripts/build-web.sh [--release]` | Web pipeline (build + export + custom JS/HTML patching) |
 | `scripts/web_assets/render_html_template.py` | Renders `web/mohaa.html` from source templates in `scripts/web_assets/templates/` |
 | `scripts/export-godot.sh` | Thin Godot CLI export wrapper (platform + variant driven) |
 | `scripts/sign-android.sh` | Thin Android signing wrapper using `apksigner` if configured |
@@ -682,60 +753,52 @@ All engine settings follow the original MOHAA CVar system. Commonly used CVars:
 
 ## 🔧 Development Workflow
 
-### CMake-First Orchestration
+### CMake Usage
 
-The repository includes a root CMake orchestration layer (`CMakeLists.txt` + `CMakePresets.json`) for build coordination.
+The repository includes a root CMake orchestration layer (`CMakeLists.txt` + `CMakePresets.json`) with presets for Linux, Windows, macOS, Web, Android, and iOS.
 
 ```bash
-# Configure and build engine/native artefacts
+# Configure and build Linux engine
 cmake --preset linux-debug
 cmake --build build-cmake/linux-debug --target opm-engine
 
-# Web engine build only
-cmake --preset web-release
-cmake --build build-cmake/web-release --target opm-engine
+# Configure and build Windows engine
+cmake --preset windows-debug
+cmake --build build-cmake/windows-debug --target opm-engine
 
-# Godot export remains a separate step
-cmake --build build-cmake/web-release --target opm-export
+# Configure and build macOS engine
+cmake --preset macos-debug
+cmake --build build-cmake/macos-debug --target opm-engine
+
+# Build export artefacts with the selected preset
+cmake --build build-cmake/linux-debug --target opm-export
 ```
 
-Preset families are provided for `linux`, `windows`, `macos`, `web`, `android`, and `ios`.
+Important: `opm-engine` currently calls the shell build scripts internally (`scripts/build-desktop.sh` / `scripts/build-web.sh`).
 
-`build.sh` is a thin frontend that dispatches to these presets/targets.
+If you want strictly script-free builds, use direct `scons` + direct `godot --export-*` commands from the platform sections above.
 
 ### Platform Build Commands
 
 ```bash
-# Linux engine build
-./build.sh linux --debug
+# Linux
+cd openmohaa && scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
 
-# Windows engine build (requires appropriate cross/native toolchain)
-./build.sh windows --debug
+# Windows (native/cross, with proper toolchain in PATH)
+cd openmohaa && scons platform=windows target=template_debug dev_build=yes -j"$(nproc)"
 
-# macOS engine build (native macOS host or osxcross with OSXCROSS_ROOT)
-./build.sh macos --debug
+# macOS (native or osxcross)
+cd openmohaa && scons platform=macos target=template_debug arch=universal dev_build=yes -j"$(nproc)"
 
-# Web engine only
-./build.sh web --debug
-
-# Web full export pipeline
-./build.sh web-export --debug
-
-# Export only (after engine artefacts are present)
-./build.sh export --platform linux --debug
-./build.sh export --platform windows --debug
-./build.sh export --platform macos --debug
-./build.sh export --platform web --debug
+# Web
+cd openmohaa && scons platform=web target=template_debug -j"$(nproc)"
 ```
 
 ### Matrix Validation
 
 ```bash
-# Full matrix (debug + release) across configured platforms
-./build.sh matrix
-
-# Faster pass for current changes
-./build.sh matrix --debug-only
+# Full matrix script (optional helper)
+./scripts/test-build-matrix.sh
 ```
 
 ### Typical Edit–Build–Test Cycle
@@ -744,7 +807,7 @@ Preset families are provided for `linux`, `windows`, `macos`, `web`, `android`, 
 # 1. Edit source in openmohaa/code/godot/ or openmohaa/code/renderergl1/ …
 
 # 2. Build (incremental — only changed files are recompiled)
-cd openmohaa && scons platform=linux target=template_debug -j$(nproc) dev_build=yes
+cd openmohaa && scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes
 
 # 3. Deploy binaries
 cp -f openmohaa/bin/libopenmohaa.so project/bin/
@@ -760,7 +823,7 @@ SCons caches dependency information in `.sconsign.dblite`. If you edit a widely-
 
 ```bash
 rm openmohaa/.sconsign.dblite
-./build.sh linux
+cd openmohaa && scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes
 ```
 
 ### Adding Engine Patches
@@ -866,8 +929,8 @@ Contributions are welcome! Please read the guidelines below before opening a pul
 
 1. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`).
 2. Make your changes following the coding guidelines above.
-3. Verify the build compiles cleanly: `./build.sh linux`.
-4. Run the smoke test: `./build.sh test`.
+3. Verify the build compiles cleanly: `cd openmohaa && scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"`.
+4. Run the smoke test: `cd project && godot --headless --quit-after 5000`.
 5. Open a pull request with a clear description of what changed and why.
 
 ### Reporting Issues

@@ -60,7 +60,7 @@ jobs:
 
       - name: Build GDExtension
         working-directory: openmohaa
-        run: scons platform=linux arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
+        run: scons platform=linux arch=${{ matrix.arch }} target=template_debug -j$(nproc) dev_build=yes disable_exceptions=no
 
       - name: Zip GDExtension artifacts
         run: |

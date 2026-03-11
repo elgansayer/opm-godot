@@ -61,7 +61,7 @@ case "$PLATFORM" in
     web)
         [[ -f "$PROJECT_DIR/bin/libopenmohaa.wasm" ]] || {
             echo "ERROR: Missing web extension: $PROJECT_DIR/bin/libopenmohaa.wasm" >&2
-            echo "Run './build.sh engine web' before export." >&2; exit 1
+            echo "Run './build.sh build --platform web' before export." >&2; exit 1
         } ;;
     linux)
         [[ -f "$PROJECT_DIR/bin/libopenmohaa.so" || -f "$PROJECT_DIR/bin/openmohaa.so" ]] || {
@@ -74,6 +74,10 @@ case "$PLATFORM" in
     macos)
         [[ -f "$PROJECT_DIR/bin/libopenmohaa.dylib" || -f "$PROJECT_DIR/bin/openmohaa.dylib" ]] || {
             echo "ERROR: Missing macOS extension in $PROJECT_DIR/bin" >&2; exit 1
+        } ;;
+    android)
+        ls "$PROJECT_DIR/bin"/libopenmohaa*.so >/dev/null 2>&1 || {
+            echo "ERROR: Missing Android extension in $PROJECT_DIR/bin" >&2; exit 1
         } ;;
 esac
 
@@ -99,5 +103,41 @@ else
     cat "$LOG_FILE" >&2
     exit 1
 fi
+
+# ── Post-export: stage companion binaries not handled by Godot export ─────
+# Godot export only bundles files it knows about (GDExtension .dll/.so,
+# project resources). Runtime-loaded libraries (cgame) and MinGW runtime
+# DLLs must be copied alongside the exported executable manually.
+OUTPUT_DIR="$(dirname -- "$output")"
+PROJECT_BIN="$PROJECT_DIR/bin"
+
+stage_companion() {
+    local src="$1" dst="$2"
+    if [[ -f "$src" ]]; then
+        \cp -f "$src" "$dst"
+        echo "Staged companion: $(basename "$dst")"
+    fi
+}
+
+case "$PLATFORM" in
+    windows)
+        for companion in cgame.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+            stage_companion "$PROJECT_BIN/$companion" "$OUTPUT_DIR/$companion"
+        done
+        ;;
+    linux)
+        stage_companion "$PROJECT_BIN/cgame.so" "$OUTPUT_DIR/cgame.so"
+        ;;
+    macos)
+        stage_companion "$PROJECT_BIN/cgame.dylib" "$OUTPUT_DIR/cgame.dylib"
+        ;;
+    android)
+        # Android: cgame is an .so loaded via dlopen at runtime
+        for f in "$PROJECT_BIN"/libcgame*.so "$PROJECT_BIN"/cgame*.so; do
+            [[ -f "$f" ]] && stage_companion "$f" "$OUTPUT_DIR/$(basename "$f")"
+        done
+        ;;
+    # Web: cgame is handled by build-web.sh pipeline (baked into WASM export)
+esac
 
 echo "Export complete: $output"

@@ -72,7 +72,7 @@ jobs:
 
       - name: Build GDExtension
         working-directory: openmohaa
-        run: scons platform=android arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
+        run: scons platform=android arch=${{ matrix.arch }} target=template_debug -j$(nproc) dev_build=yes disable_exceptions=no
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
 

@@ -100,7 +100,7 @@ fi
 # =========================================================================
 if [[ "$SKIP_SERVE" -eq 0 ]]; then
     step "Step 2/3: Local deploy"
-    WEB_DIST="$REPO_ROOT/dist/web/release" ASSET_PATH="$ASSET_PATH" docker compose up -d
+    WEB_DIST="$REPO_ROOT/dist/web/release" ASSET_PATH="$ASSET_PATH" docker compose -f docker/docker-compose.yml up -d
     ok "Local stack running at http://localhost:8086"
 else
     step "Step 2/3: Skipping local deploy (--skip-serve)"

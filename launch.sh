@@ -102,9 +102,9 @@ case "$PLATFORM" in
 
         # Ensure Docker stack is running
         cd "$SCRIPT_DIR"
-        if ! docker compose ps --status running 2>/dev/null | grep -q nginx; then
+        if ! docker compose -f docker/docker-compose.yml ps --status running 2>/dev/null | grep -q nginx; then
             echo "Starting Docker stack..."
-            docker compose up -d
+            docker compose -f docker/docker-compose.yml up -d
         fi
 
         URL="http://localhost:8086/mohaa.html"

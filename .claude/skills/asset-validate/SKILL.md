@@ -37,5 +37,5 @@ $ASSET_PATH/
 ## Notes
 
 - `main/` is required; `mainta/` and `maintt/` are optional expansion packs
-- This path is used by `ASSET_PATH` env var in docker-compose.yml
+- This path is used by `ASSET_PATH` env var in docker/docker-compose.yml
 - Common mistake: pointing to `main/` itself instead of its parent directory

@@ -24,6 +24,52 @@ detect_jobs() {
     echo 4
 }
 
+copy_windows_runtime_dlls() {
+    local output_dir="$1"
+    shift
+    local binaries=("$@")
+    local objdump_bin="x86_64-w64-mingw32-objdump"
+    local gxx_bin="x86_64-w64-mingw32-g++"
+
+    command -v "$objdump_bin" >/dev/null 2>&1 || {
+        echo "WARNING: $objdump_bin not found; skipping MinGW runtime DLL staging"
+        return
+    }
+    command -v "$gxx_bin" >/dev/null 2>&1 || {
+        echo "WARNING: $gxx_bin not found; skipping MinGW runtime DLL staging"
+        return
+    }
+
+    local deps=()
+    local bin dep path
+    for bin in "${binaries[@]}"; do
+        [[ -f "$bin" ]] || continue
+        while IFS= read -r dep; do
+            [[ -n "$dep" ]] || continue
+            dep="${dep##*DLL Name: }"
+            # Stage MinGW runtime DLLs, not Windows system DLLs.
+            if [[ "$dep" =~ ^lib.*\.dll$ ]]; then
+                deps+=("$dep")
+            fi
+        done < <("$objdump_bin" -p "$bin" | grep "DLL Name" | tr -d '\r')
+    done
+
+    if [[ "${#deps[@]}" -eq 0 ]]; then
+        return
+    fi
+
+    mapfile -t deps < <(printf '%s\n' "${deps[@]}" | sort -u)
+    for dep in "${deps[@]}"; do
+        path="$("$gxx_bin" -print-file-name="$dep")"
+        if [[ -n "$path" ]] && [[ "$path" != "$dep" ]] && [[ -f "$path" ]]; then
+            \cp -f "$path" "$output_dir/$dep"
+            echo "Staged runtime DLL: $dep"
+        else
+            echo "WARNING: could not resolve runtime DLL path for $dep"
+        fi
+    done
+}
+
 extract_osxcross_sdk_tags() {
     local bin_dir="$1"
     ls -1 "$bin_dir"/*-apple-*-clang 2>/dev/null \
@@ -145,6 +191,13 @@ elif [[ -f "bin/cgame$EXT" ]]; then
     \cp -f "bin/cgame$EXT" "$CGAME_DEPLOY_DIR/cgame$EXT"
 else
     echo "WARNING: cgame$EXT not found; not deployed"
+fi
+
+if [[ "$PLAT" == "windows" ]]; then
+    copy_windows_runtime_dlls "$PROJECT_BIN_DIR" \
+        "$PROJECT_BIN_DIR/cgame$EXT" \
+        "$PROJECT_BIN_DIR/libopenmohaa$EXT" \
+        "$PROJECT_BIN_DIR/openmohaa$EXT"
 fi
 
 # Clean up legacy cgame location

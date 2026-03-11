@@ -61,7 +61,7 @@ jobs:
       - name: Build GDExtension
         working-directory: openmohaa
         shell: pwsh
-        run: scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
+        run: scons platform=windows arch=${{ matrix.arch }} target=template_debug -j$env:NUMBER_OF_PROCESSORS dev_build=yes disable_exceptions=no
 
       - name: Zip GDExtension artifacts
         shell: pwsh
