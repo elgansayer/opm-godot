@@ -83,18 +83,22 @@ FAIL_COUNT=0
 for variant in "${VARIANTS[@]}"; do
     for platform in linux windows macos web android ios; do
         preset="${platform}-${variant}"
+        engine_skipped=0
         run_step "configure ${preset}" "cmake --preset ${preset} -DOPM_BUILD_VARIANT=${variant}"
 
         # Engine target is wired for linux/windows/macos/web; android/ios are placeholder no-ops for now.
         if [[ "$platform" == "macos" && "$(uname -s)" != "Darwin" && -z "${OSXCROSS_ROOT:-}" ]]; then
             run_skip "engine ${preset}" "OSXCROSS_ROOT not set on non-macOS host"
+            engine_skipped=1
         else
             run_step "engine ${preset}" "cmake --build build-cmake/${preset} --target opm-engine"
         fi
 
         # Export target is always wired.
         export_preset_name="$(export_preset_for_platform "$platform")"
-        if [[ -z "$export_preset_name" ]] || ! has_export_preset "$export_preset_name"; then
+        if [[ "$engine_skipped" -eq 1 ]]; then
+            run_skip "export ${preset}" "engine step skipped"
+        elif [[ -z "$export_preset_name" ]] || ! has_export_preset "$export_preset_name"; then
             run_skip "export ${preset}" "no '$export_preset_name' preset in project/export_presets.cfg"
         else
             run_step "export ${preset}" "cmake --build build-cmake/${preset} --target opm-export"

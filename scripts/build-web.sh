@@ -5,9 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
 PROJECT_DIR="$REPO_ROOT/project"
-EXPORT_DIR="$REPO_ROOT/web"
-EXPORT_HTML="$EXPORT_DIR/mohaa.html"
-EXPORT_JS="$EXPORT_DIR/mohaa.js"
+# Output dir is variant-aware: dist/web/debug or dist/web/release.
+# Set by --debug/--release flags (default: debug).
+_WEB_VARIANT="debug"
+EXPORT_DIR=""  # computed after arg parsing
+EXPORT_HTML="" # computed after arg parsing
+EXPORT_JS=""   # computed after arg parsing
 WEB_TEMPLATE_DIR="$REPO_ROOT/scripts/web_assets/templates"
 WEB_HTML_RENDERER="$REPO_ROOT/scripts/web_assets/render_html_template.py"
 PROJECT_GDEXT="$PROJECT_DIR/openmohaa.gdextension"
@@ -38,10 +41,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --release)
             BUILD_TARGET="template_release"
+            _WEB_VARIANT="release"
             shift
             ;;
         --debug)
             BUILD_TARGET="template_debug"
+            _WEB_VARIANT="debug"
             shift
             ;;
         --check)
@@ -116,6 +121,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Compute output paths now that variant is known ────────────────────────
+EXPORT_DIR="$REPO_ROOT/dist/web/$_WEB_VARIANT"
+EXPORT_HTML="$EXPORT_DIR/mohaa.html"
+EXPORT_JS="$EXPORT_DIR/mohaa.js"
+
 serve_docker() {
     local asset_path="${ASSET_PATH:-}"
     if [[ -z "$asset_path" ]]; then
@@ -144,10 +154,8 @@ serve_docker() {
 
     echo "Deploying docker compose stack (asset path: $asset_path)..."
     cd "$REPO_ROOT"
-    # Force-remove any lingering containers by name to avoid the 'already in use' conflict,
-    # then bring the stack up with --force-recreate so existing containers are replaced atomically.
     docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
-    ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose up -d --build --force-recreate
+    WEB_DIST="$EXPORT_DIR" ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose up -d --build --force-recreate
     echo "Stack is up. Web: http://localhost:8086"
 }
 

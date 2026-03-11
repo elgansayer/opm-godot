@@ -134,13 +134,13 @@
       "targets": ["opm-engine"]
     },
     {
-      "name": "web-release-export",
-      "configurePreset": "web-release",
-      "targets": ["opm-web-export"]
-    },
-    {
       "name": "linux-debug-export",
       "configurePreset": "linux-debug",
+      "targets": ["opm-export"]
+    },
+    {
+      "name": "linux-release-export",
+      "configurePreset": "linux-release",
       "targets": ["opm-export"]
     },
     {
@@ -149,9 +149,29 @@
       "targets": ["opm-export"]
     },
     {
+      "name": "windows-release-export",
+      "configurePreset": "windows-release",
+      "targets": ["opm-export"]
+    },
+    {
       "name": "macos-debug-export",
       "configurePreset": "macos-debug",
       "targets": ["opm-export"]
+    },
+    {
+      "name": "macos-release-export",
+      "configurePreset": "macos-release",
+      "targets": ["opm-export"]
+    },
+    {
+      "name": "web-debug-export",
+      "configurePreset": "web-debug",
+      "targets": ["opm-web-export"]
+    },
+    {
+      "name": "web-release-export",
+      "configurePreset": "web-release",
+      "targets": ["opm-web-export"]
     },
     {
       "name": "android-release-export",

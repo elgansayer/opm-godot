@@ -84,13 +84,13 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     ok "Web build complete"
 else
     step "Step 1/3: Skipping build (--skip-build)"
-    if [[ ! -f "$REPO_ROOT/web/mohaa.html" ]]; then
-        fail "web/mohaa.html not found — run without --skip-build first"
+    if [[ ! -f "$REPO_ROOT/dist/web/release/mohaa.html" ]]; then
+        fail "dist/web/release/mohaa.html not found — run without --skip-build first"
     fi
     if [[ -n "$ASSET_PATH" ]]; then
-        "$SCRIPT_DIR/build-web.sh" --patch-only --asset-path "$ASSET_PATH"
+        "$SCRIPT_DIR/build-web.sh" --patch-only --release --asset-path "$ASSET_PATH"
     else
-        "$SCRIPT_DIR/build-web.sh" --patch-only
+        "$SCRIPT_DIR/build-web.sh" --patch-only --release
     fi
     ok "Patches re-applied"
 fi
@@ -100,7 +100,7 @@ fi
 # =========================================================================
 if [[ "$SKIP_SERVE" -eq 0 ]]; then
     step "Step 2/3: Local deploy"
-    ASSET_PATH="$ASSET_PATH" docker compose up -d
+    WEB_DIST="$REPO_ROOT/dist/web/release" ASSET_PATH="$ASSET_PATH" docker compose up -d
     ok "Local stack running at http://localhost:8086"
 else
     step "Step 2/3: Skipping local deploy (--skip-serve)"

@@ -3,14 +3,15 @@
 # =============================================================================
 # Two profiles:
 #
-#   DEV (default) — mounts local web/ build output + nginx config:
-#     ASSET_PATH=/path/to/mohaa-assets docker compose up
+#   DEV (default) — mounts local dist/web/<variant>/ build output:
+#     WEB_DIST=./dist/web/debug ASSET_PATH=/path/to/mohaa-assets docker compose up
 #
 #   PROD — pulls pre-built GHCR image (same as Portainer):
 #     ASSET_PATH=/path/to/mohaa-assets docker compose --profile prod up
 #
-# Required env var:
+# Required env vars:
 #   ASSET_PATH — host directory containing main/, mainta/, maintt/ with pk3s
+#   WEB_DIST   — path to web export directory (default: ./dist/web/debug)
 # =============================================================================
 
 services:
@@ -23,7 +24,7 @@ services:
     environment:
       - CDN_URL=${CDN_URL:-/assets}
     volumes:
-      - ./web:/srv/web:ro
+      - ${WEB_DIST:-./dist/web/debug}:/srv/web:ro
       - ./docker/web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
     restart: unless-stopped
