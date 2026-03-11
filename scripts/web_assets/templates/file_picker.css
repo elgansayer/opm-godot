@@ -1,0 +1,69 @@
+/* OPM_FILE_PICKER_CSS_START */
+#opm-loader {
+  position: fixed;
+  inset: 0;
+  background: #1a1a1a;
+  z-index: 1000;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Noto Sans', Arial, sans-serif;
+  color: #e0e0e0;
+}
+.opm-inner { text-align: center; max-width: 580px; padding: 2rem; }
+.opm-inner h2 { color: #c0a060; font-size: 1.8rem; margin: 0 0 .4rem; }
+.opm-inner p { margin: .4rem 0; line-height: 1.5; }
+.opm-hint { font-size: .85rem; color: #888; }
+.opm-hint code { background: #333; padding: .1rem .4rem; border-radius: 3px; }
+.opm-game-select { margin: .6rem 0; }
+.opm-game-select label { font-size: .9rem; color: #aaa; margin-right: .4rem; }
+.opm-game-select select {
+  padding: .3rem .6rem;
+  background: #333;
+  color: #e0e0e0;
+  border: 1px solid #555;
+  border-radius: 4px;
+  font-size: .9rem;
+}
+.opm-cache-status { font-size: .85rem; color: #7a7; margin: .3rem 0; }
+#opm-pick-section { display: none; }
+.opm-btn {
+  display: inline-block;
+  margin: 1rem .5rem;
+  padding: .7rem 2rem;
+  background: #c0a060;
+  color: #1a1a1a;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background .2s;
+}
+.opm-btn:hover { background: #d4b87a; }
+.opm-btn:disabled { background: #555; cursor: not-allowed; }
+.opm-link {
+  display: block;
+  margin: .6rem auto;
+  padding: .3rem;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: .85rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.opm-link:hover { color: #aaa; }
+#opm-prog-area { margin: 1rem 0; display: none; }
+#opm-file-prog { width: 100%; height: 6px; }
+#opm-prog-text { font-size: .85rem; color: #aaa; margin-top: .3rem; }
+.opm-disclaimer {
+  font-size: .75rem;
+  color: #666;
+  margin-top: 1.5rem;
+  line-height: 1.4;
+  max-width: 520px;
+}
+.opm-disclaimer a { color: #888; }
+/* OPM_FILE_PICKER_CSS_END */

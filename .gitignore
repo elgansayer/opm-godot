@@ -50,6 +50,8 @@ project/gdb.txt
 node_modules/
 tmp/
 test-results/
+build-cmake/
+dist/
 openmohaa/.cmake-native/
 opm-godot-web-export/
 scripts/env.macos-cross.sh

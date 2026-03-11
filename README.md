@@ -410,13 +410,17 @@ cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
 source ~/emsdk/emsdk_env.sh
 cd -
 
-# Step 2 — build (debug WASM by default)
+# Step 2 — compile web wasm artefacts only (debug by default)
 ./build.sh web
 
-# Step 3 — build optimised release WASM
+# Step 3 — compile optimised release wasm artefacts
 ./build.sh web --release
 
-# Output: web/mohaa.html, web/mohaa.js, web/mohaa.wasm, web/mohaa.pck
+# Step 4 — run full web export + template asset pipeline
+./scripts/build-web.sh --release
+
+# build.sh output: openmohaa/bin/*openmohaa*.wasm
+# build-web.sh output: web/mohaa.html, web/mohaa.js, web/mohaa.wasm, web/mohaa.pck
 ```
 
 After building, host the `web/` directory with a server that sends the required security headers (see [Web Hosting & Docker](#-web-hosting--docker)).
@@ -661,7 +665,12 @@ All engine settings follow the original MOHAA CVar system. Commonly used CVars:
 | `build.sh <target>` | Top-level entry point: `linux`, `windows`, `macos`, `web`, `deploy`, `clean`, `test` |
 | `launch.sh <platform>` | Launch helper: `linux` (native Godot) or `web` (Docker stack + browser) |
 | `scripts/build-desktop.sh <platform>` | Desktop SCons builder invoked by `build.sh` |
-| `scripts/build-web.sh [--release]` | Emscripten / Godot web export pipeline |
+| `scripts/build-web.sh [--release] [--minimal]` | Web pipeline; `--minimal` keeps only build + Godot export |
+| `scripts/web_assets/render_html_template.py` | Renders `web/mohaa.html` from source templates in `scripts/web_assets/templates/` |
+| `scripts/export-godot.sh` | Thin Godot CLI export wrapper (platform + variant driven) |
+| `scripts/sign-android.sh` | Thin Android signing wrapper using `apksigner` if configured |
+| `scripts/sign-ios.sh` | Thin iOS signing/provisioning wrapper using `xcodebuild` if configured |
+| `scripts/package-build.sh` | Thin packaging wrapper for current build outputs |
 | `scripts/setup-macos-build.sh` | macOS/native or Linux/osxcross preflight checks |
 | `scripts/configure-macos-cross-env.sh` | Generates `scripts/env.macos-cross.sh` for repeatable cross-builds |
 | `scripts/deploy.sh` | Deploys web build + pushes image to GHCR / Portainer |
@@ -671,6 +680,27 @@ All engine settings follow the original MOHAA CVar system. Commonly used CVars:
 ---
 
 ## 🔧 Development Workflow
+
+### CMake-First Orchestration
+
+The repository includes a root CMake orchestration layer (`CMakeLists.txt` + `CMakePresets.json`) for build coordination.
+
+```bash
+# Configure and build engine/native artefacts
+cmake --preset linux-debug
+cmake --build build-cmake/linux-debug --target opm-engine
+
+# Web engine build only
+cmake --preset web-release
+cmake --build build-cmake/web-release --target opm-engine
+
+# Godot export remains a separate step
+cmake --build build-cmake/web-release --target opm-export
+```
+
+Preset families are provided for `linux`, `windows`, `macos`, `web`, `android`, and `ios`.
+
+`build.sh` is a thin frontend that dispatches to these presets/targets.
 
 ### Typical Edit–Build–Test Cycle
 

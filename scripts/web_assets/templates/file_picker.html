@@ -1,0 +1,29 @@
+<!-- OPM_FILE_PICKER_HTML_START -->
+		<div id="opm-loader">
+			<div class="opm-inner">
+				<h2>MOHAAjs</h2>
+				<p>Medal of Honor: Allied Assault</p>
+				<div class="opm-game-select" id="opm-game-select">
+					<label for="opm-target-game">Select game:</label>
+					<select id="opm-target-game">
+						<option value="0">Allied Assault (main)</option>
+						<option value="1">Spearhead (mainta)</option>
+						<option value="2">Breakthrough (maintt)</option>
+					</select>
+				</div>
+				<p id="opm-cache-status" class="opm-cache-status"></p>
+				<button id="opm-play-btn" class="opm-btn">Play</button>
+				<div id="opm-pick-section">
+					<p class="opm-hint"><strong>Select the MOHAA <em>installation</em> folder</strong> - the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself.</p>
+					<button id="opm-pick-btn" class="opm-btn">Select MOHAA Installation Folder</button>
+					<input type="file" id="opm-input-fb" webkitdirectory multiple style="display:none">
+					<div id="opm-prog-area">
+						<progress id="opm-file-prog" style="width:100%"></progress>
+						<p id="opm-prog-text">Reading files...</p>
+					</div>
+				</div>
+				<button id="opm-skip-btn" class="opm-link">Skip - use server files only</button>
+				<p class="opm-disclaimer">MOHAAjs is an independent fan project and is not affiliated with, endorsed by, or connected to Electronic Arts, the OpenMoHAA project, or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
+			</div>
+		</div>
+<!-- OPM_FILE_PICKER_HTML_END -->
