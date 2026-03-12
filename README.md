@@ -22,9 +22,10 @@ Important: the root CMake project does not replace the underlying engine build. 
 9. [CMake Usage](#cmake-usage)
 10. [Platform Guides](#platform-guides)
 11. [Running And Testing](#running-and-testing)
-12. [Troubleshooting](#troubleshooting)
-13. [Current Gaps](#current-gaps)
-14. [Disclaimer And Licence](#disclaimer-and-licence)
+12. [Custom Cvars](#custom-cvars)
+13. [Troubleshooting](#troubleshooting)
+14. [Current Gaps](#current-gaps)
+15. [Disclaimer And Licence](#disclaimer-and-licence)
 
 ## What This Repo Builds
 
@@ -770,6 +771,49 @@ Optional build-matrix sanity check:
 ```bash
 ./scripts/test-build-matrix.sh
 ```
+
+## Custom Cvars
+
+This port adds several console variables on top of the standard OpenMoHAA/MOHAA set. All of these are set from the in-game console (`~`) using `seta <cvar> <value>`. Archived cvars are saved to the config file automatically.
+
+### Rendering
+
+| Cvar | Default | Flags | Description |
+| --- | --- | --- | --- |
+| `r_shadows` | `0` | archive | Shadow mode. `0` = classic MOHAA shadow blobs. `1` = Godot GPU shadows from the map's sun direction, cast by all `RF_SHADOW` entities onto BSP surfaces. |
+| `r_dlight_shadows` | `0` | archive | Dynamic light shadows. `0` = point lights illuminate but do not cast shadows. `1` = point lights cast shadows (expensive: 6 depth passes per light). Requires `r_shadows 1`. |
+| `r_godot_rain` | `1` | archive | Rain mode. `0` = original MOHAA line-streak rain from cgame. `1` = Godot physics rain with collision. |
+| `r_gamma` | `1` | archive | Display gamma correction value. |
+
+### UI Text Scaling
+
+These cvars scale the font size for individual UI text widgets. A value of `1.0` is the original size. Values above `1.0` make text larger; values below `1.0` make it smaller. Line height, word wrap, and character spacing all scale proportionally.
+
+| Cvar | Default | Flags | Description |
+| --- | --- | --- | --- |
+| `ui_dmbox_scale` | `1.0` | archive | Scale factor for the death/chat message box (kill feed and player chat). |
+| `ui_gmbox_scale` | `1.0` | archive | Scale factor for the game message box (objectives, side messages). |
+| `ui_console_scale` | `1.0` | archive | Scale factor for the developer console (`~` key). |
+| `ui_minicon_scale` | `1.0` | archive | Scale factor for the mini console overlay. |
+
+Example — make the kill feed 50% larger and the console text smaller:
+
+```
+seta ui_dmbox_scale 1.5
+seta ui_console_scale 0.8
+```
+
+### Debug
+
+| Cvar | Default | Flags | Description |
+| --- | --- | --- | --- |
+| `r_showtris` | `0` | cheat | Wireframe overlay. `0` = off, `1` = wireframe, `2` = wireframe + solid. |
+| `r_shownormals` | `0` | cheat | Draw surface normals. |
+| `r_speeds` | `0` | cheat | Show per-frame rendering stats overlay. |
+| `r_lockpvs` | `0` | cheat | Freeze PVS culling at the current position. |
+| `r_showbbox` | `0` | cheat | Draw entity bounding boxes. |
+| `godot_dump_2d` | `0` | — | One-shot trigger: set to `1` to dump one frame of 2D overlay commands to the log. Resets to `0` automatically. |
+| `godot_dump_2d_interval` | `0` | — | Automatic 2D command dump interval in seconds. `0` = disabled. |
 
 ## Troubleshooting
 
