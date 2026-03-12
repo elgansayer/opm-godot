@@ -83,30 +83,30 @@ try {
   console.log(`[web-e2e] Navigating to ${url.toString()}`);
   await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
-  await page.waitForSelector('#opm-loader', { state: 'visible', timeout: 60000 });
+  await page.waitForSelector('#mohaa-loader', { state: 'visible', timeout: 60000 });
 
-  const playVisible = await page.locator('#opm-play-btn').isVisible().catch(() => false);
+  const playVisible = await page.locator('#mohaa-play-btn').isVisible().catch(() => false);
   if (playVisible) {
     console.log('[web-e2e] Clicking Play');
-    await page.click('#opm-play-btn');
+    await page.click('#mohaa-play-btn');
   }
 
-  const skipVisible = await page.locator('#opm-skip-btn').isVisible().catch(() => false);
+  const skipVisible = await page.locator('#mohaa-skip-btn').isVisible().catch(() => false);
   if (skipVisible) {
     console.log('[web-e2e] Clicking Skip (server files path)');
-    await page.click('#opm-skip-btn');
+    await page.click('#mohaa-skip-btn');
   }
 
   const startupInfo = await page.evaluate(() => ({
-    startupArgs: typeof window.__opmStartupArgs === 'string' ? window.__opmStartupArgs : '',
-    launchMap: typeof window.__opmLaunchMap === 'string' ? window.__opmLaunchMap : '',
+    startupArgs: typeof window.__mohaaStartupArgs === 'string' ? window.__mohaaStartupArgs : '',
+    launchMap: typeof window.__mohaaLaunchMap === 'string' ? window.__mohaaLaunchMap : '',
     search: window.location.search,
   }));
   console.log(`[web-e2e] Startup args: ${startupInfo.startupArgs}`);
   console.log(`[web-e2e] Launch map var: ${startupInfo.launchMap}`);
   console.log(`[web-e2e] URL search: ${startupInfo.search}`);
   const startupStdout = await page.evaluate(() => {
-    const arr = Array.isArray(window.__opmStdout) ? window.__opmStdout : [];
+    const arr = Array.isArray(window.__mohaaStdout) ? window.__mohaaStdout : [];
     return arr.filter((line) => /Startup args|Startup map|Extra engine cmds|Starting at main menu/.test(String(line))).slice(-20);
   }).catch(() => []);
   if (startupStdout.length > 0) {
@@ -116,21 +116,21 @@ try {
 
   console.log('[web-e2e] Waiting for map-loaded signal');
   await page.waitForFunction(() => {
-    if (typeof window.__opmEngineError === 'string' && window.__opmEngineError.length > 0) {
-      throw new Error(`engine error: ${window.__opmEngineError}`);
+    if (typeof window.__mohaaEngineError === 'string' && window.__mohaaEngineError.length > 0) {
+      throw new Error(`engine error: ${window.__mohaaEngineError}`);
     }
-    const jsBridgeSignal = typeof window.__opmMapLoaded === 'string' && window.__opmMapLoaded.length > 0;
-    const stdoutSignal = typeof window.__opmMapLoadedLog === 'string' && window.__opmMapLoadedLog.length > 0;
+    const jsBridgeSignal = typeof window.__mohaaMapLoaded === 'string' && window.__mohaaMapLoaded.length > 0;
+    const stdoutSignal = typeof window.__mohaaMapLoadedLog === 'string' && window.__mohaaMapLoadedLog.length > 0;
     return jsBridgeSignal || stdoutSignal;
   }, null, {
     timeout: timeoutMs,
   });
 
   const loadedMap = await page.evaluate(() => {
-    if (typeof window.__opmMapLoaded === 'string' && window.__opmMapLoaded.length > 0) {
-      return window.__opmMapLoaded;
+    if (typeof window.__mohaaMapLoaded === 'string' && window.__mohaaMapLoaded.length > 0) {
+      return window.__mohaaMapLoaded;
     }
-    const line = typeof window.__opmMapLoadedLog === 'string' ? window.__opmMapLoadedLog : '';
+    const line = typeof window.__mohaaMapLoadedLog === 'string' ? window.__mohaaMapLoadedLog : '';
     const i = line.indexOf('->');
     return i >= 0 ? line.slice(i + 2).trim() : '';
   });
@@ -164,7 +164,7 @@ try {
   }
   if (!page.isClosed()) {
     const stdoutTail = await page.evaluate(() => {
-      const arr = Array.isArray(window.__opmStdout) ? window.__opmStdout : [];
+      const arr = Array.isArray(window.__mohaaStdout) ? window.__mohaaStdout : [];
       return arr.slice(-80);
     }).catch(() => []);
     if (stdoutTail.length > 0) {

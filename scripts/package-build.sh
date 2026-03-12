@@ -3,7 +3,7 @@
 # and create a distributable .tar.gz archive.
 #
 # Output:  dist/<platform>/<variant>/          — exported + companion files
-#          dist/packages/opm-godot-<plat>-<var>-<stamp>.tar.gz
+#          dist/packages/mohaa-godot-<plat>-<var>-<stamp>.tar.gz
 #
 # Usage:
 #   ./scripts/package-build.sh --platform linux [--variant release] [--arch x86_64]
@@ -89,7 +89,7 @@ echo ""
 echo "=== Step 3/3: Create archive ==="
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-PKG_NAME="opm-godot-${PLATFORM}-${VARIANT}-${STAMP}.tar.gz"
+PKG_NAME="mohaa-godot-${PLATFORM}-${VARIANT}-${STAMP}.tar.gz"
 PKG_DIR="$REPO_ROOT/dist/packages"
 mkdir -p "$PKG_DIR"
 PKG_PATH="$PKG_DIR/$PKG_NAME"

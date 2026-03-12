@@ -14,8 +14,8 @@
 # Pipeline:
 #   1. Full web build         — build-web.sh (SCons + Godot export + JS patches)
 #   2. Local deploy (optional)— Docker compose up (nginx + relay)
-#   3. Commit + push          — opm-godot
-#   4. GitHub Actions         — builds Docker image → ghcr.io/elgansayer/opm-godot:latest
+#   3. Commit + push          — mohaa-godot
+#   4. GitHub Actions         — builds Docker image → ghcr.io/elgansayer/mohaa-godot:latest
 #   5. Portainer              — pulls latest image on next poll/manual redeploy
 set -euo pipefail
 
@@ -107,7 +107,7 @@ else
 fi
 
 # =========================================================================
-# Step 3: Commit + push opm-godot
+# Step 3: Commit + push mohaa-godot
 # =========================================================================
 step "Step 3/3: Commit + push"
 if [[ "$NO_PUSH" -eq 0 ]]; then
@@ -127,12 +127,12 @@ fi
 # Summary
 # =========================================================================
 echo ""
-echo "  Repo:          git@github.com:elgansayer/opm-godot.git"
-echo "  Docker image:  ghcr.io/elgansayer/opm-godot:latest"
+echo "  Repo:          git@github.com:elgansayer/mohaa-godot.git"
+echo "  Docker image:  ghcr.io/elgansayer/mohaa-godot:latest"
 echo ""
 if [[ "$NO_PUSH" -eq 0 ]]; then
     echo "  GitHub Actions will build + push the Docker image to GHCR."
-    echo "  Check: https://github.com/elgansayer/opm-godot/actions"
+    echo "  Check: https://github.com/elgansayer/mohaa-godot/actions"
     echo ""
     echo "  Once complete, redeploy in Portainer or wait for auto-poll."
 else

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # test-viewmodel.sh — Automated viewmodel/NODRAW regression test
 #
-# Launches Godot with the TestViewmodel scene, captures structured
-# diagnostic output from MoHAARunner's [VIEWMODEL-VALIDATE] and
-# [FPS-DIAG] logging, and reports pass/fail.
+# Launches Godot with the TestViewmodel scene and reports pass/fail
+# based on the scene's own ViewmodelTest: result output.
 #
 # Prerequisites:
 #   - Built libopenmohaa.so deployed to project/bin/
@@ -89,21 +88,19 @@ echo "Godot exited with code: $GODOT_EXIT"
 echo ""
 
 # Analyse results
-FAIL_COUNT=0
-WARN_COUNT=0
-INFO_COUNT=0
-FPS_DIAG_COUNT=0
-NODRAW_CHANGES=0
+TEST_FAIL_LINES=0
+TEST_PASS_LINES=0
+TEST_RESULT_FAIL=0
+TEST_RESULT_PASS=0
 
 if [[ -f "$LOG_FILE" ]]; then
     # Note: use VAR=$(...) || VAR=0 pattern, NOT $( ... || echo 0).
     # grep -c outputs "0" with exit code 1 on no match; || echo 0 would
     # append another "0", giving "0\n0" which breaks arithmetic.
-    FAIL_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] FAIL' "$LOG_FILE" 2>/dev/null) || FAIL_COUNT=0
-    WARN_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] WARN' "$LOG_FILE" 2>/dev/null) || WARN_COUNT=0
-    INFO_COUNT=$(grep -c '\[VIEWMODEL-VALIDATE\] INFO' "$LOG_FILE" 2>/dev/null) || INFO_COUNT=0
-    FPS_DIAG_COUNT=$(grep -c '\[FPS-DIAG\]' "$LOG_FILE" 2>/dev/null) || FPS_DIAG_COUNT=0
-    NODRAW_CHANGES=$(grep -c '\[FPS-DIAG\] CHANGE' "$LOG_FILE" 2>/dev/null) || NODRAW_CHANGES=0
+    TEST_FAIL_LINES=$(grep -c 'ViewmodelTest: .*FAIL' "$LOG_FILE" 2>/dev/null) || TEST_FAIL_LINES=0
+    TEST_PASS_LINES=$(grep -c 'ViewmodelTest: .*PASS' "$LOG_FILE" 2>/dev/null) || TEST_PASS_LINES=0
+    TEST_RESULT_FAIL=$(grep -c 'ViewmodelTest: Result: *FAIL' "$LOG_FILE" 2>/dev/null) || TEST_RESULT_FAIL=0
+    TEST_RESULT_PASS=$(grep -c 'ViewmodelTest: Result: *PASS' "$LOG_FILE" 2>/dev/null) || TEST_RESULT_PASS=0
 fi
 
 # Write summary
@@ -115,16 +112,13 @@ Map:             $MAP
 Duration:        ${DURATION}s
 Godot exit code: $GODOT_EXIT
 
-VIEWMODEL-VALIDATE:
-  FAIL:  $FAIL_COUNT
-  WARN:  $WARN_COUNT
-  INFO:  $INFO_COUNT
+Test log markers:
+    ViewmodelTest: FAIL lines:   $TEST_FAIL_LINES
+    ViewmodelTest: PASS lines:   $TEST_PASS_LINES
+    Result FAIL markers: $TEST_RESULT_FAIL
+    Result PASS markers: $TEST_RESULT_PASS
 
-FPS-DIAG:
-  Total lines:    $FPS_DIAG_COUNT
-  NODRAW changes: $NODRAW_CHANGES
-
-Overall: $([ "$FAIL_COUNT" -eq 0 ] && [ "$GODOT_EXIT" -eq 0 ] && echo "PASS" || echo "FAIL")
+Overall: $([ "$TEST_RESULT_FAIL" -eq 0 ] && [ "$GODOT_EXIT" -eq 0 ] && echo "PASS" || echo "FAIL")
 EOF
 
 # Print summary
@@ -136,30 +130,16 @@ echo "========================================"
 echo ""
 
 # Show FAIL lines if any
-if [[ "$FAIL_COUNT" -gt 0 ]]; then
+if [[ "$TEST_FAIL_LINES" -gt 0 ]]; then
     echo "--- FAIL details ---"
-    awk '/\[VIEWMODEL-VALIDATE\] FAIL/ { print; if (++n == 20) exit }' "$LOG_FILE"
+    awk '/ViewmodelTest: .*FAIL/ { print; if (++n == 20) exit }' "$LOG_FILE"
     echo ""
 fi
 
-# Show WARN lines if any
-if [[ "$WARN_COUNT" -gt 0 ]]; then
-    echo "--- WARN details ---"
-    awk '/\[VIEWMODEL-VALIDATE\] WARN/ { print; if (++n == 10) exit }' "$LOG_FILE"
-    echo ""
-fi
-
-# Show FPS-DIAG changes (surface transitions)
-if [[ "$NODRAW_CHANGES" -gt 0 ]]; then
-    echo "--- Surface state changes ---"
-    awk '/\[FPS-DIAG\] CHANGE/ { print; if (++n == 20) exit }' "$LOG_FILE"
-    echo ""
-fi
-
-# Show INFO health summaries
-if [[ "$INFO_COUNT" -gt 0 ]]; then
-    echo "--- Health summaries (last 10) ---"
-    grep '\[VIEWMODEL-VALIDATE\] INFO' "$LOG_FILE" | tail -10
+# Show PASS lines if any
+if [[ "$TEST_PASS_LINES" -gt 0 ]]; then
+    echo "--- PASS details (last 10) ---"
+    grep 'ViewmodelTest: .*PASS' "$LOG_FILE" | tail -10
     echo ""
 fi
 
@@ -167,12 +147,12 @@ fi
 ln -sf "$(basename "$LOG_FILE")" "$LOG_DIR/viewmodel-test-latest.log"
 
 # Exit
-if [[ "$FAIL_COUNT" -gt 0 ]] || [[ "$GODOT_EXIT" -ne 0 ]]; then
-    echo "RESULT: FAIL ($FAIL_COUNT validation failures, exit code $GODOT_EXIT)"
+if [[ "$TEST_RESULT_FAIL" -gt 0 ]] || [[ "$GODOT_EXIT" -ne 0 ]]; then
+    echo "RESULT: FAIL (scene reported fail or exit code $GODOT_EXIT)"
     echo "Full log: $LOG_FILE"
     exit 1
 else
-    echo "RESULT: PASS (0 failures, $WARN_COUNT warnings)"
+    echo "RESULT: PASS"
     echo "Full log: $LOG_FILE"
     exit 0
 fi

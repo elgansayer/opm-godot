@@ -1,955 +1,837 @@
-# ShinMOHAA / MOHAAjs
+# ShinMOHAA
 
-> A modern, high-performance engine port for **Medal of Honor: Allied Assault**, built on **Godot 4** as a GDExtension library and exported to **WebAssembly**.
+ShinMOHAA ports OpenMoHAA into Godot 4 as a monolithic GDExtension. The original engine code still provides the game, networking, script, and asset-loading behaviour; Godot provides the host runtime, scene integration, and export pipeline.
 
-ShinMOHAA brings the classic World War II tactical shooter into the modern era by wrapping the original [OpenMoHAA](https://github.com/openmohaa/openmohaa) engine (an ioquake3 / id Tech 3 derivative) inside Godot 4's rendering and input systems, while maintaining **bit-perfect compatibility** with all original game logic, assets, and network protocols.
+This repository currently has two supported build front doors:
 
-[![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Web-lightgrey)]()
-[![Godot](https://img.shields.io/badge/Godot-4.2%2B-blue)](https://godotengine.org/)
+- `./build.sh` for the normal day-to-day workflow.
+- Root `CMakeLists.txt` and `CMakePresets.json` as an orchestration layer over the same shell scripts.
 
----
+Important: the root CMake project does not replace the underlying engine build. It drives the repository's shell scripts, which in turn invoke SCons for the engine and `godot --export-*` for packaged exports.
 
-## Table of Contents
+## Contents
 
-1. [Highlights](#-highlights)
-2. [Game Compatibility](#-game-compatibility)
-3. [Repository Map](#️-repository-map)
-4. [Architecture](#️-architecture)
-5. [Engine Subsystems](#-engine-subsystems)
-6. [Requirements](#-requirements)
-7. [Quick Start](#-quick-start)
-8. [Platform Build Guides](#️-platform-build-guides)
-   - [Linux](#linux)
-   - [Windows](#windows)
-   - [macOS (native)](#macos-native)
-   - [macOS (cross-compile from Linux with osxcross)](#macos-cross-compile-from-linux)
-   - [Web / MOHAAjs (Emscripten / WASM)](#web--mohaajs-emscriptenwasm)
-9. [Running the Game](#-running-the-game)
-10. [Dedicated Server](#️-dedicated-server)
-11. [Web Hosting & Docker](#-web-hosting--docker)
-12. [Display & Resolution Settings](#️-display--resolution-settings)
-13. [Configuration Reference](#️-configuration-reference)
-14. [Useful Scripts](#-useful-scripts)
-15. [Development Workflow](#-development-workflow)
-16. [Troubleshooting](#-troubleshooting)
-17. [Contributing](#-contributing)
-18. [Disclaimer & Licence](#️-disclaimer--licence)
+1. [What This Repo Builds](#what-this-repo-builds)
+2. [Repository Layout](#repository-layout)
+3. [Build System Overview](#build-system-overview)
+4. [Platform Support Matrix](#platform-support-matrix)
+5. [Build Cheat Sheet](#build-cheat-sheet)
+6. [Requirements](#requirements)
+7. [Game Assets](#game-assets)
+8. [Quick Start](#quick-start)
+9. [CMake Usage](#cmake-usage)
+10. [Platform Guides](#platform-guides)
+11. [Running And Testing](#running-and-testing)
+12. [Troubleshooting](#troubleshooting)
+13. [Current Gaps](#current-gaps)
+14. [Disclaimer And Licence](#disclaimer-and-licence)
 
----
+## What This Repo Builds
 
-## 🚀 Highlights
+The main outputs are:
 
-| Feature | Details |
-| :--- | :--- |
-| **Godot 4 GDExtension** | Monolithic `.so`/`.dll`/`.wasm` — engine, server, client, AI, and script subsystems in one shared library. |
-| **Full Asset Compatibility** | Original `.pk3`, `.scr`, `.tik`, BSP maps, and `.shader` files load without modification. |
-| **Three Games in One** | Supports Medal of Honor: Allied Assault (`main/`), Spearhead (`mainta/`), and Breakthrough (`maintt/`). |
-| **MOHAAjs (Web Client)** | Emscripten WASM build with IndexedDB asset caching and a WebSocket relay for UDP bridging. |
-| **Morfuse Script Engine** | Full execution of `.scr` game scripts — quests, cinematics, AI behaviour, and total conversions. |
-| **TIKI Skeletal Animation** | CPU-skinned skeletal models with multi-mesh bone remapping, LOD, and per-surface shader support. |
-| **BSP World Rendering** | Planar, triangle-soup, Bézier patch, terrain, skybox, and brush sub-model surfaces through Godot's rendering server. |
-| **3-D Positional Audio** | WAV streams from the VFS routed through `AudioStreamPlayer3D` pools. |
-| **Cross-Platform** | Linux, Windows, macOS, and WebAssembly from a single SCons build. |
-| **Modding-Friendly** | GDScript, C#, or C++ GDExtension extensions sit alongside the engine without touching C source. |
+- Engine libraries staged into `project/bin/` for development.
+- Godot exports staged into `dist/<platform>/<variant>/` for packaged builds.
+- Optional archives under `dist/packages/`.
 
----
+Typical staged engine outputs are:
 
-## 🎮 Game Compatibility
+| Target platform | Main library in `project/bin/` | Runtime companion |
+| --- | --- | --- |
+| Linux | `libopenmohaa.so` | `cgame.so` |
+| Windows | `openmohaa.dll` or `libopenmohaa.dll` | `cgame.dll` plus MinGW runtime DLLs |
+| macOS | `libopenmohaa.dylib` | `cgame.dylib` |
+| Web | `libopenmohaa.wasm` | web export assets |
 
-ShinMOHAA targets full compatibility with all three retail releases:
+Typical packaged export outputs are:
 
-| Directory | Game | Pak files |
-| :--- | :--- | :--- |
-| `main/` | Medal of Honor: Allied Assault | `Pak0.pk3` – `Pak5.pk3` |
-| `mainta/` | Medal of Honor: Allied Assault — Spearhead | `pak0.pk3` – `pak3.pk3` |
-| `maintt/` | Medal of Honor: Allied Assault — Breakthrough | `pak0.pk3` – `pak3.pk3` |
+| Target platform | Export output |
+| --- | --- |
+| Linux | `dist/linux/<variant>/openmohaa.x86_64` |
+| Windows | `dist/windows/<variant>/openmohaa.exe` |
+| macOS | `dist/macos/<variant>/openmohaa.app` |
+| Web | Current full pipeline writes the patched export to `web/mohaa.html` |
 
-The active game is selected at runtime via the `com_target_game` console variable:
-
-```
-0  →  Allied Assault   (default)
-1  →  Spearhead
-2  →  Breakthrough
-```
-
-All original network protocols, console commands, CVars, and server-side game scripts behave identically to the original engine. Existing dedicated server configurations (`server.cfg`) work without changes.
-
----
-
-## 🗺️ Repository Map
+## Repository Layout
 
 ```text
-opm-godot/
-├── openmohaa/              # Core engine source (C/C++) — NOT a git submodule
-│   ├── code/
-│   │   ├── godot/          # Godot-specific glue layer (all new bridge code lives here)
-│   │   │   ├── MoHAARunner.cpp/.h        # Main Godot Node: Com_Init/Frame, scene, HUD, audio
-│   │   │   ├── register_types.cpp        # GDExtension entry point
-│   │   │   ├── stubs.cpp                 # ~100 no-op stubs for unused engine APIs
-│   │   │   ├── godot_renderer.c          # Stub refexport_t + entity/poly/2-D capture buffers
-│   │   │   ├── godot_sound.c             # Sound event capture (S_*/MUSIC_* queue)
-│   │   │   ├── godot_input_bridge.c      # Godot key/mouse → engine SE_KEY/SE_MOUSE events
-│   │   │   ├── godot_bsp_mesh.cpp/.h     # BSP world: mesh, terrain, lightmaps, marks
-│   │   │   ├── godot_skel_model.cpp/.h   # TIKI skeletal mesh builder (ArrayMesh)
-│   │   │   └── godot_shader_props.h      # Shared struct/enum definitions (C/C++ compatible)
-│   │   ├── renderergl1/    # Real renderer source (GL calls stubbed; data management runs)
-│   │   ├── qcommon/        # CVars, commands, VFS, memory, networking
-│   │   ├── server/         # Dedicated / listen server
-│   │   ├── client/         # Client state, prediction, keys, screen
-│   │   ├── fgame/          # Server-side game logic, entities, AI
-│   │   ├── cgame/          # Client-side game (separate cgame.so / cgame.dll)
-│   │   ├── script/         # Morfuse script compiler & executor
-│   │   ├── tiki/           # TIKI model & animation loading
-│   │   ├── skeletor/       # Skeletal animation system
-│   │   ├── uilib/          # MOHAA menu / widget system
-│   │   ├── botlib/         # Bot pathfinding & AI
-│   │   ├── gamespy/        # GameSpy master-server support
-│   │   └── thirdparty/     # Recast/Detour navigation, SDL libs
-│   └── SConstruct          # Build configuration for GDExtension
-├── project/                # Godot 4 editor project (scenes, UI, shaders)
-│   ├── Main.gd / Main.tscn # GDScript entry point
-│   ├── project.godot       # Godot project settings
-│   ├── openmohaa.gdextension
-│   └── bin/                # Deployed .so/.dll/.dylib (git-ignored)
-├── web/                    # Production web export and landing page
-├── relay/                  # WebSocket-to-UDP relay server (Node.js)
-├── scripts/                # Build automation and deployment utilities
-├── docker/                 # Web containerisation (Docker Compose, nginx config)
-│   └── docker-compose.yml  # Dev + prod Docker Compose profiles
-├── build.sh                # Top-level build & deploy script
-└── launch.sh               # Game launcher (Linux native or web Docker stack)
+mohaa-godot/
+|- build.sh                 Top-level build entry point
+|- CMakeLists.txt           CMake orchestration layer
+|- CMakePresets.json        Configure/build presets
+|- launch.sh                Simple Linux/web launcher helper
+|- openmohaa/               Engine source and SCons build
+|- project/                 Godot project and export presets
+|- scripts/                 Build/export/package/test helpers
+|- dist/                    Packaged exports
+|- build-cmake/             CMake configure trees
+|- docker/                  Web hosting stack
+|- relay/                   WebSocket-to-UDP relay
+`- godot-cpp/               Godot C++ bindings submodule
 ```
 
----
+## Build System Overview
 
-## 🏗️ Architecture
+There are four layers in the current build pipeline:
 
-```mermaid
-graph TD
-    A[Browser / OS] --> B[Godot 4 Engine]
-    B --> C[ShinMOHAA GDExtension<br/>libopenmohaa.so/.dll/.wasm]
-    C --> D[Com_Frame loop<br/>qcommon / server / client]
-    D --> E[Morfuse Script Engine<br/>.scr game scripts]
-    D --> F[TIKI / Skeletor<br/>Skeletal animation]
-    D --> G[Stub Renderer<br/>godot_renderer.c]
-    G --> H[MoHAARunner<br/>Godot Node]
-    H --> I[BSP World<br/>MeshInstance3D]
-    H --> J[Entity Pool<br/>MeshInstance3D]
-    H --> K[2-D HUD<br/>CanvasLayer]
-    H --> L[Audio Pool<br/>AudioStreamPlayer3D]
-    subgraph "MOHAAjs Web Stack"
-        M[WASM Client] <-->|WebSocket| N[Node.js Relay]
-        N <-->|UDP| O[Dedicated Server]
-    end
-    B --> M
-```
+1. `openmohaa/SConstruct`
+   Builds the engine and companion modules with SCons.
 
-### How It Works
+2. `scripts/build-desktop.sh` and `scripts/build-web.sh`
+   Repository-owned wrappers that build the engine and stage outputs into `project/bin/`.
 
-ShinMOHAA is a **bridge**, not a rewrite. The original OpenMoHAA C/C++ engine is compiled as a shared library (`libopenmohaa`) and loaded by Godot as a GDExtension. Every frame, the engine's `Com_Frame()` function drives the full client–server tick, feeding render commands into intermediate capture buffers. A custom Godot `Node3D` (`MoHAARunner`) reads those buffers each frame and translates them into native Godot scene objects:
+3. `scripts/export-godot.sh`
+   Runs the Godot CLI export step into `dist/<platform>/<variant>/`.
 
-| Engine output | Godot representation |
-| :--- | :--- |
-| BSP world surfaces | `ArrayMesh` + `MeshInstance3D` |
-| Skeletal entity renders | CPU-skinned `ArrayMesh` pool |
-| 2-D HUD draw calls | `RenderingServer` canvas items |
-| Sound events | `AudioStreamPlayer3D` pool |
-| Camera (`refdef_t`) | `Camera3D` transform + FOV |
-| Dynamic lights | `OmniLight3D` pool |
+4. `build.sh` and root CMake
+   High-level orchestration over the scripts above.
 
-The real renderer's **data-management code** (shader text parsing, image loading, model registration) runs via `R_Init()` called from `GR_BeginRegistration()`. Only the actual OpenGL draw calls are stubbed out. This means all shader definitions, texture paths, and model data are resolved by the original engine code — the Godot side simply consumes the results.
+For Web specifically, the current full pipeline is special: `scripts/build-web.sh` exports and patches the web build in `web/`, while some adjacent scripts still expect a later `dist/web/<variant>/` layout. Treat `build.sh web-full` as the source of truth for the current web flow.
 
-### Per-Frame Data Flow
+The recommended mental model is:
 
-```
-Com_Frame()
-  ├── SV_Frame()             → server logic, entity updates, script execution
-  ├── CL_Frame()             → client prediction, snapshot processing
-  │   └── CG_DrawActiveFrame()
-  │       └── GR_RenderScene() → captures refdef, entity buffer, dlights
-  ├── SCR_UpdateScreen()     → captures 2-D HUD commands
-  └── S_Update()             → captures sound events
+- `build.sh build --platform ...` means "compile and stage engine libraries for development".
+- `build.sh package --platform ...` means "compile, export, stage companions, and archive".
+- `cmake --preset ...` configures the same flows, but still ends up calling the shell scripts.
 
-MoHAARunner::_process()
-  ├── Com_Frame()
-  ├── update_camera()           → refdef → Camera3D
-  ├── update_entities()         → entity buffer → MeshInstance3D pool
-  ├── update_2d_overlay()       → 2-D cmds → CanvasLayer
-  ├── update_audio()            → sound events → AudioStreamPlayer3D pool
-  ├── update_polys/swipes/marks → effect MeshInstance3Ds
-  └── update_shader_animations()→ tcMod UV offsets
-```
+## Platform Support Matrix
 
----
+This table reflects what is actually wired by the scripts in this repository today.
 
-## 🔩 Engine Subsystems
+| Host OS | Linux target | Windows target | macOS target | Web target | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Linux | Yes, native | Yes, via MinGW-w64 cross toolchain | Yes, via osxcross | Yes | Best-supported all-round build host |
+| Windows | Not scripted | Yes, native via MSYS2/MinGW and a Bash shell | Not scripted | Not documented | Use MSYS2 MINGW64 or WSL rather than plain `cmd.exe` |
+| macOS | Not scripted | Not scripted | Yes, native | Not documented | Native macOS target is supported; cross-target desktop builds are not wired here |
 
-### `libopenmohaa` (GDExtension)
+Practical guidance:
 
-The monolithic shared library that encapsulates:
+- If you want one host that can build Linux, Windows, and macOS targets, use Linux.
+- If you want to build on Windows itself, the supported path is a native Windows target build from an MSYS2 MINGW64 shell.
+- If you want to build on macOS itself, the supported path is a native macOS target build.
 
-- **`qcommon`** — CVars, command buffer, VFS (`.pk3` mounting), memory zones, console, networking stack.
-- **`server`** — Dedicated / listen-server game simulation, entity management, bot pathfinding.
-- **`client`** — Client prediction, input, snapshot processing, HUD rendering commands.
-- **`fgame`** — Server-side game DLL (entities, AI state machines, weapon logic, mission scripts).
-- **`cgame`** — Client-side game module (entity interpolation, effects, HUD data) — compiled as a *separate* `cgame.so`/`cgame.dll` and loaded at runtime via `dlopen`.
-- **`script`** — Morfuse script compiler and virtual machine, executing `.scr` files for game events, cinematics, and AI.
-- **`tiki` / `skeletor`** — TIKI model loader and skeletal animation system.
-- **`uilib`** — MOHAA menu/widget system used for in-game menus and HUD.
-- **`botlib`** — Navigation mesh, area flooding, and AI decision-making using Recast/Detour.
-- **`renderergl1`** — Real renderer data-management layer; GL draw calls are no-ops under Godot.
+## Build Cheat Sheet
 
-### Morfuse Script Engine
+Use this section if you just want the right command quickly.
 
-Executes legacy `.scr` files that drive game events, AI dialogue, cutscenes, and mission objectives. It has been modernised for C++17 and compiles directly into the main library, providing full parity with the original game's scripted behaviours.
+### Most common development builds
 
-### MOHAAjs (Web Client)
+| Goal | Recommended command |
+| --- | --- |
+| Linux host -> Linux debug engine | `./build.sh build --platform linux` |
+| Linux host -> Linux release engine | `./build.sh build --platform linux --release` |
+| Linux host -> Windows debug engine | `./build.sh build --platform windows` |
+| Linux host -> Windows release engine | `./build.sh build --platform windows --release` |
+| Linux host -> macOS debug engine | `./build.sh build --platform macos --arch x86_64` or `--arch arm64` |
+| Linux host -> macOS release engine | `./build.sh build --platform macos --release --arch x86_64` or `--arch arm64` |
+| Windows host -> Windows debug engine | `./build.sh build --platform windows` |
+| Windows host -> Windows release engine | `./build.sh build --platform windows --release` |
+| macOS host -> macOS debug engine | `./build.sh build --platform macos` |
+| macOS host -> macOS release engine | `./build.sh build --platform macos --release` |
+| Any supported host -> full web pipeline | `./build.sh web-full --asset-path /path/to/openmohaa-data` |
 
-A WebAssembly build produced via Emscripten. Key features:
+### Most common packaged exports
 
-- **IndexedDB asset cache** — `.pk3` files are fetched once and stored in the browser's IndexedDB for near-instant subsequent loads.
-- **On-demand streaming** — only the assets needed for the current map are downloaded.
-- **WebSocket relay** — since browsers cannot send raw UDP, a lightweight Node.js relay service bridges WebSocket connections to the game's UDP network stack.
-- **SharedArrayBuffer threading** — multi-threaded builds use `SharedArrayBuffer` for the engine's memory zones; the hosting server must send the required COOP/COEP HTTP headers.
+| Goal | Recommended command |
+| --- | --- |
+| Linux package | `./build.sh package --platform linux` |
+| Linux release package | `./build.sh package --platform linux --release` |
+| Windows package | `./build.sh package --platform windows` |
+| Windows release package | `./build.sh package --platform windows --release` |
+| macOS package | `./build.sh package --platform macos` |
+| macOS release package | `./build.sh package --platform macos --release` |
 
-### BSP World Renderer
+### Same flows via CMake
 
-Parses id Tech 3 BSP files and constructs Godot meshes for every surface type:
-
-- **Planar surfaces** — textured polygons with lightmaps.
-- **Triangle-soup surfaces** — arbitrary triangle lists (complex geometry).
-- **Bézier patch surfaces** — curved surfaces tessellated on the CPU.
-- **Terrain / deform surfaces** — MOHAA terrain grid with per-vertex colour.
-- **Brush sub-models** — doors, platforms, and other movers driven by server-side entity logic.
-- **Skybox** — environment cubemap extracted from sky shader definitions.
-
-Lightmaps (128 × 128 × RGB) are uploaded as `ImageTexture` resources and modulated onto surfaces through Godot's `StandardMaterial3D`.
-
-### TIKI Skeletal Model System
-
-TIKI (`.tik`) files describe character and prop models, combining:
-
-- **Bind-pose mesh** from SKD/SKC/SKB model files.
-- **Per-frame animation** from SKC animation channels.
-- **CPU skinning** — bone weights applied per vertex each frame via `TIKI_GetSkelAnimFrame()`.
-- **Per-surface shader assignment** using the real renderer's shader table.
-- **Multi-mesh LOD** — progressive collapse indices from `skelHeaderGame_t.lodIndex`.
-
----
-
-## 📋 Requirements
-
-### Desktop Development
-
-| Dependency | Version | Notes |
-| :--- | :--- | :--- |
-| **Godot** | 4.2+ | Must be in `PATH` as `godot` |
-| **GCC** or **Clang** | GCC 11+ / Clang 14+ | MSVC 2022+ on Windows |
-| **SCons** | Latest | `pip install scons` |
-| **Python** | 3.x | Required by SCons |
-| **Bison** | 3.x | Script parser generation |
-| **Flex** | 2.x | Script lexer generation |
-| **pkg-config** | Any | Used by build scripts |
-| **zlib** | System | Compression (usually pre-installed) |
-| **libdl** | System | Dynamic linking (Linux only) |
-
-### Game Assets (Runtime Only)
-
-You must own a legal copy of Medal of Honor: Allied Assault (and optionally its expansions). Copy the `.pk3` files to:
-
-```
-~/.local/share/openmohaa/main/        # Allied Assault:  Pak0.pk3 – Pak5.pk3
-~/.local/share/openmohaa/mainta/      # Spearhead:       pak0.pk3 – pak3.pk3
-~/.local/share/openmohaa/maintt/      # Breakthrough:    pak0.pk3 – pak3.pk3
-```
-
-Game assets are **not** included in this repository and are **not** required to compile the engine.
-
-### Web Hosting
-
-| Dependency | Version | Notes |
-| :--- | :--- | :--- |
-| **Node.js** | 18+ | WebSocket relay server |
-| **Docker & Docker Compose** | Any modern | Recommended for production |
-| **Emscripten SDK (emsdk)** | Latest | Required to build WASM |
-| **Web server** | Nginx / Apache | Must send COOP/COEP headers |
-
----
-
-## ⚡ Quick Start
-
-### 1. Clone the Repository
+If you prefer CMake, the equivalent pattern is:
 
 ```bash
-git clone --recursive https://github.com/elgansayer/opm-godot.git
-cd opm-godot
+cmake --preset <platform>-<variant>
+cmake --build build-cmake/<platform>-<variant> --target mohaa-engine
+cmake --build build-cmake/<platform>-<variant> --target mohaa-export
 ```
 
-> The `--recursive` flag initialises the `godot-cpp` submodule (branch 4.2).
-> The `openmohaa/` directory is regular tracked source, **not** a submodule.
+Examples:
 
-### 2. Install Build Tools (Linux example)
+```bash
+cmake --preset linux-debug
+cmake --build build-cmake/linux-debug --target mohaa-engine
+
+cmake --preset windows-release
+cmake --build build-cmake/windows-release --target mohaa-engine
+cmake --build --preset windows-release-export
+```
+
+## Requirements
+
+### Common tools
+
+These are the baseline tools used by the repository:
+
+| Tool | Why it is needed |
+| --- | --- |
+| `git` | Clone repo and submodules |
+| `python3` | SCons and helper scripts |
+| `scons` | Engine build |
+| `cmake` | Optional orchestration layer |
+| `ninja` | Required by the CMake presets |
+| `godot` | Run and export the Godot project |
+| `bison` | Parser generation when generated files are absent |
+| `flex` | Lexer generation when generated files are absent |
+
+### Linux host
+
+Recommended packages on Debian or Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev ninja-build cmake
-pip install scons
+sudo apt-get install -y \
+  build-essential \
+  bison \
+  flex \
+  cmake \
+  ninja-build \
+  pkg-config \
+  zlib1g-dev \
+  mingw-w64
+python3 -m pip install --user scons
 ```
 
-### 3. Build the GDExtension (no wrapper scripts)
+Additional tools by target:
+
+- Linux target: nothing extra beyond the base toolchain.
+- Windows target: `x86_64-w64-mingw32-g++` and `x86_64-w64-mingw32-objdump` in `PATH`.
+- macOS target: a working `osxcross` installation and `OSXCROSS_ROOT` set.
+- Web target: an installed Emscripten SDK, usually at `~/emsdk` or passed with `--emsdk`.
+
+### Windows host
+
+Use an MSYS2 `MINGW64` shell, not plain PowerShell or `cmd.exe`, because the repo scripts are Bash scripts.
+
+Install packages from MSYS2:
 
 ```bash
-cd openmohaa
-scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
-cp -f openmohaa/bin/libcgame.so project/bin/cgame.so
+pacman -S --needed \
+  base-devel \
+  git \
+  mingw-w64-x86_64-toolchain \
+  mingw-w64-x86_64-cmake \
+  mingw-w64-x86_64-ninja \
+  mingw-w64-x86_64-python \
+  mingw-w64-x86_64-bison \
+  mingw-w64-x86_64-flex
+python -m pip install --user scons
 ```
 
-This compiles `libopenmohaa.so` and `libcgame.so` and stages them in `project/bin/`.
+You also need:
 
-### 4. Add Game Assets
+- `godot` available in `PATH`.
+- A Bash shell capable of running `./build.sh` and the scripts under `scripts/`.
+
+### macOS host
+
+Install Xcode Command Line Tools first:
 
 ```bash
-mkdir -p ~/.local/share/openmohaa/main
-cp /path/to/mohaa/main/*.pk3 ~/.local/share/openmohaa/main/
-```
-
-### 5. Launch
-
-```bash
-cd project
-godot --editor
-```
-
-For Windows and macOS commands, see [Platform Build Guides](#-platform-build-guides).
-
----
-
-## 🖥️ Platform Build Guides
-
-### Linux
-
-```bash
-# Install dependencies (Ubuntu / Debian)
-sudo apt-get install -y build-essential gcc g++ bison flex pkg-config zlib1g-dev ninja-build cmake
-pip install scons
-
-# Build
-cd openmohaa
-scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
-cd ..
-
-# Stage for Godot project
-mkdir -p project/bin
-cp -f openmohaa/bin/libopenmohaa.so project/bin/libopenmohaa.so
-cp -f openmohaa/bin/libcgame.so project/bin/cgame.so
-
-# Output files
-#   openmohaa/bin/libopenmohaa.so   (~57 MB debug)
-#   openmohaa/bin/libcgame.so       (~4.7 MB)
-#   project/bin/libopenmohaa.so     (deployed copy)
-#   project/bin/cgame.so            (deployed copy)
-```
-
-To build a release (optimised, smaller) binary:
-
-```bash
-cd openmohaa
-scons platform=linux target=template_release -j"$(nproc)"
-```
-
-Optional Godot export without helper scripts:
-
-```bash
-cd project
-godot --headless --export-debug "Linux" ../dist/linux/debug/openmohaa.x86_64
-```
-
-### Windows
-
-Native build (MSYS2 MINGW64 shell):
-
-```bash
-# Install MSYS2 packages once (inside MSYS2 MINGW64 shell):
-# pacman -S --needed mingw-w64-x86_64-toolchain mingw-w64-x86_64-python winflexbison
-
-# Then build from repo root in that shell:
-cd openmohaa
-scons platform=windows target=template_debug dev_build=yes -j8
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/openmohaa.dll project/bin/openmohaa.dll
-cp -f openmohaa/bin/cgame.dll project/bin/cgame.dll
-```
-
-Cross-build from Linux using MinGW-w64:
-
-```bash
-sudo apt-get install -y mingw-w64 bison flex
-pip install scons
-
-cd openmohaa
-scons platform=windows target=template_debug dev_build=yes -j"$(nproc)"
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/openmohaa.dll project/bin/openmohaa.dll
-cp -f openmohaa/bin/cgame.dll project/bin/cgame.dll
-
-# MinGW runtime DLLs may be required at runtime in project/bin
-for dll in libstdc++-6.dll libgcc_s_seh-1.dll; do
-  p="$(x86_64-w64-mingw32-g++ -print-file-name="$dll")"
-  [ -f "$p" ] && cp -f "$p" project/bin/
-done
-```
-
-Optional Godot export without helper scripts:
-
-```powershell
-cd project
-godot --headless --export-debug "Windows Desktop" ..\dist\windows\debug\openmohaa.exe
-```
-
-### macOS (native)
-
-```bash
-# Install Xcode command-line tools and Homebrew dependencies once
 xcode-select --install
-brew install scons bison flex cmake ninja
+```
+
+Then install userland tools, for example with Homebrew:
+
+```bash
+brew install python scons cmake ninja bison flex
+```
+
+If Homebrew installs `bison` and `flex` outside the default shell `PATH`, export them before building:
+
+```bash
 export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
-
-# Build (use arch=universal by default, or arch=arm64 / arch=x86_64)
-cd openmohaa
-scons platform=macos target=template_debug arch=universal dev_build=yes -j"$(sysctl -n hw.ncpu)"
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/libopenmohaa.dylib project/bin/libopenmohaa.dylib
-cp -f openmohaa/bin/libcgame.dylib project/bin/cgame.dylib
-
-# Output: project/bin/libopenmohaa.dylib, project/bin/cgame.dylib
 ```
 
-Optional Godot export without helper scripts:
+## Game Assets
+
+Game assets are not included in this repository. They are only required at runtime, not for compilation, and the binaries must be able to see your existing MOHAA install through the engine's normal filesystem search paths.
+
+The game searches for data under three root path variables:
+
+- `fs_homedatapath`: user data root used for readable game content and writable runtime data.
+- `fs_basepath`: install/data root.
+- `fs_homepath`: user override root; if set manually it overrides the default home locations.
+
+Within those roots, the engine searches the game directories it is configured to use:
+
+- `main/` for Allied Assault.
+- `mainta/` for Spearhead.
+- `maintt/` for Breakthrough.
+- `fs_game/` first if you are running a mod.
+- `fs_basegame/` as an additional base game layer when set.
+
+In practice, that means your MOHAA data only needs to exist in a location the engine can reach through those roots. On Linux, this port commonly resolves data under `~/.local/share/openmohaa`, while config/state files use the home-path settings separately. You can also point the game at another install by passing startup cvars such as:
 
 ```bash
-cd project
-godot --headless --export-debug "macOS" ../dist/macos/debug/openmohaa.app
+godot --path project -- +set fs_basepath "/path/to/openmohaa-data"
+godot --path project -- +set fs_homedatapath "/path/to/openmohaa-data"
 ```
 
-### macOS (cross-compile from Linux)
+For the base game, the web pipeline still needs the full `pak0.pk3` through `pak6.pk3` set available under the chosen asset path's `main/` directory.
 
-Cross-compiling macOS binaries from Linux requires [osxcross](https://github.com/tpoechtrager/osxcross).
+## Quick Start
+
+### Clone the repository
 
 ```bash
-# Setup osxcross toolchain in your environment first
-export OSXCROSS_ROOT=/path/to/osxcross
-export PATH="$OSXCROSS_ROOT/target/bin:$PATH"
-
-# Build (pick one architecture per build)
-cd openmohaa
-scons platform=macos target=template_debug arch=x86_64 osxcross_sdk=darwin16 -j"$(nproc)"
-# or: arch=arm64
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/libopenmohaa.dylib project/bin/libopenmohaa.dylib
-cp -f openmohaa/bin/libcgame.dylib project/bin/cgame.dylib
+git clone --recursive https://github.com/elgansayer/mohaa-godot.git
+cd mohaa-godot
 ```
 
-> **Notes**
-> - `osxcross_sdk` defaults to `darwin16`; override with `osxcross_sdk=<your-sdk-tag>` if needed.
-> - If you have access to a Mac, a native build is simpler and more reliable.
-> - Without `OSXCROSS_ROOT` on Linux, macOS cross-builds fail.
+### Quick start with `build.sh`
 
-### Web / MOHAAjs (Emscripten/WASM)
+Linux native debug build:
 
 ```bash
-# Step 1 — install Emscripten SDK
-git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
-cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
-source ~/emsdk/emsdk_env.sh
-cd -
-
-# Step 2 — compile web wasm artefacts only (debug by default)
-cd openmohaa
-scons platform=web target=template_debug -j"$(nproc)"
-cd ..
-
-mkdir -p project/bin
-cp -f openmohaa/bin/libopenmohaa.wasm project/bin/libopenmohaa.wasm
-
-# Step 3 — compile optimised release wasm artefacts
-cd openmohaa
-scons platform=web target=template_release -j"$(nproc)"
-cd ..
-
-# Step 4 — run full web export + template asset pipeline
-cd project
-godot --headless --export-release "Web" ../dist/web/release/mohaa.html
-
-# output: dist/web/release/mohaa.html + related .js/.wasm/.pck
+./build.sh build --platform linux
 ```
 
-After building, host the `web/` directory with a server that sends the required security headers (see [Web Hosting & Docker](#-web-hosting--docker)).
+That will:
 
----
+- build the engine via `scripts/build-desktop.sh`
+- stage libraries into `project/bin/`
+- leave the Godot project ready to run locally
 
-## 🎮 Running the Game
+Then run a smoke test:
 
-### Linux (native)
+```bash
+./scripts/test.sh
+```
+
+Or launch the project manually:
+
+```bash
+godot --path project
+```
+
+### Quick start with CMake
+
+Linux native debug build:
+
+```bash
+cmake --preset linux-debug
+cmake --build --preset linux-debug-engine
+```
+
+Linux packaged export:
+
+```bash
+cmake --build --preset linux-debug-export
+```
+
+The CMake build presets are not symmetrical for every target, so read the [CMake Usage](#cmake-usage) section below before assuming that every platform has a `*-engine` shortcut preset.
+
+## CMake Usage
+
+The root CMake project is an orchestrator. It does not compile the engine directly; it defines custom targets that call the repository scripts.
+
+Key cache variables:
+
+| Variable | Values | Purpose |
+| --- | --- | --- |
+| `MOHAA_TARGET_PLATFORM` | `linux`, `windows`, `macos`, `web`, `android`, `ios` | Selects target platform |
+| `MOHAA_BUILD_VARIANT` | `debug`, `release` | Selects debug or release flow |
+| `MOHAA_ARCH` | target-specific | Architecture hint, mainly for macOS |
+| `MOHAA_EMSDK_DIR` | path | Emscripten SDK root for web builds |
+| `MOHAA_GODOT_EXPORT_PRESET` | preset name | Override Godot export preset |
+| `MOHAA_GODOT_EXPORT_OUTPUT` | path | Override export output path |
+
+Key CMake targets:
+
+| Target | What it does |
+| --- | --- |
+| `mohaa-engine` | Build and stage engine artefacts into `project/bin/` |
+| `mohaa-export` | Run the normal Godot export flow using artefacts already staged in `project/bin/`; for desktop targets this writes to `dist/<platform>/<variant>/` |
+| `mohaa-web-export` | Run the current full web pipeline via `scripts/build-web.sh`; today that produces the patched export in `web/` |
+| `mohaa-package` | Create archive from `dist/<platform>/<variant>/` |
+| `mohaa-sign-android` | Signing helper |
+| `mohaa-sign-ios` | Signing helper |
+
+### Configure presets
+
+Available configure presets live in `CMakePresets.json` and include:
+
+- `linux-debug`, `linux-release`
+- `windows-debug`, `windows-release`
+- `macos-debug`, `macos-release`
+- `web-debug`, `web-release`
+- `android-debug`, `android-release`
+- `ios-debug`, `ios-release`
+
+Important: Android and iOS presets exist in CMake, but they are not fully wired end-to-end in the same way as Linux, Windows, macOS, and Web. This README focuses on the desktop and web flows that are actually implemented.
+
+### Build presets
+
+Convenience build presets currently exist for:
+
+- Linux engine and export
+- Web engine and export
+- Windows export
+- macOS export
+- Android release export
+- iOS release export
+
+That means:
+
+- `cmake --build --preset linux-debug-engine` works.
+- `cmake --build --preset windows-debug-export` works.
+- There is no `windows-debug-engine` build preset today, so for that case you build the target explicitly from the configure tree.
+
+### Recommended CMake command patterns
+
+Linux target:
+
+```bash
+cmake --preset linux-debug
+cmake --build --preset linux-debug-engine
+cmake --build --preset linux-debug-export
+```
+
+If you want a one-shot package rather than a separate engine build and export, run:
+
+```bash
+cmake --build build-cmake/linux-debug --target mohaa-package
+```
+
+Windows target:
+
+```bash
+cmake --preset windows-debug
+cmake --build build-cmake/windows-debug --target mohaa-engine
+cmake --build --preset windows-debug-export
+```
+
+macOS target:
+
+```bash
+cmake --preset macos-debug
+cmake --build build-cmake/macos-debug --target mohaa-engine
+cmake --build --preset macos-debug-export
+```
+
+Web target:
+
+```bash
+cmake --preset web-debug
+cmake --build --preset web-debug-engine
+cmake --build --preset web-debug-export
+```
+
+If you want release builds, swap `debug` for `release`.
+
+## Platform Guides
+
+### Linux host -> Linux target
+
+This is the simplest native desktop build.
+
+Debug engine build with `build.sh`:
+
+```bash
+./build.sh build --platform linux
+```
+
+Release engine build with `build.sh`:
+
+```bash
+./build.sh build --platform linux --release
+```
+
+Debug engine build with CMake:
+
+```bash
+cmake --preset linux-debug
+cmake --build --preset linux-debug-engine
+```
+
+Release engine build with CMake:
+
+```bash
+cmake --preset linux-release
+cmake --build --preset linux-release-engine
+```
+
+Debug packaged export:
+
+```bash
+./build.sh package --platform linux
+```
+
+Release packaged export:
+
+```bash
+./build.sh package --platform linux --release
+```
+
+Debug packaged export with CMake:
+
+```bash
+cmake --build --preset linux-debug-engine
+cmake --build --preset linux-debug-export
+```
+
+Release packaged export with CMake:
+
+```bash
+cmake --preset linux-release
+cmake --build --preset linux-release-engine
+cmake --build --preset linux-release-export
+```
+
+### Linux host -> Windows target
+
+This path is explicitly supported by the repo scripts using MinGW-w64.
+
+Requirements:
+
+- `x86_64-w64-mingw32-g++` in `PATH`
+- `x86_64-w64-mingw32-objdump` in `PATH`
+- `godot` export templates installed if you want `.exe` exports
+
+Debug engine build with `build.sh`:
+
+```bash
+./build.sh build --platform windows
+```
+
+Release engine build with `build.sh`:
+
+```bash
+./build.sh build --platform windows --release
+```
+
+Debug engine build with CMake:
+
+```bash
+cmake --preset windows-debug
+cmake --build build-cmake/windows-debug --target mohaa-engine
+```
+
+Release engine build with CMake:
+
+```bash
+cmake --preset windows-release
+cmake --build build-cmake/windows-release --target mohaa-engine
+```
+
+Debug packaged export:
+
+```bash
+./build.sh package --platform windows
+```
+
+Release packaged export:
+
+```bash
+./build.sh package --platform windows --release
+```
+
+Debug packaged export with CMake:
+
+```bash
+cmake --build build-cmake/windows-debug --target mohaa-engine
+cmake --build --preset windows-debug-export
+```
+
+Release packaged export with CMake:
+
+```bash
+cmake --preset windows-release
+cmake --build build-cmake/windows-release --target mohaa-engine
+cmake --build --preset windows-release-export
+```
+
+What the scripts do for you:
+
+- build the Windows DLLs
+- stage `cgame.dll`
+- stage MinGW runtime DLLs such as `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, and `libwinpthread-1.dll` when found
+
+### Linux host -> macOS target
+
+This path is supported via `osxcross`.
+
+First, verify the toolchain:
+
+```bash
+./scripts/setup-macos-build.sh
+```
+
+If needed, generate a reusable shell snippet:
+
+```bash
+./scripts/configure-macos-cross-env.sh
+source scripts/env.macos-cross.sh
+```
+
+Then build a debug engine for Intel macOS:
+
+```bash
+./build.sh build --platform macos --arch x86_64
+```
+
+Or a debug engine for Apple Silicon:
+
+```bash
+./build.sh build --platform macos --arch arm64
+```
+
+Release engine examples:
+
+```bash
+./build.sh build --platform macos --release --arch x86_64
+./build.sh build --platform macos --release --arch arm64
+```
+
+Debug engine build with CMake:
+
+```bash
+cmake --preset macos-debug -DMOHAA_ARCH=x86_64
+cmake --build build-cmake/macos-debug --target mohaa-engine
+cmake --build --preset macos-debug-export
+```
+
+Release engine or export with CMake:
+
+```bash
+cmake --preset macos-release -DMOHAA_ARCH=x86_64
+cmake --build build-cmake/macos-release --target mohaa-engine
+cmake --build --preset macos-release-export
+```
+
+If you want a one-shot packaged build with CMake instead of separate steps:
+
+```bash
+cmake --build build-cmake/macos-debug --target mohaa-package
+```
+
+Or the release equivalent:
+
+```bash
+cmake --build build-cmake/macos-release --target mohaa-package
+```
+
+Notes:
+
+- `scripts/build-desktop.sh` auto-detects the `osxcross_sdk` tag if you do not pass one.
+- macOS signing and notarisation are separate concerns from building the unsigned app bundle.
+- A native macOS host is still the better place to do final signed macOS releases.
+
+### Windows host -> Windows target
+
+Use an MSYS2 `MINGW64` shell.
+
+Debug engine build with `build.sh`:
+
+```bash
+./build.sh build --platform windows
+```
+
+Release engine build with `build.sh`:
+
+```bash
+./build.sh build --platform windows --release
+```
+
+Debug engine build with CMake:
+
+```bash
+cmake --preset windows-debug
+cmake --build build-cmake/windows-debug --target mohaa-engine
+cmake --build --preset windows-debug-export
+```
+
+Release engine or export with CMake:
+
+```bash
+cmake --preset windows-release
+cmake --build build-cmake/windows-release --target mohaa-engine
+cmake --build --preset windows-release-export
+```
+
+Important details:
+
+- Run from a Bash-capable shell such as MSYS2 `MINGW64`.
+- The repository scripts are not written for MSVC-first workflows.
+- The current documented native Windows path is MinGW-based.
+
+### macOS host -> macOS target
+
+Debug engine build with `build.sh`:
+
+```bash
+./build.sh build --platform macos
+```
+
+Release engine build with `build.sh`:
+
+```bash
+./build.sh build --platform macos --release
+```
+
+Debug engine build with CMake:
+
+```bash
+cmake --preset macos-debug
+cmake --build build-cmake/macos-debug --target mohaa-engine
+cmake --build --preset macos-debug-export
+```
+
+Release engine or export with CMake:
+
+```bash
+cmake --preset macos-release
+cmake --build build-cmake/macos-release --target mohaa-engine
+cmake --build --preset macos-release-export
+```
+
+If you want a specific architecture, pass it through:
+
+```bash
+./build.sh build --platform macos --arch arm64
+./build.sh build --platform macos --arch x86_64
+```
+
+The Godot export preset is currently set up for a universal macOS export path in `project/export_presets.cfg`, while the engine build itself can be steered with `--arch`.
+
+### Web target
+
+Debug full web pipeline with `build.sh`:
+
+```bash
+./build.sh web-full --asset-path /path/to/openmohaa-data
+```
+
+Release full web pipeline with `build.sh`:
+
+```bash
+./build.sh web-full --release --asset-path /path/to/openmohaa-data
+```
+
+Debug web build with CMake:
+
+```bash
+cmake --preset web-debug
+cmake --build --preset web-debug-engine
+cmake --build --preset web-debug-export
+```
+
+Release web build with CMake:
+
+```bash
+cmake --preset web-release
+cmake --build --preset web-release-engine
+cmake --build --preset web-release-export
+```
+
+Notes:
+
+- `scripts/build-web.sh` expects an Emscripten SDK, defaulting to `~/emsdk`.
+- The full web flow is more than just a Godot export; it also applies web-specific JS patching and asset-preload logic.
+- The current full pipeline writes the patched browser build to `web/mohaa.html` and stages related files under `web/`.
+- Some surrounding scripts still expect `dist/web/<variant>/`, including `build.sh serve`, `scripts/build-web-docker.sh`, and `scripts/deploy.sh`, so that part of the web toolchain is not fully reconciled yet.
+
+## Running And Testing
+
+### Run the project locally
+
+Cross-platform manual run:
+
+```bash
+godot --path project
+```
+
+Linux helper launcher:
 
 ```bash
 ./launch.sh linux
 ```
 
-Advanced launch examples:
+Headless smoke test:
 
 ```bash
-# Start a specific map immediately
-./launch.sh linux "+map obj/obj1"
-
-# Enable cheats
-./launch.sh linux "+set cheats 1"
-
-# Play Spearhead expansion
-./launch.sh linux "+set com_target_game 1"
-
-# Play Breakthrough expansion
-./launch.sh linux "+set com_target_game 2"
-
-# Run as a dedicated server
-./launch.sh linux --dedicated --map=dm/mohdm1
-
-# Execute a startup config
-./launch.sh linux --exec=server.cfg
+./scripts/test.sh
 ```
 
-### Web
+Full test suite:
 
 ```bash
-./launch.sh web
-# Opens http://localhost:8086/mohaa.html in your browser
-
-# Pass CVars via URL query string
-./launch.sh web "+set com_target_game 1"
-# Opens http://localhost:8086/mohaa.html?com_target_game=1
+./scripts/test-all.sh
 ```
 
----
-
-## 🖧 Dedicated Server
-
-ShinMOHAA fully supports headless dedicated-server operation.
-
-### Starting a Dedicated Server (Native)
+Optional build-matrix sanity check:
 
 ```bash
-godot --path project/ --headless -- +set dedicated 1 +exec server.cfg
-```
-
-### Example `server.cfg`
-
-```
-set sv_hostname "My ShinMOHAA Server"
-set sv_maxclients 16
-set g_gametype 2        // Team Deathmatch
-set sv_pure 1           // Enforce pak integrity
-map dm/mohdm1
-```
-
-### Headless Smoke Test
-
-```bash
-cd project && godot --headless --quit-after 5000
-```
-
-### Web Preflight Test
-
-```bash
-# Verifies local web stack and map-loading prerequisites:
-# - nginx serves mohaa.html/mohaa.js/main/cgame.so
-# - COOP/COEP headers are present
-# - /assets/main JSON listing works
-# - pak0..pak6 are discoverable for server-side preload
-./scripts/test-web.sh
-```
-
-### Web Browser E2E Test
-
-```bash
-# Runs full browser automation with Playwright:
-# - starts/verifies local web stack
-# - opens mohaa.html with a startup map
-# - clicks through loader UI
-# - waits for deterministic map-loaded signal
-./scripts/test-web-e2e.sh
-```
-
-### Web Relay
-
-Browsers cannot send raw UDP packets, so web clients connect through a lightweight Node.js WebSocket relay:
-
-```bash
-cd relay
-npm install
-node mohaa_relay.js       # listens on ws://<host>:27910
-```
-
-The relay forwards WebSocket frames to/from the game server's UDP port (default `27910`).
-
----
-
-## 🐳 Web Hosting & Docker
-
-A `docker/docker-compose.yml` provides two deployment profiles for the web version.
-
-### Dev Profile (default)
-
-Mounts your local `web/` build output and game assets directly — no image build required.
-
-```bash
-# Set the path to your game assets directory
-export ASSET_PATH=/path/to/mohaa-assets
-
-# Start nginx + relay
-docker compose -f docker/docker-compose.yml up
-```
-
-The game is served at **http://localhost:8086/mohaa.html**.
-
-### Prod Profile (pre-built GHCR image)
-
-Pulls the latest pre-built image from the GitHub Container Registry — suitable for Portainer or cloud deployments.
-
-```bash
-export ASSET_PATH=/path/to/mohaa-assets
-docker compose -f docker/docker-compose.yml --profile prod up -d
-```
-
-### Required HTTP Headers
-
-For multi-threaded WASM builds (`SharedArrayBuffer`), your web server **must** send:
-
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-```
-
-The included `docker/web/nginx.conf` already sets these headers. If you use a different web server, add them to your virtual host configuration.
-
----
-
-## 🖥️ Display & Resolution Settings
-
-### Resolution Modes (`r_mode`)
-
-```
-set r_mode 3           // 640×480  (classic)
-set r_mode 4           // 800×600
-set r_mode 5           // 960×720
-set r_mode 6           // 1024×768
-set r_mode 7           // 1152×864
-set r_mode 8           // 1280×1024
-set r_mode 9           // 1600×1200
-set r_mode -1          // Custom resolution (use r_customwidth / r_customheight)
-set r_customwidth  1920
-set r_customheight 1080
-vid_restart
-```
-
-### Fullscreen Aspect Ratio (`r_fullscreenAspect`)
-
-| Value | Mode | Behaviour |
-| :---: | :--- | :--- |
-| **0** (default) | Keep | Renders at the `r_mode` resolution; adds pillarboxes or letterboxes to preserve the aspect ratio. Best for a retro feel. |
-| **1** | Stretch | Renders at the `r_mode` resolution and stretches to fill the display. May distort on aspect-ratio mismatches. |
-| **2** | Native | Ignores `r_mode` in fullscreen and renders at the display's native resolution. Sharpest image; HUD size is unaffected by `r_mode`. |
-
-**Recommended for widescreen monitors:**
-
-```
-set r_mode -1
-set r_customwidth  2560
-set r_customheight 1080
-set r_fullscreen 1
-vid_restart
-```
-
----
-
-## ⚙️ Configuration Reference
-
-All engine settings follow the original MOHAA CVar system. Commonly used CVars:
-
-### Graphics
-
-| CVar | Default | Description |
-| :--- | :--- | :--- |
-| `r_mode` | `6` | Resolution preset (see table above) |
-| `r_fullscreen` | `0` | `1` = fullscreen, `0` = windowed |
-| `r_customwidth` | `1600` | Width when `r_mode -1` |
-| `r_customheight` | `1024` | Height when `r_mode -1` |
-| `r_fullscreenAspect` | `0` | Fullscreen aspect handling (0/1/2) |
-| `r_picmip` | `1` | Texture MIP bias; higher = smaller textures |
-| `r_textureDetails` | `1` | Enables detail textures and conditional shader blocks |
-
-### Game / Server
-
-| CVar | Default | Description |
-| :--- | :--- | :--- |
-| `com_target_game` | `0` | Active game: `0`=AA, `1`=SH, `2`=BT |
-| `com_basegame` | `main` | Base game directory |
-| `sv_maxclients` | `20` | Maximum simultaneous players |
-| `sv_pure` | `1` | Enforce pak-file integrity on clients |
-| `g_gametype` | `0` | Game mode: `0`=FFA DM, `2`=TDM, `3`=RB, `4`=Obj, `5`=T-Obj |
-| `cheats` | `0` | Enable/disable cheat commands |
-
-### Network
-
-| CVar | Default | Description |
-| :--- | :--- | :--- |
-| `sv_hostname` | `ShinMOHAA` | Server name shown in browser |
-| `sv_master1`–`3` | Various | Master-server addresses for listing |
-| `cl_maxpackets` | `30` | Outgoing packet rate cap |
-| `rate` | `25000` | Client bandwidth cap (bytes/s) |
-
-### Audio
-
-| CVar | Default | Description |
-| :--- | :--- | :--- |
-| `s_volume` | `0.8` | Master sound volume |
-| `s_musicvolume` | `1.0` | Music volume |
-| `s_khz` | `22` | Sound sampling rate (11, 22, 44) |
-
----
-
-## 📜 Useful Scripts
-
-| Script | Description |
-| :--- | :--- |
-| `build.sh <target>` | Top-level entry point: `linux`, `windows`, `macos`, `web`, `deploy`, `clean`, `test` |
-| `launch.sh <platform>` | Launch helper: `linux` (native Godot) or `web` (Docker stack + browser) |
-| `scripts/build-desktop.sh <platform>` | Desktop SCons builder invoked by `build.sh` |
-| `scripts/build-web.sh [--release]` | Web pipeline (build + export + custom JS/HTML patching) |
-| `scripts/web_assets/render_html_template.py` | Renders `web/mohaa.html` from source templates in `scripts/web_assets/templates/` |
-| `scripts/export-godot.sh` | Thin Godot CLI export wrapper (platform + variant driven) |
-| `scripts/sign-android.sh` | Thin Android signing wrapper using `apksigner` if configured |
-| `scripts/sign-ios.sh` | Thin iOS signing/provisioning wrapper using `xcodebuild` if configured |
-| `scripts/package-build.sh` | Thin packaging wrapper for current build outputs |
-| `scripts/test-build-matrix.sh` | Cross-platform configure/build/export matrix validator |
-| `scripts/setup-macos-build.sh` | macOS/native or Linux/osxcross preflight checks |
-| `scripts/configure-macos-cross-env.sh` | Generates `scripts/env.macos-cross.sh` for repeatable cross-builds |
-| `scripts/deploy.sh` | Deploys web build + pushes image to GHCR / Portainer |
-| `scripts/test.sh` | Headless smoke-test wrapper |
-| `scripts/test-viewmodel.sh` | Viewmodel-specific smoke test |
-
----
-
-## 🔧 Development Workflow
-
-### CMake Usage
-
-The repository includes a root CMake orchestration layer (`CMakeLists.txt` + `CMakePresets.json`) with presets for Linux, Windows, macOS, Web, Android, and iOS.
-
-```bash
-# Configure and build Linux engine
-cmake --preset linux-debug
-cmake --build build-cmake/linux-debug --target opm-engine
-
-# Configure and build Windows engine
-cmake --preset windows-debug
-cmake --build build-cmake/windows-debug --target opm-engine
-
-# Configure and build macOS engine
-cmake --preset macos-debug
-cmake --build build-cmake/macos-debug --target opm-engine
-
-# Build export artefacts with the selected preset
-cmake --build build-cmake/linux-debug --target opm-export
-```
-
-Important: `opm-engine` currently calls the shell build scripts internally (`scripts/build-desktop.sh` / `scripts/build-web.sh`).
-
-If you want strictly script-free builds, use direct `scons` + direct `godot --export-*` commands from the platform sections above.
-
-### Platform Build Commands
-
-```bash
-# Linux
-cd openmohaa && scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"
-
-# Windows (native/cross, with proper toolchain in PATH)
-cd openmohaa && scons platform=windows target=template_debug dev_build=yes -j"$(nproc)"
-
-# macOS (native or osxcross)
-cd openmohaa && scons platform=macos target=template_debug arch=universal dev_build=yes -j"$(nproc)"
-
-# Web
-cd openmohaa && scons platform=web target=template_debug -j"$(nproc)"
-```
-
-### Matrix Validation
-
-```bash
-# Full matrix script (optional helper)
 ./scripts/test-build-matrix.sh
 ```
 
-### Typical Edit–Build–Test Cycle
+## Troubleshooting
+
+### `cmake --preset ...` works, but the build step fails immediately
+
+The configure step only writes a build tree. The actual build targets still call repository scripts, so you still need the underlying tools installed:
+
+- `bash`
+- `scons`
+- `godot`
+- `bison`
+- `flex`
+- target-specific toolchains such as MinGW-w64 or osxcross
+
+### Windows build from Windows fails in PowerShell or `cmd.exe`
+
+Use MSYS2 `MINGW64` or another Bash-capable shell. The scripts are `bash` scripts.
+
+### Windows export runs, but the exported `.exe` cannot start
+
+Make sure the companion DLLs were staged next to the export. The repo's export flow copies runtime companions such as:
+
+- `cgame.dll`
+- `libgcc_s_seh-1.dll`
+- `libstdc++-6.dll`
+- `libwinpthread-1.dll`
+
+### macOS build from Linux says `OSXCROSS_ROOT` is missing
+
+That is expected until osxcross is installed and exported. Use:
 
 ```bash
-# 1. Edit source in openmohaa/code/godot/ or openmohaa/code/renderergl1/ …
-
-# 2. Build (incremental — only changed files are recompiled)
-cd openmohaa && scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes
-
-# 3. Deploy binaries
-cp -f openmohaa/bin/libopenmohaa.so project/bin/
-cp -f openmohaa/bin/libcgame.so     project/bin/cgame.so
-
-# 4. Smoke test
-cd project && godot --headless --quit-after 5000
+export OSXCROSS_ROOT=/path/to/osxcross
+./scripts/setup-macos-build.sh
 ```
 
-### Forcing a Full Rebuild
+### Godot export fails even though the engine built successfully
 
-SCons caches dependency information in `.sconsign.dblite`. If you edit a widely-included header (e.g. `qcommon.h`), delete this file to force a full rebuild:
+Check:
 
-```bash
-rm openmohaa/.sconsign.dblite
-cd openmohaa && scons platform=linux target=template_debug -j"$(nproc)" dev_build=yes
-```
+- `godot` is in `PATH`
+- the matching export preset exists in `project/export_presets.cfg`
+- the required engine artefacts are present in `project/bin/`
 
-### Adding Engine Patches
+### The game starts but cannot find data files
 
-All modifications to upstream engine files **must** be wrapped in `#ifdef GODOT_GDEXTENSION` / `#endif` guards to keep the code mergeable with upstream OpenMoHAA:
+Verify the binaries can reach your MOHAA assets through the configured search roots in [Game Assets](#game-assets): `fs_homedatapath`, `fs_basepath`, and `fs_homepath`, with the expected game dirs such as `main/`, `mainta/`, or `maintt/`.
 
-```c
-#ifdef GODOT_GDEXTENSION
-    // Godot-specific behaviour: never block — Godot drives the frame rate.
-    NET_Sleep(0);
-    break;
-#else
-    // Original engine code untouched.
-    NET_Sleep(sv_timeout->value);
-    break;
-#endif
-```
+## Current Gaps
 
-### Active Preprocessor Defines
+These are the important current limitations of the build/docs surface:
 
-| Target | Defines |
-| :--- | :--- |
-| Main `.so` / `.dll` | `DEDICATED`, `GODOT_GDEXTENSION`, `GAME_DLL`, `BOTLIB`, `WITH_SCRIPT_ENGINE`, `APP_MODULE` |
-| `cgame.so` / `cgame.dll` | `CGAME_DLL` only |
-| Web WASM | Same as main `.so` + Emscripten defines |
+- Android and iOS appear in the root CMake presets, but they are not documented here as first-class end-to-end targets.
+- Native Windows is currently a MinGW/MSYS2-oriented path, not an MSVC-oriented path.
+- Native macOS cross-target desktop exports are not scripted for Windows or Linux targets from a macOS host.
+- `launch.sh` only supports `linux` and `web`; for Windows and macOS, run `godot --path project` directly.
+- The web pipeline output path is currently inconsistent: `scripts/build-web.sh` writes the patched export to `web/`, while `build.sh serve`, `scripts/build-web-docker.sh`, and `scripts/deploy.sh` still expect `dist/web/<variant>/`.
 
-### Adding New Godot-Side Features
+## Disclaimer And Licence
 
-When you need to expose engine state to `MoHAARunner.cpp` but cannot `#include` engine headers directly (macro/type collisions with `godot-cpp`), add a thin C accessor function:
+This project is licensed under the GNU General Public License v2.0. See `LICENSE`.
 
-1. Create or extend an accessor file in `openmohaa/code/godot/` (e.g. `godot_server_accessors.c`).
-2. Declare the function signature in a companion header.
-3. Call it from `MoHAARunner.cpp` via an `extern "C"` declaration.
+This repository does not include retail MOHAA assets. You must provide your own legal copy of the game data.
 
-Existing accessor files:
-
-| File | Purpose |
-| :--- | :--- |
-| `godot_server_accessors.c` | `sv.state`, `svs.mapName`, `svs.iNumClients` |
-| `godot_client_accessors.cpp` | `keyCatchers`, `in_guimouse`, `paused`, `SetGameInputMode` |
-| `godot_vfs_accessors.c` | `Godot_VFS_ReadFile` / `Godot_VFS_FreeFile` |
-| `godot_input_bridge.c` | Key/mouse → `Com_QueueEvent(SE_KEY/SE_MOUSE/SE_CHAR)` |
-| `godot_skel_model_accessors.cpp` | TIKI mesh extraction, bone preparation, CPU skinning |
-| `renderergl1/godot_shader_accessors.c` | Bridges real `shader_t` → `GodotShaderProps` |
-
----
-
-## ❓ Troubleshooting
-
-### Build Issues
-
-| Problem | Solution |
-| :--- | :--- |
-| `scons: command not found` | Run `pip install scons` (ensure Python is in `PATH`). |
-| `bison: command not found` | Install `bison` via your system package manager. |
-| `godot-cpp` headers missing | Run `git submodule update --init --recursive`. |
-| Stale object files cause link errors | Delete `openmohaa/.sconsign.dblite` and rebuild. |
-| macOS cross-compile fails without `OSXCROSS_ROOT` | Either build natively on macOS or set `OSXCROSS_ROOT`. |
-
-### Runtime Issues
-
-| Problem | Solution |
-| :--- | :--- |
-| **"Could not find any files in game directory"** | Ensure `.pk3` files are in `~/.local/share/openmohaa/main/`. |
-| **Black screen / no world** | Check that `Pak0.pk3`–`Pak5.pk3` are present and readable. |
-| **Crash on map load** | Verify game assets match the selected `com_target_game`. |
-| **Audio silent** | Confirm Godot's audio driver is initialised; check `s_volume`. |
-| **Wrong expansion loaded** | Set `com_target_game` to `0` (AA), `1` (SH), or `2` (BT). |
-
-### Web Issues
-
-| Problem | Solution |
-| :--- | :--- |
-| **`SharedArrayBuffer is not defined`** | The hosting server must send `COOP: same-origin` and `COEP: require-corp` headers. |
-| **WebSocket connection refused** | Ensure the Node.js relay (`relay/mohaa_relay.js`) is running and reachable. |
-| **`.pk3` files never load** | Check that `ASSET_PATH` is set and that the Docker volume mount is correct. |
-| **Blank page / JS errors** | Open the browser console; look for WASM instantiation failures. Ensure you are using a threaded export if `SharedArrayBuffer` is available. |
-| **Very slow first load** | Normal — `.pk3` files are being streamed and cached in IndexedDB. Subsequent loads are near-instant. |
-
-### Debugging Tips
-
-- Enable the in-engine console with the **tilde / grave** key (`` ` `` / `~`, same key on US keyboards) and run commands directly.
-- Add `+set developer 1` to the launch arguments for verbose engine logging.
-- Godot prints `print()` output from `Main.gd` to the editor console / `stdout`.
-- `console.log` in the repository root contains the most recent headless run output.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please read the guidelines below before opening a pull request.
-
-### Code Style
-
-- **Language:** British English (en-GB) in comments and documentation.
-- **C / C++:** Follow the existing style in each directory; `clang-format` is acceptable as a guide.
-- **Engine patches:** Wrap every change to upstream OpenMoHAA files in `#ifdef GODOT_GDEXTENSION`.
-- **No raw `malloc`/`free`** in new C++ code — prefer `std::unique_ptr`, `std::vector`, or `Z_Malloc`/`Z_Free` for engine-lifetime allocations.
-- **No custom parsers** — use the engine's `COM_ParseExt()`, `Q_stricmp()`, and related utilities rather than writing new string-processing code.
-- **No fallbacks or shortcuts** — aim for 1:1 parity with original MOHAA behaviour.
-
-### Workflow
-
-1. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`).
-2. Make your changes following the coding guidelines above.
-3. Verify the build compiles cleanly: `cd openmohaa && scons platform=linux target=template_debug dev_build=yes -j"$(nproc)"`.
-4. Run the smoke test: `cd project && godot --headless --quit-after 5000`.
-5. Open a pull request with a clear description of what changed and why.
-
-### Reporting Issues
-
-When reporting a bug please include:
-
-- The game version (`com_target_game`, expansion).
-- The build target (Linux / Windows / macOS / Web).
-- Steps to reproduce, including any console commands used.
-- The content of `console.log` (generated in the repository root on each run).
-
----
-
-## ⚖️ Disclaimer & Licence
-
-**Disclaimer:** This project is a non-commercial fan implementation. It is not affiliated with, endorsed by, or sponsored by Electronic Arts Inc. or 2015, Inc. "Medal of Honor: Allied Assault", "Spearhead", "Breakthrough", and related trademarks and assets are the intellectual property of their respective owners. You must own a legal copy of the game to use this software.
-
-**This repository does not include any game assets.** All `.pk3` files, textures, models, and sound files from the original game must be supplied by the end user.
-
-This project is licensed under the **GNU General Public License v2.0**. See [LICENSE](LICENSE) for the full text.
-
-Built with ❤️ for the MOHAA community.
+This is a non-commercial fan project and is not affiliated with or endorsed by Electronic Arts, the original MOHAA developers, or the OpenMoHAA project.

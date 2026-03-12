@@ -111,9 +111,9 @@ TOTAL_TESTS=0
 SCREENSHOT_COUNT=0
 
 if [[ -f "$LOG_FILE" ]]; then
-    FAIL_COUNT=$(grep -c '\[RES-TEST\] \[FAIL\]' "$LOG_FILE" 2>/dev/null) || FAIL_COUNT=0
-    PASS_COUNT=$(grep -c '\[RES-TEST\] \[PASS\]' "$LOG_FILE" 2>/dev/null) || PASS_COUNT=0
-    WARN_COUNT=$(grep -c '\[RES-TEST\].*WARN:' "$LOG_FILE" 2>/dev/null) || WARN_COUNT=0
+    FAIL_COUNT=$(grep -c 'ResolutionTest: .*\[FAIL\]' "$LOG_FILE" 2>/dev/null) || FAIL_COUNT=0
+    PASS_COUNT=$(grep -c 'ResolutionTest: .*\[PASS\]' "$LOG_FILE" 2>/dev/null) || PASS_COUNT=0
+    WARN_COUNT=$(grep -c 'ResolutionTest: .*WARN:' "$LOG_FILE" 2>/dev/null) || WARN_COUNT=0
     TOTAL_TESTS=$((FAIL_COUNT + PASS_COUNT))
 fi
 
@@ -163,16 +163,16 @@ echo ""
 # Show FAIL details
 if [[ "$FAIL_COUNT" -gt 0 ]]; then
     echo "--- FAIL details ---"
-    awk '/\[RES-TEST\] \[FAIL\]/ { print; if (++n == 20) exit }' "$LOG_FILE"
+    awk '/ResolutionTest: .*\[FAIL\]/ { print; if (++n == 20) exit }' "$LOG_FILE"
     echo ""
-    awk '/\[RES-TEST\].*FAIL:/ { print; if (++n == 20) exit }' "$LOG_FILE"
+    awk '/ResolutionTest: .*FAIL:/ { print; if (++n == 20) exit }' "$LOG_FILE"
     echo ""
 fi
 
 # Show WARN details
 if [[ "$WARN_COUNT" -gt 0 ]]; then
     echo "--- WARN details ---"
-    awk '/\[RES-TEST\].*WARN:/ { print; if (++n == 10) exit }' "$LOG_FILE"
+    awk '/ResolutionTest: .*WARN:/ { print; if (++n == 10) exit }' "$LOG_FILE"
     echo ""
 fi
 

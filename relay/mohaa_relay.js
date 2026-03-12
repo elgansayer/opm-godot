@@ -39,12 +39,12 @@ const wss = new WebSocketServer({
     maxPayload: 65536,
 });
 
-console.log(`[mohaa-relay] Listening on port ${RELAY_PORT}`);
-console.log(`[mohaa-relay] Web clients should set: +set net_ws_relay ws://<this-host>:${RELAY_PORT}`);
+console.log(`mohaa-relay: Listening on port ${RELAY_PORT}`);
+console.log(`mohaa-relay: Web clients should set: +set net_ws_relay ws://<this-host>:${RELAY_PORT}`);
 
 wss.on('connection', (ws, req) => {
     if (clientCount >= MAX_CLIENTS) {
-        console.warn('[mohaa-relay] Max clients reached, rejecting connection');
+        console.warn('mohaa-relay: Max clients reached, rejecting connection');
         ws.close(1013, 'Server full');
         return;
     }
@@ -54,7 +54,7 @@ wss.on('connection', (ws, req) => {
     const clientId = `${clientAddr}:${clientPort}`;
     clientCount++;
 
-    console.log(`[mohaa-relay] Client connected: ${clientId} (${clientCount}/${MAX_CLIENTS})`);
+    console.log(`mohaa-relay: Client connected: ${clientId} (${clientCount}/${MAX_CLIENTS})`);
 
     /* Each WebSocket client gets its own UDP socket for communication
        with game servers. This preserves per-client source port identity
@@ -64,7 +64,7 @@ wss.on('connection', (ws, req) => {
     let idleTimer = null;
 
     udp.on('error', (err) => {
-        console.error(`[mohaa-relay] UDP error for ${clientId}: ${err.message}`);
+        console.error(`mohaa-relay: UDP error for ${clientId}: ${err.message}`);
     });
 
     /* UDP -> WebSocket: when game server responds, forward to web client */
@@ -86,7 +86,7 @@ wss.on('connection', (ws, req) => {
         try {
             ws.send(Buffer.concat([header, msg]), { binary: true });
         } catch (err) {
-            console.error(`[mohaa-relay] WS send error for ${clientId}: ${err.message}`);
+            console.error(`mohaa-relay: WS send error for ${clientId}: ${err.message}`);
         }
     });
 
@@ -112,7 +112,7 @@ wss.on('connection', (ws, req) => {
 
         udp.send(payload, destPort, destIp, (err) => {
             if (err) {
-                console.error(`[mohaa-relay] UDP send to ${destIp}:${destPort} failed: ${err.message}`);
+                console.error(`mohaa-relay: UDP send to ${destIp}:${destPort} failed: ${err.message}`);
             }
         });
     });
@@ -122,32 +122,32 @@ wss.on('connection', (ws, req) => {
         if (idleTimer) clearInterval(idleTimer);
         try { udp.close(); } catch (e) { /* ignore */ }
         clientCount--;
-        console.log(`[mohaa-relay] Client disconnected: ${clientId} (${clientCount}/${MAX_CLIENTS})`);
+        console.log(`mohaa-relay: Client disconnected: ${clientId} (${clientCount}/${MAX_CLIENTS})`);
     };
 
     ws.on('close', cleanup);
     ws.on('error', (err) => {
-        console.error(`[mohaa-relay] WS error for ${clientId}: ${err.message}`);
+        console.error(`mohaa-relay: WS error for ${clientId}: ${err.message}`);
         cleanup();
     });
 
     /* Idle timeout: close UDP socket if no traffic for a while */
     idleTimer = setInterval(() => {
         if (Date.now() - lastActivity > UDP_IDLE_TIMEOUT_MS) {
-            console.log(`[mohaa-relay] Closing idle client ${clientId}`);
+            console.log(`mohaa-relay: Closing idle client ${clientId}`);
             ws.close(1000, 'Idle timeout');
         }
     }, 30000);
 });
 
 wss.on('error', (err) => {
-    console.error(`[mohaa-relay] Server error: ${err.message}`);
+    console.error(`mohaa-relay: Server error: ${err.message}`);
     process.exit(1);
 });
 
 /* Graceful shutdown */
 process.on('SIGINT', () => {
-    console.log('\n[mohaa-relay] Shutting down...');
+    console.log('\nmohaa-relay: Shutting down...');
     wss.clients.forEach((ws) => ws.close(1001, 'Server shutting down'));
     wss.close(() => process.exit(0));
 });

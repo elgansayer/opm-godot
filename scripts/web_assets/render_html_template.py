@@ -47,24 +47,30 @@ def main() -> int:
 
     # 3) Replace file picker CSS and HTML from template markers.
     src = remove_block_between_markers(src, "/* OPM_FILE_PICKER_CSS_START */", "/* OPM_FILE_PICKER_CSS_END */")
+    src = remove_block_between_markers(src, "/* MOHAA_FILE_PICKER_CSS_START */", "/* MOHAA_FILE_PICKER_CSS_END */")
     if "</style>" in src:
         src = src.replace("</style>", "\n" + picker_css + "\n</style>", 1)
 
     src = remove_block_between_markers(src, "<!-- OPM_FILE_PICKER_HTML_START -->", "<!-- OPM_FILE_PICKER_HTML_END -->")
+    src = remove_block_between_markers(src, "<!-- MOHAA_FILE_PICKER_HTML_START -->", "<!-- MOHAA_FILE_PICKER_HTML_END -->")
     # Legacy fallback: remove old ad-hoc loader block if still present.
-    src = re.sub(r'\s*<div id="opm-loader">.*?</div>\s*</div>\s*(?=\s*<script)', "\n", src, flags=re.DOTALL)
+    src = re.sub(r'\s*<div id="(?:opm|mohaa)-loader">.*?</div>\s*</div>\s*(?=\s*<script)', "\n", src, flags=re.DOTALL)
 
     script_tag = '<script src="mohaa.js"></script>'
     if script_tag in src:
         src = src.replace(script_tag, picker_html + "\n\t\t" + script_tag, 1)
 
     # 4) Replace boot sequence with template block.
-    boot_start_marker = "/* OPM_BOOT_START */"
-    boot_end_marker = "/* OPM_BOOT_END */"
-    s_idx = src.find(boot_start_marker)
-    e_idx = src.find(boot_end_marker, s_idx) if s_idx >= 0 else -1
-    if s_idx >= 0 and e_idx >= 0:
-        src = src[:s_idx] + boot_block + src[e_idx + len(boot_end_marker):]
+    boot_markers = [
+        ("/* MOHAA_BOOT_START */", "/* MOHAA_BOOT_END */"),
+        ("/* OPM_BOOT_START */", "/* OPM_BOOT_END */"),
+    ]
+    for start_marker, end_marker in boot_markers:
+        s_idx = src.find(start_marker)
+        e_idx = src.find(end_marker, s_idx) if s_idx >= 0 else -1
+        if s_idx >= 0 and e_idx >= 0:
+            src = src[:s_idx] + boot_block + src[e_idx + len(end_marker):]
+            break
     else:
         # First-time patch against vanilla Godot export block.
         first = src.find("setStatusMode('progress');")

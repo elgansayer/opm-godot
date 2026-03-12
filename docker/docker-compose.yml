@@ -18,7 +18,7 @@ services:
   # --- Dev: mount local files, no image build needed ---
   web:
     image: nginx:alpine
-    container_name: opm-godot-web
+    container_name: mohaa-godot-web
     ports:
       - "8086:80"
     environment:
@@ -31,8 +31,8 @@ services:
 
   # --- Prod: pre-built GHCR image (for Portainer / production) ---
   web-prod:
-    image: ghcr.io/elgansayer/opm-godot:latest
-    container_name: opm-godot-web
+    image: ghcr.io/elgansayer/mohaa-godot:latest
+    container_name: mohaa-godot-web
     profiles: [prod]
     ports:
       - "8086:80"
@@ -44,6 +44,6 @@ services:
 
   relay:
     build: ../relay
-    container_name: opm-godot-relay
+    container_name: mohaa-godot-relay
     network_mode: host
     restart: unless-stopped

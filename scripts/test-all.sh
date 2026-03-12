@@ -112,7 +112,7 @@ skip_test() {
 
 # ─── Step 0: Prerequisites ───
 echo "${BOLD}══════════════════════════════════════${RESET}"
-echo "${BOLD} opm-godot — Full Test Suite${RESET}"
+echo "${BOLD} mohaa-godot — Full Test Suite${RESET}"
 echo "${BOLD}══════════════════════════════════════${RESET}"
 echo "Repo:     $REPO_ROOT"
 echo "Map:      $MAP"

@@ -10,7 +10,7 @@ env:
   EMSDK_VERSION: "3.1.64"
   GODOT_VERSION: "4.2.2"
   REGISTRY: ghcr.io
-  IMAGE_NAME: elgansayer/opm-godot
+  IMAGE_NAME: elgansayer/mohaa-godot
 
 jobs:
   build-web:

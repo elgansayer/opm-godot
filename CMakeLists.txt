@@ -1,33 +1,33 @@
 cmake_minimum_required(VERSION 3.21)
-project(opm_godot_orchestrator VERSION 0.1.0 LANGUAGES NONE)
+project(mohaa_godot_orchestrator VERSION 0.1.0 LANGUAGES NONE)
 
 # ---------------------------------------------------------------------------
 # Variables
 # ---------------------------------------------------------------------------
-set(OPM_TARGET_PLATFORM "linux" CACHE STRING "Target platform (linux|windows|macos|web|android|ios)")
-set_property(CACHE OPM_TARGET_PLATFORM PROPERTY STRINGS linux windows macos web android ios)
+set(MOHAA_TARGET_PLATFORM "linux" CACHE STRING "Target platform (linux|windows|macos|web|android|ios)")
+set_property(CACHE MOHAA_TARGET_PLATFORM PROPERTY STRINGS linux windows macos web android ios)
 
-set(OPM_BUILD_VARIANT "debug" CACHE STRING "Build variant (debug|release)")
-set_property(CACHE OPM_BUILD_VARIANT PROPERTY STRINGS debug release)
+set(MOHAA_BUILD_VARIANT "debug" CACHE STRING "Build variant (debug|release)")
+set_property(CACHE MOHAA_BUILD_VARIANT PROPERTY STRINGS debug release)
 
-set(OPM_ASSET_PATH "" CACHE PATH "Optional game asset path for web workflows")
-set(OPM_EMSDK_DIR "$ENV{HOME}/emsdk" CACHE PATH "Path to emsdk root directory")
-set(OPM_GODOT_EXPORT_PRESET "" CACHE STRING "Override Godot export preset name")
-set(OPM_GODOT_EXPORT_OUTPUT "" CACHE STRING "Override Godot export output path")
-set(OPM_ARCH "" CACHE STRING "Architecture hint (macOS cross builds)")
+set(MOHAA_ASSET_PATH "" CACHE PATH "Optional game asset path for web workflows")
+set(MOHAA_EMSDK_DIR "$ENV{HOME}/emsdk" CACHE PATH "Path to emsdk root directory")
+set(MOHAA_GODOT_EXPORT_PRESET "" CACHE STRING "Override Godot export preset name")
+set(MOHAA_GODOT_EXPORT_OUTPUT "" CACHE STRING "Override Godot export output path")
+set(MOHAA_ARCH "" CACHE STRING "Architecture hint (macOS cross builds)")
 
-set(OPM_ROOT "${CMAKE_SOURCE_DIR}")
-set(OPM_SCRIPT_DIR "${OPM_ROOT}/scripts")
-set(OPM_DIST_DIR "${OPM_ROOT}/dist/${OPM_TARGET_PLATFORM}/${OPM_BUILD_VARIANT}")
-set(OPM_SHELL "bash")
+set(MOHAA_ROOT "${CMAKE_SOURCE_DIR}")
+set(MOHAA_SCRIPT_DIR "${MOHAA_ROOT}/scripts")
+set(MOHAA_DIST_DIR "${MOHAA_ROOT}/dist/${MOHAA_TARGET_PLATFORM}/${MOHAA_BUILD_VARIANT}")
+set(MOHAA_SHELL "bash")
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
-function(opm_add_script_target name)
+function(mohaa_add_script_target name)
     cmake_parse_arguments(ARG "" "WORKING_DIRECTORY" "COMMAND" ${ARGN})
     if(NOT ARG_WORKING_DIRECTORY)
-        set(ARG_WORKING_DIRECTORY "${OPM_ROOT}")
+        set(ARG_WORKING_DIRECTORY "${MOHAA_ROOT}")
     endif()
     add_custom_target(${name}
         COMMAND ${ARG_COMMAND}
@@ -40,99 +40,99 @@ endfunction()
 # ---------------------------------------------------------------------------
 # 1) Engine build
 # ---------------------------------------------------------------------------
-if(OPM_TARGET_PLATFORM STREQUAL "linux" OR OPM_TARGET_PLATFORM STREQUAL "windows" OR OPM_TARGET_PLATFORM STREQUAL "macos")
-    if(OPM_BUILD_VARIANT STREQUAL "release")
+if(MOHAA_TARGET_PLATFORM STREQUAL "linux" OR MOHAA_TARGET_PLATFORM STREQUAL "windows" OR MOHAA_TARGET_PLATFORM STREQUAL "macos")
+    if(MOHAA_BUILD_VARIANT STREQUAL "release")
         set(_variant_args "target=template_release")
     else()
         set(_variant_args "target=template_debug")
     endif()
 
-    set(_desktop_args "${OPM_TARGET_PLATFORM}" "${_variant_args}")
-    if(OPM_ARCH)
-        list(APPEND _desktop_args "arch=${OPM_ARCH}")
+    set(_desktop_args "${MOHAA_TARGET_PLATFORM}" "${_variant_args}")
+    if(MOHAA_ARCH)
+        list(APPEND _desktop_args "arch=${MOHAA_ARCH}")
     endif()
 
-    opm_add_script_target(opm-engine
-        COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/build-desktop.sh" ${_desktop_args}
+    mohaa_add_script_target(mohaa-engine
+        COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/build-desktop.sh" ${_desktop_args}
     )
-elseif(OPM_TARGET_PLATFORM STREQUAL "web")
-    if(OPM_BUILD_VARIANT STREQUAL "release")
+elseif(MOHAA_TARGET_PLATFORM STREQUAL "web")
+    if(MOHAA_BUILD_VARIANT STREQUAL "release")
         set(_web_variant "--release")
     else()
         set(_web_variant "--debug")
     endif()
 
-    opm_add_script_target(opm-engine
-        COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/build-web.sh" "--build-only" "${_web_variant}" "--emsdk" "${OPM_EMSDK_DIR}"
+    mohaa_add_script_target(mohaa-engine
+        COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/build-web.sh" "--build-only" "${_web_variant}" "--emsdk" "${MOHAA_EMSDK_DIR}"
     )
 else()
-    opm_add_script_target(opm-engine
-        COMMAND "${CMAKE_COMMAND}" -E echo "Engine build for ${OPM_TARGET_PLATFORM} is not wired yet."
+    mohaa_add_script_target(mohaa-engine
+        COMMAND "${CMAKE_COMMAND}" -E echo "Engine build for ${MOHAA_TARGET_PLATFORM} is not wired yet."
     )
 endif()
 
 # ---------------------------------------------------------------------------
 # 2) Godot export → dist/<platform>/<variant>/
 # ---------------------------------------------------------------------------
-set(_export_args "--platform" "${OPM_TARGET_PLATFORM}" "--variant" "${OPM_BUILD_VARIANT}")
-if(OPM_GODOT_EXPORT_PRESET)
-    list(APPEND _export_args "--preset" "${OPM_GODOT_EXPORT_PRESET}")
+set(_export_args "--platform" "${MOHAA_TARGET_PLATFORM}" "--variant" "${MOHAA_BUILD_VARIANT}")
+if(MOHAA_GODOT_EXPORT_PRESET)
+    list(APPEND _export_args "--preset" "${MOHAA_GODOT_EXPORT_PRESET}")
 endif()
-if(OPM_GODOT_EXPORT_OUTPUT)
-    list(APPEND _export_args "--output" "${OPM_GODOT_EXPORT_OUTPUT}")
+if(MOHAA_GODOT_EXPORT_OUTPUT)
+    list(APPEND _export_args "--output" "${MOHAA_GODOT_EXPORT_OUTPUT}")
 endif()
 
-opm_add_script_target(opm-export
-    COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/export-godot.sh" ${_export_args}
+mohaa_add_script_target(mohaa-export
+    COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/export-godot.sh" ${_export_args}
 )
 
-if(OPM_TARGET_PLATFORM STREQUAL "web")
-    add_dependencies(opm-export opm-engine)
+if(MOHAA_TARGET_PLATFORM STREQUAL "web")
+    add_dependencies(mohaa-export mohaa-engine)
 endif()
 
 # ---------------------------------------------------------------------------
 # 3) Full web pipeline (engine + export + JS patches)
 # ---------------------------------------------------------------------------
-if(OPM_TARGET_PLATFORM STREQUAL "web")
+if(MOHAA_TARGET_PLATFORM STREQUAL "web")
     set(_web_full_args)
-    if(OPM_BUILD_VARIANT STREQUAL "release")
+    if(MOHAA_BUILD_VARIANT STREQUAL "release")
         list(APPEND _web_full_args "--release")
     else()
         list(APPEND _web_full_args "--debug")
     endif()
-    list(APPEND _web_full_args "--emsdk" "${OPM_EMSDK_DIR}")
-    if(OPM_ASSET_PATH)
-        list(APPEND _web_full_args "--asset-path" "${OPM_ASSET_PATH}")
+    list(APPEND _web_full_args "--emsdk" "${MOHAA_EMSDK_DIR}")
+    if(MOHAA_ASSET_PATH)
+        list(APPEND _web_full_args "--asset-path" "${MOHAA_ASSET_PATH}")
     endif()
 
-    opm_add_script_target(opm-web-export
-        COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/build-web.sh" ${_web_full_args}
+    mohaa_add_script_target(mohaa-web-export
+        COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/build-web.sh" ${_web_full_args}
     )
 endif()
 
 # ---------------------------------------------------------------------------
 # 4) Signing / packaging
 # ---------------------------------------------------------------------------
-opm_add_script_target(opm-sign-android
-    COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/sign-android.sh"
+mohaa_add_script_target(mohaa-sign-android
+    COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/sign-android.sh"
 )
 
-opm_add_script_target(opm-sign-ios
-    COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/sign-ios.sh"
+mohaa_add_script_target(mohaa-sign-ios
+    COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/sign-ios.sh"
 )
 
-opm_add_script_target(opm-package
-    COMMAND "${OPM_SHELL}" "${OPM_SCRIPT_DIR}/package-build.sh" "--platform" "${OPM_TARGET_PLATFORM}" "--variant" "${OPM_BUILD_VARIANT}"
+mohaa_add_script_target(mohaa-package
+    COMMAND "${MOHAA_SHELL}" "${MOHAA_SCRIPT_DIR}/package-build.sh" "--platform" "${MOHAA_TARGET_PLATFORM}" "--variant" "${MOHAA_BUILD_VARIANT}"
 )
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 message(STATUS "Configured OpenMoHAA/Godot orchestrator")
-message(STATUS "  Platform = ${OPM_TARGET_PLATFORM}")
-message(STATUS "  Variant  = ${OPM_BUILD_VARIANT}")
-message(STATUS "  Dist     = ${OPM_DIST_DIR}")
-message(STATUS "  Targets: opm-engine, opm-export, opm-package, opm-sign-android, opm-sign-ios")
-if(OPM_TARGET_PLATFORM STREQUAL "web")
-    message(STATUS "  Additional: opm-web-export")
+message(STATUS "  Platform = ${MOHAA_TARGET_PLATFORM}")
+message(STATUS "  Variant  = ${MOHAA_BUILD_VARIANT}")
+message(STATUS "  Dist     = ${MOHAA_DIST_DIR}")
+message(STATUS "  Targets: mohaa-engine, mohaa-export, mohaa-package, mohaa-sign-android, mohaa-sign-ios")
+if(MOHAA_TARGET_PLATFORM STREQUAL "web")
+    message(STATUS "  Additional: mohaa-web-export")
 endif()

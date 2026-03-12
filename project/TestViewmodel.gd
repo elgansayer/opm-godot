@@ -8,18 +8,11 @@
 ##   2. Wait for map_loaded signal
 ##   3. Give MP44 (has "mp44clip" surface for reload NODRAW test)
 ##   4. Fire until magazine empty → automatic reload
-##   5. Observe [VIEWMODEL-VALIDATE] and [FPS-DIAG] logs from C++ side
+##   5. Run scripted fire/reload cycles
 ##   6. Exit with code 0 (pass) or 1 (fail)
 ##
-## The C++ MoHAARunner emits these structured log lines each frame
-## for every FPS entity (RF_FIRST_PERSON | RF_DEPTHHACK):
-##   [VIEWMODEL-VALIDATE] FAIL ...   — test failure detected
-##   [VIEWMODEL-VALIDATE] WARN ...   — potential issue
-##   [VIEWMODEL-VALIDATE] INFO ...   — periodic health summary
-##   [FPS-DIAG] CHANGE ...           — surface state transition
-##
-## The bash wrapper (scripts/test-viewmodel.sh) captures stdout and
-## greps for FAIL lines to determine pass/fail.
+## The bash wrapper (scripts/test-viewmodel.sh) captures ViewmodelTest: lines
+## and uses this scene's final result banner to determine pass/fail.
 
 extends Node
 
@@ -38,9 +31,9 @@ var warn_count := 0
 var info_count := 0
 
 func _ready():
-	print("[TEST] ======================================")
-	print("[TEST] TestViewmodel automated regression test")
-	print("[TEST] ======================================")
+	print("ViewmodelTest: ======================================")
+	print("ViewmodelTest: TestViewmodel automated regression test")
+	print("ViewmodelTest: ======================================")
 
 	# Parse user args (after --)
 	for arg in OS.get_cmdline_user_args():
@@ -49,17 +42,17 @@ func _ready():
 		elif arg.begins_with("--duration="):
 			test_duration = float(arg.substr(11))
 
-	print("[TEST] Map: ", test_map)
-	print("[TEST] Duration limit: ", test_duration, "s")
+	print("ViewmodelTest: Map: ", test_map)
+	print("ViewmodelTest: Duration limit: ", test_duration, "s")
 
 	if not ClassDB.class_exists("MoHAARunner"):
-		printerr("[TEST] CRITICAL: MoHAARunner class not found — GDExtension not loaded!")
+		printerr("ViewmodelTest: CRITICAL: MoHAARunner class not found — GDExtension not loaded!")
 		get_tree().quit(1)
 		return
 
 	runner = ClassDB.instantiate("MoHAARunner")
 	if not runner:
-		printerr("[TEST] CRITICAL: Could not instantiate MoHAARunner!")
+		printerr("ViewmodelTest: CRITICAL: Could not instantiate MoHAARunner!")
 		get_tree().quit(1)
 		return
 
@@ -81,17 +74,17 @@ func _ready():
 	runner.engine_error.connect(_on_engine_error)
 	runner.map_loaded.connect(_on_map_loaded)
 	add_child(runner)
-	print("[TEST] Engine starting...")
+	print("ViewmodelTest: Engine starting...")
 
 var map_load_count := 0
 
 func _on_engine_error(message: String):
-	printerr("[TEST] ENGINE ERROR: ", message)
+	printerr("ViewmodelTest: ENGINE ERROR: ", message)
 	fail_count += 1
 
 func _on_map_loaded(map_name: String):
 	map_load_count += 1
-	print("[TEST] Signal: map_loaded -> ", map_name, " (load #", map_load_count, ")")
+	print("ViewmodelTest: Signal: map_loaded -> ", map_name, " (load #", map_load_count, ")")
 	map_loaded = true
 	state = "map_loaded"
 	timer = 0.0
@@ -103,7 +96,7 @@ func _process(delta):
 	match state:
 		"init":
 			if timer > 25.0 and not map_loaded:
-				printerr("[TEST] FAIL: Map did not load within 25s")
+				printerr("ViewmodelTest: FAIL: Map did not load within 25s")
 				_finish_test(false, "map_load_timeout")
 
 		"map_loaded":
@@ -112,9 +105,9 @@ func _process(delta):
 			# then also give the MP44 specifically (in case giveall.scr doesn't include it).
 			# "give all" provides full ammo reserves so reload can work.
 			if timer > 2.0 and not weapon_given:
-				print("[TEST] Giving all weapons+ammo...")
+				print("ViewmodelTest: Giving all weapons+ammo...")
 				runner.execute_command("give all")
-				print("[TEST] Also giving MP44 (weapons/mp44.tik)...")
+				print("ViewmodelTest: Also giving MP44 (weapons/mp44.tik)...")
 				runner.execute_command("give weapons/mp44.tik")
 				weapon_given = true
 				timer = 0.0
@@ -125,7 +118,7 @@ func _process(delta):
 			# Then explicitly select the MP44 via "use" (not weapnext, which
 			# cycles to whichever weapon give-all last equipped).
 			if timer > 1.0:
-				print("[TEST] Selecting MP44 via 'use weapons/mp44.tik'...")
+				print("ViewmodelTest: Selecting MP44 via 'use weapons/mp44.tik'...")
 				runner.execute_command("use weapons/mp44.tik")
 				timer = 0.0
 				state = "weapon_given"
@@ -133,7 +126,7 @@ func _process(delta):
 		"weapon_given":
 			# Wait for weapon equip animation, then fire
 			if timer > 3.0 and not fire_started:
-				print("[TEST] +attack (firing to empty magazine)...")
+				print("ViewmodelTest: +attack (firing to empty magazine)...")
 				runner.execute_command("+attack")
 				fire_started = true
 				fire_timer = 0.0
@@ -144,23 +137,23 @@ func _process(delta):
 			# Fire for 8s — MP44 has 30-round clip, ~5 rounds/sec = empties in 6s, then auto-reload
 			if fire_timer > 8.0:
 				runner.execute_command("-attack")
-				print("[TEST] -attack (stopped firing, forcing reload)...")
+				print("ViewmodelTest: -attack (stopped firing, forcing reload)...")
 				runner.execute_command("reload")
-				print("[TEST] Sent 'reload' console command")
+				print("ViewmodelTest: Sent 'reload' console command")
 				state = "reload_wait"
 				timer = 0.0
 
 		"reload_wait":
 			# Observe reload animation for 5s
 			if timer > 5.0:
-				print("[TEST] Post-reload observation...")
+				print("ViewmodelTest: Post-reload observation...")
 				state = "post_reload"
 				timer = 0.0
 
 		"post_reload":
 			# Second fire–reload cycle for confirmation
 			if timer > 2.0:
-				print("[TEST] Second fire cycle...")
+				print("ViewmodelTest: Second fire cycle...")
 				runner.execute_command("+attack")
 				state = "firing2"
 				fire_timer = 0.0
@@ -169,7 +162,7 @@ func _process(delta):
 			fire_timer += delta
 			if fire_timer > 8.0:
 				runner.execute_command("-attack")
-				print("[TEST] Forcing second reload...")
+				print("ViewmodelTest: Forcing second reload...")
 				runner.execute_command("reload")
 				state = "final_observe"
 				timer = 0.0
@@ -180,20 +173,19 @@ func _process(delta):
 
 	# Global timeout
 	if total_timer > test_duration and state != "done":
-		print("[TEST] Duration limit reached, finishing.")
+		print("ViewmodelTest: Duration limit reached, finishing.")
 		_finish_test(fail_count == 0, "timeout")
 
 func _finish_test(passed: bool, reason: String):
 	state = "done"
 	print("")
 	print("=" .repeat(60))
-	print("[TEST] VIEWMODEL TEST RESULTS")
+	print("ViewmodelTest: VIEWMODEL TEST RESULTS")
 	print("=" .repeat(60))
-	print("[TEST] Result: ", "PASS" if passed else "FAIL")
-	print("[TEST] Reason: ", reason)
-	print("[TEST] Duration: %.1fs" % total_timer)
-	print("[TEST] Note: Check stdout for [VIEWMODEL-VALIDATE] and [FPS-DIAG] lines")
-	print("[TEST] FAIL count from C++ validation: checked by bash wrapper")
+	print("ViewmodelTest: Result: ", "PASS" if passed else "FAIL")
+	print("ViewmodelTest: Reason: ", reason)
+	print("ViewmodelTest: Duration: %.1fs" % total_timer)
+	print("ViewmodelTest: Note: Wrapper checks this result banner and ViewmodelTest: FAIL lines")
 	print("=" .repeat(60))
 
 	# Give the engine a couple of frames to flush before quitting

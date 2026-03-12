@@ -1,9 +1,9 @@
 {
-  "name": "opm-web-e2e",
+  "name": "mohaa-web-e2e",
   "private": true,
   "type": "module",
   "version": "1.0.0",
-  "description": "Browser E2E tests for opm-godot web runtime",
+  "description": "Browser E2E tests for mohaa-godot web runtime",
   "dependencies": {
     "playwright": "^1.52.0"
   }

@@ -84,14 +84,14 @@ for variant in "${VARIANTS[@]}"; do
     for platform in linux windows macos web android ios; do
         preset="${platform}-${variant}"
         engine_skipped=0
-        run_step "configure ${preset}" "cmake --preset ${preset} -DOPM_BUILD_VARIANT=${variant}"
+        run_step "configure ${preset}" "cmake --preset ${preset} -DMOHAA_BUILD_VARIANT=${variant}"
 
         # Engine target is wired for linux/windows/macos/web; android/ios are placeholder no-ops for now.
         if [[ "$platform" == "macos" && "$(uname -s)" != "Darwin" && -z "${OSXCROSS_ROOT:-}" ]]; then
             run_skip "engine ${preset}" "OSXCROSS_ROOT not set on non-macOS host"
             engine_skipped=1
         else
-            run_step "engine ${preset}" "cmake --build build-cmake/${preset} --target opm-engine"
+            run_step "engine ${preset}" "cmake --build build-cmake/${preset} --target mohaa-engine"
         fi
 
         # Export target is always wired.
@@ -101,11 +101,11 @@ for variant in "${VARIANTS[@]}"; do
         elif [[ -z "$export_preset_name" ]] || ! has_export_preset "$export_preset_name"; then
             run_skip "export ${preset}" "no '$export_preset_name' preset in project/export_presets.cfg"
         else
-            run_step "export ${preset}" "cmake --build build-cmake/${preset} --target opm-export"
+            run_step "export ${preset}" "cmake --build build-cmake/${preset} --target mohaa-export"
         fi
 
         if [[ "$platform" == "web" && "$RUN_WEB_FULL" -eq 1 ]]; then
-            run_step "web full export ${preset}" "cmake --build build-cmake/${preset} --target opm-web-export"
+            run_step "web full export ${preset}" "cmake --build build-cmake/${preset} --target mohaa-web-export"
         fi
     done
 done

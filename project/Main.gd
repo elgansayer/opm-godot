@@ -12,7 +12,6 @@ var launch_map = ""
 var exec_cfg = ""
 var last_state_logged = -999
 var web_net_tweaks_applied = false
-var web_auto_map_pending = false
 
 func _ready():
 	print("Main: Script started.")
@@ -23,7 +22,7 @@ func _ready():
 	print("Main: 'MoHAARunner' found in ClassDB.")
 	runner = ClassDB.instantiate("MoHAARunner")
 
-	# Parse command-line args:
+	# Parse command-line args (after --):
 	#   --dedicated      Launch as dedicated server
 	#   --client         Force client mode
 	#   --map=<name>     Startup map override
@@ -32,44 +31,42 @@ func _ready():
 	#   --dev / --nodev  Toggle developer mode
 	#   +connect <ip>    Connect to a server (forwarded to engine)
 	#   +<cmd> [args]    Any Quake-style +command forwarded to the engine
-	# Both forms work (with or without -- separator):
-	#   ./openmohaa.x86_64 +set com_target_game 1
-	#   ./openmohaa.x86_64 -- +set com_target_game 1
-	# We use get_cmdline_args() which includes all args; the parsing loop
-	# only matches known patterns so unknown Godot flags are safely skipped.
-	var user_args = OS.get_cmdline_args()
+	var user_args = OS.get_cmdline_user_args()
 	var dev_mode = true
 	var extra_engine_cmds = "" # raw +command args forwarded to engine
-	var i = 0
-	while i < user_args.size():
-		var arg = String(user_args[i])
+	var in_plus_cmd = false # true while collecting args for a +command
+	for arg in user_args:
 		if arg == "--dedicated":
 			launch_dedicated = true
+			in_plus_cmd = false
 		elif arg == "--client":
 			launch_dedicated = false
+			in_plus_cmd = false
 		elif arg.begins_with("--map="):
 			launch_map = arg.substr(6)
+			in_plus_cmd = false
 		elif arg.begins_with("--exec="):
 			exec_cfg = arg.substr(7)
+			in_plus_cmd = false
 		elif arg == "--server":
 			exec_cfg = "server.cfg"
+			in_plus_cmd = false
 		elif arg == "--nodev":
 			dev_mode = false
+			in_plus_cmd = false
 		elif arg == "--dev":
 			dev_mode = true
+			in_plus_cmd = false
 		elif arg.begins_with("+"):
-			# Quake-style +command: append the command and all contiguous
-			# non-flag args until the next +command/--flag token.
+			# Quake-style +command -- forward directly to engine
+			# e.g. "+connect" "127.0.0.1" arrives as two separate user args
 			extra_engine_cmds += " " + arg
-			var j = i + 1
-			while j < user_args.size():
-				var next_arg = String(user_args[j])
-				if next_arg.begins_with("+") or next_arg.begins_with("--"):
-					break
-				extra_engine_cmds += " " + next_arg
-				j += 1
-			i = j - 1
-		i += 1
+			in_plus_cmd = true
+		elif in_plus_cmd:
+			# Value-arg following a +command (e.g. the IP in "+connect <ip>")
+			extra_engine_cmds += " " + arg
+			# A new +command resets this; bare args "consume" one token only
+			in_plus_cmd = false
 
 	# On web: also read URL query params
 	# e.g. http://localhost:8086/mohaa.html\?map\=dm/mohdm1
@@ -133,16 +130,13 @@ func _ready():
 		if extra_engine_cmds != "":
 			startup_args += extra_engine_cmds
 
-		if OS.has_feature("web") and not launch_dedicated and launch_map != "":
-			web_auto_map_pending = true
-
 		runner.set_startup_args(startup_args)
 		if OS.has_feature("web") and Engine.has_singleton("JavaScriptBridge"):
 			var js = Engine.get_singleton("JavaScriptBridge")
 			if js:
 				# Expose effective startup command line for browser-side diagnostics.
-				js.eval("window.__opmStartupArgs = " + JSON.stringify(startup_args) + ";")
-				js.eval("window.__opmLaunchMap = " + JSON.stringify(launch_map) + ";")
+				js.eval("window.__mohaaStartupArgs = " + JSON.stringify(startup_args) + ";")
+				js.eval("window.__mohaaLaunchMap = " + JSON.stringify(launch_map) + ";")
 		runner.name = "MoHAARunnerInstance"
 		add_child(runner)
 		print("Main: MoHAARunner added to tree.")
@@ -215,7 +209,7 @@ func _on_engine_error(message: String):
 		var js = Engine.get_singleton("JavaScriptBridge")
 		if js:
 			# Expose engine init/runtime failures to browser E2E harness.
-			js.eval("window.__opmEngineError = " + JSON.stringify(message) + ";")
+			js.eval("window.__mohaaEngineError = " + JSON.stringify(message) + ";")
 
 func _on_map_loaded(map_name: String):
 	print("Main: SIGNAL map_loaded -> ", map_name)
@@ -223,7 +217,7 @@ func _on_map_loaded(map_name: String):
 		var js = Engine.get_singleton("JavaScriptBridge")
 		if js:
 			# Expose map-load state for deterministic browser E2E tests.
-			js.eval("window.__opmMapLoaded = " + JSON.stringify(map_name) + ";")
+			js.eval("window.__mohaaMapLoaded = " + JSON.stringify(map_name) + ";")
 	if OS.has_feature("headless") or DisplayServer.get_name() == "headless":
 		print("Main: Headless mode detected, skipping auto screenshot.")
 		return
@@ -312,13 +306,6 @@ func _process(delta):
 
 	if runner and runner.is_engine_initialized():
 		var server_state = runner.get_server_state()
-
-		# Web fallback: if startup command parsing is lost, force map load once.
-		if OS.has_feature("web") and web_auto_map_pending and server_state == 0 and runner.get_current_map() == "":
-			web_auto_map_pending = false
-			runner.execute_command("devmap " + launch_map)
-			print("Main: Web fallback executed -> devmap ", launch_map)
-
 		if server_state != last_state_logged:
 			last_state_logged = server_state
 			print("Main: server_state -> ", runner.get_server_state_string(),

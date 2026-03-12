@@ -29,7 +29,7 @@ WEB_DIST="$REPO_ROOT/dist/web/$VARIANT"
 }
 
 # Default tag
-[[ -z "$TAG" ]] && TAG="opm-godot-web:$VARIANT"
+[[ -z "$TAG" ]] && TAG="mohaa-godot-web:$VARIANT"
 
 echo "Building Docker image from: $WEB_DIST"
 echo "  Tag: $TAG"

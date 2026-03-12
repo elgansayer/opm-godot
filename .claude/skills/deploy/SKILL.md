@@ -17,11 +17,11 @@ Run the complete release pipeline: build web export, deploy locally via Docker, 
 5. Report the result:
    - Build status
    - Local URL: http://localhost:8086
-   - GitHub Actions link: https://github.com/elgansayer/opm-godot/actions
+   - GitHub Actions link: https://github.com/elgansayer/mohaa-godot/actions
    - Portainer deployment status
 
 ## Important
 
 - `--asset-path` is required unless using `--skip-serve`
 - The deploy script will `git add -A && git commit && git push` — confirm with the user before pushing
-- GHCR image: `ghcr.io/elgansayer/opm-godot:latest`
+- GHCR image: `ghcr.io/elgansayer/mohaa-godot:latest`

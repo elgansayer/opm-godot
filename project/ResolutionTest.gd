@@ -46,9 +46,9 @@ var fail_count := 0
 var warn_count := 0
 
 func _ready():
-	print("[RES-TEST] ========================================")
-	print("[RES-TEST] Resolution/Mode/Quality Automated Test")
-	print("[RES-TEST] ========================================")
+	print("ResolutionTest: ========================================")
+	print("ResolutionTest: Resolution/Mode/Quality Automated Test")
+	print("ResolutionTest: ========================================")
 
 	# Parse user args
 	for arg in OS.get_cmdline_user_args():
@@ -67,32 +67,32 @@ func _ready():
 	# Create output directory
 	DirAccess.make_dir_recursive_absolute(output_dir)
 
-	print("[RES-TEST] Map: ", test_map)
-	print("[RES-TEST] Duration limit: ", test_duration, "s")
-	print("[RES-TEST] Settle time: ", settle_time, "s")
-	print("[RES-TEST] Output dir: ", output_dir)
+	print("ResolutionTest: Map: ", test_map)
+	print("ResolutionTest: Duration limit: ", test_duration, "s")
+	print("ResolutionTest: Settle time: ", settle_time, "s")
+	print("ResolutionTest: Output dir: ", output_dir)
 
 	# Build test case matrix
 	_build_test_cases()
 
-	print("[RES-TEST] Total test cases: ", test_cases.size())
+	print("ResolutionTest: Total test cases: ", test_cases.size())
 	for i in range(test_cases.size()):
 		var tc = test_cases[i]
-		print("[RES-TEST]   #", i, ": ", tc.name)
+		print("ResolutionTest: #", i, ": ", tc.name)
 
 	if OS.has_feature("headless") or DisplayServer.get_name() == "headless":
-		printerr("[RES-TEST] SKIP: Cannot run resolution tests in headless mode (no display).")
+		printerr("ResolutionTest: SKIP: Cannot run resolution tests in headless mode (no display).")
 		get_tree().quit(0)
 		return
 
 	if not ClassDB.class_exists("MoHAARunner"):
-		printerr("[RES-TEST] CRITICAL: MoHAARunner class not found!")
+		printerr("ResolutionTest: CRITICAL: MoHAARunner class not found!")
 		get_tree().quit(2)
 		return
 
 	runner = ClassDB.instantiate("MoHAARunner")
 	if not runner:
-		printerr("[RES-TEST] CRITICAL: Could not instantiate MoHAARunner!")
+		printerr("ResolutionTest: CRITICAL: Could not instantiate MoHAARunner!")
 		get_tree().quit(2)
 		return
 
@@ -108,7 +108,7 @@ func _ready():
 	runner.engine_error.connect(_on_engine_error)
 	runner.map_loaded.connect(_on_map_loaded)
 	add_child(runner)
-	print("[RES-TEST] Engine starting...")
+	print("ResolutionTest: Engine starting...")
 
 
 func _build_test_cases():
@@ -177,11 +177,11 @@ func _build_test_cases():
 
 
 func _on_engine_error(message: String):
-	printerr("[RES-TEST] ENGINE ERROR: ", message)
+	printerr("ResolutionTest: ENGINE ERROR: ", message)
 	fail_count += 1
 
 func _on_map_loaded(_map_name: String):
-	print("[RES-TEST] Signal: map_loaded -> ", _map_name)
+	print("ResolutionTest: Signal: map_loaded -> ", _map_name)
 	map_loaded = true
 	state = "map_settle"
 	timer = 0.0
@@ -193,20 +193,20 @@ func _process(delta):
 
 	# Global timeout
 	if total_timer > test_duration:
-		printerr("[RES-TEST] TIMEOUT: Exceeded ", test_duration, "s limit")
+		printerr("ResolutionTest: TIMEOUT: Exceeded ", test_duration, "s limit")
 		_finish_all_tests()
 		return
 
 	match state:
 		"init":
 			if timer > 30.0 and not map_loaded:
-				printerr("[RES-TEST] FAIL: Map did not load within 30s")
+				printerr("ResolutionTest: FAIL: Map did not load within 30s")
 				_finish_all_tests()
 
 		"map_settle":
 			# Wait for the initial map to fully render
 			if timer > 5.0:
-				print("[RES-TEST] Map settled. Starting test matrix...")
+				print("ResolutionTest: Map settled. Starting test matrix...")
 				state = "run_test"
 				current_test = 0
 				timer = 0.0
@@ -239,7 +239,7 @@ func _process(delta):
 
 func _apply_test_case(index: int):
 	var tc = test_cases[index]
-	print("[RES-TEST] ─── Test #", index, ": ", tc.name, " ───")
+	print("ResolutionTest: ─── Test #", index, ": ", tc.name, " ───")
 
 	if tc.fullscreen:
 		if tc.width == -2:
@@ -266,7 +266,7 @@ func _apply_test_case(index: int):
 
 	state = "applying_vid_restart"
 	timer = 0.0
-	print("[RES-TEST]   Applied: fs=", tc.fullscreen,
+	print("ResolutionTest: Applied: fs=", tc.fullscreen,
 		" size=", tc.width, "x", tc.height,
 		" phase=", tc.phase)
 
@@ -299,9 +299,9 @@ func _capture_and_validate(index: int):
 	var engine_w = int(runner.get_cvar_string("r_customwidth"))
 	var engine_h = int(runner.get_cvar_string("r_customheight"))
 
-	print("[RES-TEST]   Viewport: ", result.viewport_w, "x", result.viewport_h)
-	print("[RES-TEST]   scaling_3d: ", result.scaling_3d)
-	print("[RES-TEST]   Engine cvars: r_customwidth=", engine_w, " r_customheight=", engine_h)
+	print("ResolutionTest: Viewport: ", result.viewport_w, "x", result.viewport_h)
+	print("ResolutionTest: scaling_3d: ", result.scaling_3d)
+	print("ResolutionTest: Engine cvars: r_customwidth=", engine_w, " r_customheight=", engine_h)
 
 	# Capture screenshot
 	var tex = get_viewport().get_texture()
@@ -313,7 +313,7 @@ func _capture_and_validate(index: int):
 			if err == OK:
 				result.screenshot_path = path
 				screenshots[tc.name] = img.duplicate()
-				print("[RES-TEST]   Screenshot: ", path,
+				print("ResolutionTest: Screenshot: ", path,
 					" (", img.get_width(), "x", img.get_height(), ")")
 			else:
 				result.details.append("Screenshot save failed: %d" % err)
@@ -377,14 +377,14 @@ func _capture_and_validate(index: int):
 
 	# Log result
 	if result.passed:
-		print("[RES-TEST]   RESULT: PASS")
+		print("ResolutionTest: RESULT: PASS")
 		pass_count += 1
 	else:
-		print("[RES-TEST]   RESULT: FAIL")
+		print("ResolutionTest: RESULT: FAIL")
 		fail_count += 1
 
 	for d in result.details:
-		print("[RES-TEST]     ", d)
+		print("ResolutionTest: ", d)
 
 	test_results.append(result)
 
@@ -424,11 +424,11 @@ func _compare_screenshots():
 	## Compare screenshots across resolutions to verify they are different.
 	## Same-resolution same-mode screenshots should be similar; different
 	## resolutions or modes should produce visibly different images.
-	print("[RES-TEST] ─── Screenshot Comparison ───")
+	print("ResolutionTest: ─── Screenshot Comparison ───")
 
 	var keys = screenshots.keys()
 	if keys.size() < 2:
-		print("[RES-TEST]   Not enough screenshots to compare")
+		print("ResolutionTest: Not enough screenshots to compare")
 		return
 
 	# Check that different resolutions produce different-sized screenshots
@@ -440,15 +440,15 @@ func _compare_screenshots():
 			sizes[size_key] = []
 		sizes[size_key].append(k)
 
-	print("[RES-TEST]   Unique screenshot sizes: ", sizes.size())
+	print("ResolutionTest: Unique screenshot sizes: ", sizes.size())
 	for sk in sizes:
-		print("[RES-TEST]     ", sk, ": ", sizes[sk])
+		print("ResolutionTest: ", sk, ": ", sizes[sk])
 
 	if sizes.size() < 2:
-		print("[RES-TEST]   WARN: All screenshots are the same size — resolution changes may not be working")
+		print("ResolutionTest: WARN: All screenshots are the same size — resolution changes may not be working")
 		warn_count += 1
 	else:
-		print("[RES-TEST]   OK: Multiple screenshot sizes confirm resolution changes work")
+		print("ResolutionTest: OK: Multiple screenshot sizes confirm resolution changes work")
 
 	# Pixel hash comparison: screenshots at different resolutions should differ
 	for i in range(keys.size()):
@@ -459,11 +459,11 @@ func _compare_screenshots():
 				# Same size — check if content differs (e.g. menu vs ingame)
 				var same = _images_are_identical(img_a, img_b)
 				if same:
-					print("[RES-TEST]   WARN: ", keys[i], " and ", keys[j],
+					print("ResolutionTest: WARN: ", keys[i], " and ", keys[j],
 						" are pixel-identical despite different test conditions")
 					warn_count += 1
 				else:
-					print("[RES-TEST]   OK: ", keys[i], " and ", keys[j], " differ (expected)")
+					print("ResolutionTest: OK: ", keys[i], " and ", keys[j], " differ (expected)")
 
 
 func _images_are_identical(a: Image, b: Image) -> bool:
@@ -496,23 +496,23 @@ func _finish_all_tests():
 	_compare_screenshots()
 
 	# Print summary
-	print("[RES-TEST] ========================================")
-	print("[RES-TEST] SUMMARY")
-	print("[RES-TEST] ========================================")
-	print("[RES-TEST] Total tests: ", test_results.size())
-	print("[RES-TEST] Passed:      ", pass_count)
-	print("[RES-TEST] Failed:      ", fail_count)
-	print("[RES-TEST] Warnings:    ", warn_count)
-	print("[RES-TEST] Screenshots: ", output_dir)
-	print("[RES-TEST] ========================================")
+	print("ResolutionTest: ========================================")
+	print("ResolutionTest: SUMMARY")
+	print("ResolutionTest: ========================================")
+	print("ResolutionTest: Total tests: ", test_results.size())
+	print("ResolutionTest: Passed:      ", pass_count)
+	print("ResolutionTest: Failed:      ", fail_count)
+	print("ResolutionTest: Warnings:    ", warn_count)
+	print("ResolutionTest: Screenshots: ", output_dir)
+	print("ResolutionTest: ========================================")
 
 	for r in test_results:
 		var status = "PASS" if r.passed else "FAIL"
-		print("[RES-TEST] [", status, "] ", r.name,
+		print("ResolutionTest: [", status, "] ", r.name,
 			" viewport=", r.viewport_w, "x", r.viewport_h,
 			" scaling_3d=", "%.2f" % r.scaling_3d)
 		for d in r.details:
-			print("[RES-TEST]     ", d)
+			print("ResolutionTest: ", d)
 
 	# Write summary file
 	var summary_path = output_dir + "/summary.txt"
@@ -533,15 +533,15 @@ func _finish_all_tests():
 			if r.screenshot_path != "":
 				f.store_line("    screenshot: %s" % r.screenshot_path)
 		f.close()
-		print("[RES-TEST] Summary written to: ", summary_path)
+		print("ResolutionTest: Summary written to: ", summary_path)
 
-	print("[RES-TEST] ========================================")
+	print("ResolutionTest: ========================================")
 	if fail_count > 0:
-		print("[RES-TEST] OVERALL: FAIL")
+		print("ResolutionTest: OVERALL: FAIL")
 		# Wait a moment for Godot to process the final vid_restart
 		await get_tree().create_timer(2.0).timeout
 		get_tree().quit(1)
 	else:
-		print("[RES-TEST] OVERALL: PASS")
+		print("ResolutionTest: OVERALL: PASS")
 		await get_tree().create_timer(2.0).timeout
 		get_tree().quit(0)

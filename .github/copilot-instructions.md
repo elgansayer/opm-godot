@@ -7,7 +7,7 @@ This workspace ports **OpenMoHAA** (an ioquake3 / IdTech 3 derivative) into **Go
 
 ## Repository Layout
 ```
-opm-godot/                    ← Git root
+mohaa-godot/                  ← Git root
 ├── .github/
 │   └── copilot-instructions.md  ← THIS FILE
 ├── godot-cpp/                ← Git submodule (branch 4.2, https://github.com/godotengine/godot-cpp)
@@ -527,8 +527,8 @@ cd openmohaa && scons platform=linux target=template_debug -j$(nproc) dev_build=
 
 ### Clone instructions (for cloud agents)
 ```bash
-git clone --recursive https://github.com/elgansayer/opm-godot.git
-cd opm-godot
+git clone --recursive https://github.com/elgansayer/mohaa-godot.git
+cd mohaa-godot
 # godot-cpp submodule is auto-cloned by --recursive (branch 4.2)
 # openmohaa/ is regular tracked source, not a submodule
 ```

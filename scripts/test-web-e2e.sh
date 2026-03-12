@@ -41,7 +41,7 @@ detect_browser() {
 
 run_in_docker_playwright() {
     local image="mcr.microsoft.com/playwright:v1.52.0-jammy"
-    echo "[web-e2e] Running in Docker Playwright image: $image"
+    echo "WebE2E: Running in Docker Playwright image: $image"
     docker run --rm \
         --network host \
         -v "$REPO_ROOT:/work" \
@@ -54,16 +54,16 @@ run_in_docker_playwright() {
         bash -lc "npm install --silent && node run-web-e2e.mjs"
 }
 
-echo "[web-e2e] Preconditions"
+echo "WebE2E: Preconditions"
 require_cmd node
 require_cmd npm
 require_cmd docker
 
 SYSTEM_BROWSER="$(detect_browser || true)"
 if [[ -n "$SYSTEM_BROWSER" ]]; then
-    echo "[web-e2e] Using browser: $SYSTEM_BROWSER"
+    echo "WebE2E: Using browser: $SYSTEM_BROWSER"
 else
-    echo "[web-e2e] No usable local browser found; Docker fallback will be used"
+    echo "WebE2E: No usable local browser found; Docker fallback will be used"
 fi
 
 if [[ ! -f "$E2E_DIR/package.json" ]]; then
@@ -71,15 +71,15 @@ if [[ ! -f "$E2E_DIR/package.json" ]]; then
     exit 2
 fi
 
-echo "[web-e2e] Running web preflight"
+echo "WebE2E: Running web preflight"
 ASSET_PATH="$ASSET_PATH" "$SCRIPT_DIR/test-web.sh"
 
-echo "[web-e2e] Installing npm dependencies (if needed)"
+echo "WebE2E: Installing npm dependencies (if needed)"
 if [[ -n "$SYSTEM_BROWSER" ]]; then
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm --prefix "$E2E_DIR" install --silent
 fi
 
-echo "[web-e2e] Running browser E2E"
+echo "WebE2E: Running browser E2E"
 if [[ -n "$SYSTEM_BROWSER" ]]; then
     BASE_URL="$BASE_URL" \
     TARGET_MAP="$TARGET_MAP" \
@@ -91,4 +91,4 @@ else
     run_in_docker_playwright
 fi
 
-echo "[web-e2e] PASS"
+echo "WebE2E: PASS"

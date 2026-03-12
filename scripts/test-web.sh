@@ -35,7 +35,7 @@ assert_status_200() {
     fi
 }
 
-echo "[web-test] Preconditions"
+echo "WebTest: Preconditions"
 require_cmd curl
 require_cmd docker
 require_cmd python3
@@ -53,14 +53,14 @@ for n in 0 1 2 3 4 5 6; do
     fi
 done
 
-echo "[web-test] Building and starting web stack"
+echo "WebTest: Building and starting web stack"
 cd "$REPO_ROOT"
-./scripts/build-web.sh --serve-only --asset-path "$ASSET_PATH" --"$WEB_VARIANT" >/tmp/opm-web-serve.log 2>&1 || {
-    cat /tmp/opm-web-serve.log >&2
+./scripts/build-web.sh --serve --asset-path "$ASSET_PATH" --"$WEB_VARIANT" >/tmp/mohaa-web-serve.log 2>&1 || {
+    cat /tmp/mohaa-web-serve.log >&2
     exit 1
 }
 
-echo "[web-test] Validating HTTP endpoints"
+echo "WebTest: Validating HTTP endpoints"
 # Give nginx a moment to finish start-up after compose returns.
 assert_status_200 "$BASE_URL/mohaa.html"
 assert_status_200 "$BASE_URL/mohaa.js"
@@ -80,7 +80,7 @@ if ! grep -qi '^Cross-Origin-Embedder-Policy: require-corp' <<<"$headers"; then
     exit 1
 fi
 
-echo "[web-test] Validating JSON asset directory listing"
+echo "WebTest: Validating JSON asset directory listing"
 json_payload="$(curl -s --retry 20 --retry-all-errors --retry-connrefused --retry-delay 1 --max-time 10 -H 'Accept: application/json' "$BASE_URL/assets/main/" || true)"
 if [[ -z "$json_payload" ]]; then
     echo "FAIL: empty JSON payload from /assets/main/" >&2
@@ -112,4 +112,4 @@ if missing:
 print("OK: /assets/main/ JSON listing includes pak0..pak6")
 PY
 
-echo "[web-test] PASS: web stack preflight checks succeeded"
+echo "WebTest: PASS: web stack preflight checks succeeded"

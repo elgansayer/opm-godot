@@ -5,15 +5,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PROJECT_BIN_DIR="$REPO_ROOT/project/bin"
 PROJECT_DIR="$REPO_ROOT/project"
-# Output dir is variant-aware: dist/web/debug or dist/web/release.
-# Set by --debug/--release flags (default: debug).
-_WEB_VARIANT="debug"
-EXPORT_DIR=""  # computed after arg parsing
-EXPORT_HTML="" # computed after arg parsing
-EXPORT_JS=""   # computed after arg parsing
-WEB_TEMPLATE_DIR="$REPO_ROOT/scripts/web_assets/templates"
-WEB_HTML_RENDERER="$REPO_ROOT/scripts/web_assets/render_html_template.py"
+EXPORT_DIR="$REPO_ROOT/web"
+EXPORT_HTML="$EXPORT_DIR/mohaa.html"
+EXPORT_JS="$EXPORT_DIR/mohaa.js"
 PROJECT_GDEXT="$PROJECT_DIR/openmohaa.gdextension"
+GAME_FILES_DIR="${GAME_FILES_DIR:-$HOME/.local/share/openmohaa}"
 
 if [[ -f "$REPO_ROOT/openmohaa/SConstruct" ]]; then
     OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
@@ -28,22 +24,20 @@ EMSDK_DIR="${EMSDK_DIR:-$HOME/emsdk}"
 BUILD_TARGET="template_debug"
 CHECK_ONLY=0
 EXPORT_AFTER_BUILD=1
+COPY_GAME_FILES=1
 PATCH_ONLY=0
 SERVE_ONLY=0
 ASSET_PATH="${ASSET_PATH:-}"
-BUILD_ONLY=0
 EXTRA_SCONS_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --release)
             BUILD_TARGET="template_release"
-            _WEB_VARIANT="release"
             shift
             ;;
         --debug)
             BUILD_TARGET="template_debug"
-            _WEB_VARIANT="debug"
             shift
             ;;
         --check)
@@ -57,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --patch-only)
             PATCH_ONLY=1
             EXPORT_AFTER_BUILD=0
+            COPY_GAME_FILES=0
             shift
             ;;
         --serve)
@@ -69,12 +64,6 @@ while [[ $# -gt 0 ]]; do
             SERVE_ONLY=2
             shift
             ;;
-        --build-only)
-            # Compile only: no export, no runtime patching, no asset staging.
-            BUILD_ONLY=1
-            EXPORT_AFTER_BUILD=0
-            shift
-            ;;
         --asset-path)
             if [[ $# -lt 2 ]]; then
                 echo "ERROR: --asset-path requires a path" >&2
@@ -82,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             fi
             ASSET_PATH="$2"
             shift 2
+            ;;
+        --no-game-files)
+            COPY_GAME_FILES=0
+            shift
             ;;
         --emsdk)
             if [[ $# -lt 2 ]]; then
@@ -91,17 +84,21 @@ while [[ $# -gt 0 ]]; do
             EMSDK_DIR="$2"
             shift 2
             ;;
+        --game-files)
+            if [[ $# -lt 2 ]]; then
+                echo "ERROR: --game-files requires a path" >&2
+                exit 1
+            fi
+            GAME_FILES_DIR="$2"
+            COPY_GAME_FILES=1
+            shift 2
+            ;;
         *)
             EXTRA_SCONS_ARGS+=("$1")
             shift
             ;;
     esac
 done
-
-# ── Compute output paths now that variant is known ────────────────────────
-EXPORT_DIR="$REPO_ROOT/dist/web/$_WEB_VARIANT"
-EXPORT_HTML="$EXPORT_DIR/mohaa.html"
-EXPORT_JS="$EXPORT_DIR/mohaa.js"
 
 serve_docker() {
     local asset_path="${ASSET_PATH:-}"
@@ -131,8 +128,13 @@ serve_docker() {
 
     echo "Deploying docker compose stack (asset path: $asset_path)..."
     cd "$REPO_ROOT"
-    docker rm -f opm-godot-web opm-godot-relay 2>/dev/null || true
-    WEB_DIST="$EXPORT_DIR" ASSET_PATH="$asset_path" CDN_URL="${CDN_URL:-/assets}" docker compose -f docker/docker-compose.yml up -d --build --force-recreate
+    # Force-remove any lingering containers by name to avoid the 'already in use' conflict,
+    # then bring the stack up with --force-recreate so existing containers are replaced atomically.
+    docker rm -f mohaa-godot-web mohaa-godot-relay 2>/dev/null || true
+    ASSET_PATH="$asset_path" \
+    WEB_DIST="$EXPORT_DIR" \
+    CDN_URL="${CDN_URL:-/assets}" \
+    docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build --force-recreate
     echo "Stack is up. Web: http://localhost:8086"
 }
 
@@ -326,32 +328,6 @@ extra_files_js = ','.join(
 # Grow wasm memory before loadDylibs so the GDExtension side module (which
 # declares initial=1628 pages) can be instantiated.  Use >>> (unsigned right
 # shift) to avoid signed-int overflow at 2GB.  Target 2048 pages (128 MB).
-# Also inject a polyfill for std::__2::__hash_memory before loadDylibs so the
-# Emscripten dynamic linker can resolve the symbol when instantiating
-# libopenmohaa.wasm.  The symbol is used by std::hash<std::string> (called
-# from std::unordered_map<std::string,…>) in libopenmohaa.wasm which was
-# compiled with a newer libc++ (std::__2) while Godot 4.2's web template was
-# compiled with libc++ std::__1 — causing the symbol to be unresolved at
-# run-time and triggering an infinite stub-call hang during BSP world load.
-_HASH_POLY = (
-    "if(typeof globalThis['_ZNSt3__213__hash_memoryEPKvm']==='undefined'){"
-    "globalThis['_ZNSt3__213__hash_memoryEPKvm']=function(ptr,size){"
-    # FNV-1a hash — matches std::hash<std::string> semantics well enough for
-    # std::unordered_map correctness; exact libc++ algorithm not required.
-    "var h=2166136261,m=16777619,mem=HEAPU8||new Uint8Array(wasmMemory.buffer);"
-    "for(var i=0;i<(size>>>0);++i){h=(h^mem[(ptr+i)>>>0])>>>0;h=Math.imul(h,m)>>>0;}"
-    "return h;};"
-    "console.log('OpenMoHAA: injected std::__2::__hash_memory polyfill');}"
-)
-# Belt-and-suspenders: push cgame.so into dynamicLibraries right before loadDylibs().
-# This runs AFTER Module["dynamicLibraries"] is already copied into dynamicLibraries,
-# so it guarantees cgame.so is loaded regardless of whether the GodotExtension class
-# constructor patch (further below) succeeded or not.
-_CGAME_PUSH = (
-    "if(!dynamicLibraries.includes('main/cgame.so')){"
-    "dynamicLibraries.push('main/cgame.so');"
-    "console.log('OpenMoHAA: pre-registered main/cgame.so in dynamicLibraries');}"
-)
 mem_old = "LDSO.init();loadDylibs();"
 mem_new = (
     "LDSO.init();"
@@ -359,65 +335,28 @@ mem_new = (
     "if(__wm_pages<2048){"
     "try{wasmMemory.grow(2048-__wm_pages);updateMemoryViews()}"
     "catch(e){console.warn('OpenMoHAA: memory pre-grow failed',e)}}"
-    + _HASH_POLY +
-    _CGAME_PUSH +
     "loadDylibs();"
 )
-_HAS_HASH = "_ZNSt3__213__hash_memoryEPKvm" in src
-_HAS_CGAME = "dynamicLibraries.includes('main/cgame.so')" in src
-if _HAS_HASH and _HAS_CGAME:
-    print("__hash_memory polyfill + cgame.so push already injected (idempotent)")
-elif mem_old in src:
+if mem_old in src:
     src = src.replace(mem_old, mem_new, 1)
-    print("Patched mohaa.js: memory pre-grow + __hash_memory polyfill + cgame.so push before loadDylibs")
+    print("Patched mohaa.js: memory pre-grow before loadDylibs (2048 pages)")
 elif "__wm_pages" in src:
-    # Memory pre-grow already applied in a previous build; inject missing pieces.
-    for _warn in ("'OpenMoHAA: memory pre-grow failed',e)}}", "'MOHAAjs: memory pre-grow failed',e)}}"):
-        _old_frag = _warn + "loadDylibs();"
-        _new_parts = _warn
-        if not _HAS_HASH:
-            _new_parts += _HASH_POLY
-        if not _HAS_CGAME:
-            _new_parts += _CGAME_PUSH
-        _new_frag = _new_parts + "loadDylibs();"
-        if _old_frag in src and _new_frag != _old_frag:
-            src = src.replace(_old_frag, _new_frag, 1)
-            _parts = []
-            if not _HAS_HASH: _parts.append("__hash_memory polyfill")
-            if not _HAS_CGAME: _parts.append("cgame.so push")
-            print(f"Patched mohaa.js: injected {' + '.join(_parts)} (memory pre-grow was already applied)")
-            break
-    else:
-        if _HAS_HASH and not _HAS_CGAME:
-            # Hash polyfill present; try to anchor cgame push directly before loadDylibs.
-            # Try both non-obfuscated (OpenMoHAA) and obfuscated (MOHAAjs) variants of
-            # the log string, since --patch-only re-runs on an already-obfuscated file.
-            for _prefix in ("OpenMoHAA", "MOHAAjs"):
-                _cgame_anchor = f"console.log('{_prefix}: injected std::__2::__hash_memory polyfill');}}loadDylibs();"
-                _cgame_anchor_new = f"console.log('{_prefix}: injected std::__2::__hash_memory polyfill');}}" + _CGAME_PUSH + "loadDylibs();"
-                if _cgame_anchor in src:
-                    src = src.replace(_cgame_anchor, _cgame_anchor_new, 1)
-                    print("Patched mohaa.js: injected cgame.so push (anchored to hash polyfill tail)")
-                    break
-            else:
-                print("WARNING: Memory pre-grow already applied but could not anchor missing patches")
-        else:
-            print("WARNING: Memory pre-grow already applied but could not anchor __hash_memory polyfill + cgame.so push")
+    print("Memory pre-grow already patched (idempotent)")
 else:
-    print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow + polyfill skipped")
+    print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow skipped")
 
 preload_old = "var moduleRtn;var Module=moduleArg;var ENVIRONMENT_IS_WEB="
 preload_new = (
     "var moduleRtn;var Module=moduleArg;"
-    "if(typeof window!=='undefined'){window.__opmStdout=window.__opmStdout||[];window.__opmMapLoadedLog='';}"
+    "if(typeof window!=='undefined'){window.__mohaaStdout=window.__mohaaStdout||[];window.__mohaaMapLoadedLog='';}"
     "(function(){"
     "  var __wrap=function(name){"
     "    var prev=Module[name];"
     "    Module[name]=function(){"
     "      var msg=Array.prototype.slice.call(arguments).join(' ');"
     "      if(typeof window!=='undefined'){"
-    "        window.__opmStdout.push(msg);"
-    "        if(msg.indexOf('Main: SIGNAL map_loaded ->')!==-1)window.__opmMapLoadedLog=msg;"
+    "        window.__mohaaStdout.push(msg);"
+    "        if(msg.indexOf('Main: SIGNAL map_loaded ->')!==-1)window.__mohaaMapLoadedLog=msg;"
     "      }"
     "      if(typeof prev==='function')return prev.apply(this,arguments);"
     "      if(name==='printErr'){console.error(msg)}else{console.log(msg)}"
@@ -431,9 +370,9 @@ preload_new = (
     "if(typeof FS==='undefined'||typeof fetch==='undefined'||typeof addRunDependency!=='function'||typeof removeRunDependency!=='function'){return;}"
     "var __dep='openmohaa-vfs-preload'; addRunDependency(__dep);"
     "(async()=>{"
-    "  var cfg=(typeof OPM_CONFIG!=='undefined'?OPM_CONFIG:{}),cdn=cfg['CDN_URL']||'/assets';"
+    "  var cfg=(typeof MOHAA_CONFIG!=='undefined'?MOHAA_CONFIG:{}),cdn=cfg['CDN_URL']||'/assets';"
     "  if(cdn&&!cdn.endsWith('/'))cdn+='/';"
-    "  var cache=null; try{cache=await caches.open('mohaajs-assets-v1')}catch(e){console.warn('[MOHAAjs] Cache API unavailable',e)}"
+    "  var cache=null; try{cache=await caches.open('mohaajs-assets-v1')}catch(e){console.warn('MOHAAjs: Cache API unavailable',e)}"
     # --- helper: ensure MEMFS directory exists ---
     "  var __mkdirs=(path)=>{"
     "    var p='',ps=path.split('/').filter(Boolean);"
@@ -505,7 +444,7 @@ preload_new = (
     "        }catch(e){failed++}"
     "        finally{__release()}"
     "        if((loaded+failed)%200===0||loaded+failed===total)"
-    "          console.log('[MOHAAjs] Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
+    "          console.log('MOHAAjs: Progress: '+(loaded+failed)+'/'+total+' ('+failed+' failed)');"
     "      })(rel));"
     "    }"
     "    await Promise.all(promises);"
@@ -514,10 +453,10 @@ preload_new = (
     # Files now arrive with full relative paths including game subdirs:
     #   main/Pak0.pk3, mainta/Pak0.pk3, maintt/Pak0.pk3, etc.
     # Write them at their original path so all game dirs are available.
-    "  var __lf=(typeof window!=='undefined'&&window.__opmLocalFiles)||{};"
+    "  var __lf=(typeof window!=='undefined'&&window.__mohaaLocalFiles)||{};"
     "  var __lfKeys=Object.keys(__lf);"
     "  if(__lfKeys.length>0){"
-    "    console.log('[MOHAAjs] Writing '+__lfKeys.length+' local files to MEMFS...');"
+    "    console.log('MOHAAjs: Writing '+__lfKeys.length+' local files to MEMFS...');"
     "    for(var __li=0;__li<__lfKeys.length;__li++){"
     "      var __lrel=__lfKeys[__li];"
     "      var __ldst='/'+__lrel;"
@@ -525,26 +464,26 @@ preload_new = (
     "      if(__lcut>0)__mkdirs(__ldst.slice(0,__lcut));"
     "      try{__writeFileWithPakAlias(__ldst,__lf[__lrel])}catch(e){}"
     "    }"
-    "    console.log('[MOHAAjs] Wrote '+__lfKeys.length+' local files to MEMFS');"
-    "    if(typeof window!=='undefined')window.__opmLocalFiles=null;"
+    "    console.log('MOHAAjs: Wrote '+__lfKeys.length+' local files to MEMFS');"
+    "    if(typeof window!=='undefined')window.__mohaaLocalFiles=null;"
     "  }"
     # --- walk server for base game directory only (gap-fill) ---
     # Only walk 'main/' on the server — expansion dirs (mainta/, maintt/)
     # are provided entirely by local files / IndexedDB cache and do NOT
     # exist on the web server, so walking them would produce 404 errors.
-    "  var __tg=(typeof window!=='undefined'&&window.__opmTargetGame)||0;"
+    "  var __tg=(typeof window!=='undefined'&&window.__mohaaTargetGame)||0;"
     "  var __gdMap={1:'mainta',2:'maintt'};"
     "  var __expDir=__gdMap[__tg];"
     "  if(__expDir)__mkdirs('/'+__expDir);"
     "  __mkdirs('/main');"
-    "  console.log('[MOHAAjs] Server gap-fill: scanning /main/ ...');"
+    "  console.log('MOHAAjs: Server gap-fill: scanning /main/ ...');"
     "  await __walk('main/');"
     "  if(__expDir){"
-    "    console.log('[MOHAAjs] Server gap-fill: scanning /'+__expDir+'/ ...');"
+    "    console.log('MOHAAjs: Server gap-fill: scanning /'+__expDir+'/ ...');"
     "    await __walk(__expDir+'/');"
     "  }"
-    "  console.log('[MOHAAjs] VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
-    "})().catch(e=>console.error('[MOHAAjs] PreRun error',e)).finally(()=>removeRunDependency(__dep));"
+    "  console.log('MOHAAjs: VFS preload complete: '+loaded+' files ready, '+failed+' failed');"
+    "})().catch(e=>console.error('MOHAAjs: PreRun error',e)).finally(()=>removeRunDependency(__dep));"
     "});"
     "var ENVIRONMENT_IS_WEB="
 )
@@ -568,13 +507,6 @@ elif "openmohaa-pk3-preload" in src or "openmohaa-vfs-preload" in src:
         print("Patched mohaa.js async preRun VFS preload (replaced old preloader)")
     else:
         print("WARNING: Found preloader dep ID but could not locate preloader block boundary")
-elif "var ENVIRONMENT_IS_WEB=" in src:
-    # Godot 4.6+ layout: moduleRtn is inside a separate IIFE, no longer adjacent
-    # to var Module=moduleArg. Inject VFS preload + stdout wrapper before
-    # var ENVIRONMENT_IS_WEB= (Module is already defined at this point).
-    _payload = preload_new.split("var moduleRtn;var Module=moduleArg;", 1)[-1]
-    src = src.replace("var ENVIRONMENT_IS_WEB=", _payload, 1)
-    print("Patched mohaa.js async preRun VFS preload (fresh, Godot 4.6+ layout)")
 else:
     print("WARNING: Could not find Module preRun injection marker in mohaa.js; preload patch skipped")
 
@@ -629,9 +561,36 @@ stub_new = (
     "var ptr=(typeof _cxaLast!=='undefined'?_cxaLast:0)||stubs.__cxaLast||0;"
     "if(typeof setTempRet0!=='undefined'){setTempRet0(0)}else if(typeof _setTempRet0!=='undefined'){_setTempRet0(0)}"
     "return ptr};}"
-    # invoke_* must be resolved BEFORE resolveSymbol — resolveSymbol asserts
-    # (aborts) on missing symbols without {optional:true}, but Godot's main
-    # module never exports invoke_* since it doesn't use -fexceptions.
+    "resolved||=resolveSymbol(prop);"
+    "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
+    "if(!resolved){"
+    "var __baseProp=String(prop||'');"
+    "var __trimmed=__baseProp.replace(/^_+/, '');"
+    "var __candidates=[__baseProp,'_'+__baseProp,__trimmed,'_'+__trimmed];"
+    "for(var __i=0;__i<__candidates.length&&!resolved;__i++){"
+    "var __name=__candidates[__i];"
+    "if(!__name){continue}"
+    "if(typeof __name==='string'&&typeof resolveSymbol==='function'){resolved=resolveSymbol(__name)||resolved}"
+    "if(!resolved&&typeof Module!=='undefined'&&Module){resolved=Module[__name]||resolved}"
+    "if(!resolved&&typeof globalThis!=='undefined'&&globalThis){resolved=globalThis[__name]||resolved}"
+    "}"
+    "}"
+    "if(!resolved&&prop==='emscripten_longjmp'){"
+    "var __throwLongjmp=resolveSymbol('emscripten_throw_longjmp');"
+    "var __cLongjmp=(typeof ___c_longjmp!=='undefined'&&___c_longjmp)||(typeof __c_longjmp!=='undefined'&&__c_longjmp)||resolveSymbol('__c_longjmp')||resolveSymbol('___c_longjmp')||(typeof globalThis!=='undefined'&&(globalThis.___c_longjmp||globalThis.__c_longjmp));"
+    "var __wasmLongjmp=(typeof ___wasm_longjmp!=='undefined'&&___wasm_longjmp)||(typeof __wasm_longjmp!=='undefined'&&__wasm_longjmp)||resolveSymbol('__wasm_longjmp')||resolveSymbol('___wasm_longjmp');"
+    "if(typeof __cLongjmp==='number'&&typeof wasmTable!=='undefined'){var __cLongjmpFn=wasmTable.get(__cLongjmp|0);if(__cLongjmpFn){__cLongjmp=__cLongjmpFn}}"
+    "if(typeof __wasmLongjmp==='number'&&typeof wasmTable!=='undefined'){var __wasmLongjmpFn=wasmTable.get(__wasmLongjmp|0);if(__wasmLongjmpFn){__wasmLongjmp=__wasmLongjmpFn}}"
+    "if(typeof __throwLongjmp==='function'){"
+    "resolved=(env,val)=>__throwLongjmp(env|0,val|0)"
+    "}else if(typeof __cLongjmp==='function'){"
+    "resolved=(env,val)=>__cLongjmp(env|0,val|0)"
+    "}else if(typeof __wasmLongjmp==='function'){"
+    "resolved=(env,val)=>__wasmLongjmp(env|0,val|0)"
+    "}else{"
+    "resolved=(env,val)=>{throw new Error('OpenMoHAA missing usable emscripten longjmp helper')}"
+    "}"
+    "}"
     "if(!resolved&&prop.startsWith('invoke_')){"
     "resolved=(...invokeArgs)=>{"
     "var fnIndex=invokeArgs[0]|0;"
@@ -644,63 +603,6 @@ stub_new = (
     "if(typeof _setThrew==='function'){_setThrew(1,0)}else if(typeof setThrew==='function'){setThrew(1,0)}"
     "return 0"
     "}"
-    "}"
-    "}"
-    # emscripten_throw_longjmp — side module may import this directly (not
-    # only via the emscripten_longjmp handler). In JS exception mode it
-    # throws Infinity, which invoke_* catches and calls _setThrew(1,0).
-    "if(!resolved&&(prop==='emscripten_throw_longjmp'||prop==='_emscripten_throw_longjmp')){"
-    "resolved=()=>{throw Infinity}"
-    "}"
-    # emscripten_longjmp must also be resolved before resolveSymbol for the
-    # same reason — it may not exist in the main module's symbol table.
-    "if(!resolved&&prop==='emscripten_longjmp'){"
-    "var __throwLongjmp=()=>{throw Infinity};"
-    "var __cLongjmp=(typeof ___c_longjmp!=='undefined'&&___c_longjmp)||(typeof __c_longjmp!=='undefined'&&__c_longjmp);"
-    "try{__cLongjmp=__cLongjmp||resolveSymbol('__c_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
-    "try{__cLongjmp=__cLongjmp||resolveSymbol('___c_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
-    "__cLongjmp=__cLongjmp||(typeof globalThis!=='undefined'&&(globalThis.___c_longjmp||globalThis.__c_longjmp));"
-    "var __wasmLongjmp=(typeof ___wasm_longjmp!=='undefined'&&___wasm_longjmp)||(typeof __wasm_longjmp!=='undefined'&&__wasm_longjmp);"
-    "try{__wasmLongjmp=__wasmLongjmp||resolveSymbol('__wasm_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
-    "try{__wasmLongjmp=__wasmLongjmp||resolveSymbol('___wasm_longjmp')}catch(e){if(typeof ABORT!=='undefined')ABORT=false}"
-    "if(typeof __cLongjmp==='number'&&typeof wasmTable!=='undefined'){var __cLongjmpFn=wasmTable.get(__cLongjmp|0);if(__cLongjmpFn){__cLongjmp=__cLongjmpFn}}"
-    "if(typeof __wasmLongjmp==='number'&&typeof wasmTable!=='undefined'){var __wasmLongjmpFn=wasmTable.get(__wasmLongjmp|0);if(__wasmLongjmpFn){__wasmLongjmp=__wasmLongjmpFn}}"
-    "if(typeof __cLongjmp==='function'){"
-    "resolved=(env,val)=>__cLongjmp(env|0,val|0)"
-    "}else if(typeof __wasmLongjmp==='function'){"
-    "resolved=(env,val)=>__wasmLongjmp(env|0,val|0)"
-    "}else{"
-    "resolved=(env,val)=>__throwLongjmp()"
-    "}"
-    "}"
-    # Before calling resolveSymbol (which asserts/aborts on missing symbols),
-    # try globalThis and Module lookups first. This finds opm_ws_* bridge
-    # functions and any other JS-injected symbols without triggering abort().
-    "if(!resolved){"
-    "var __baseProp=String(prop||'');"
-    "var __trimmed=__baseProp.replace(/^_+/, '');"
-    "var __candidates=[__baseProp,'_'+__baseProp,__trimmed,'_'+__trimmed];"
-    "for(var __i=0;__i<__candidates.length&&!resolved;__i++){"
-    "var __name=__candidates[__i];"
-    "if(!__name){continue}"
-    "if(!resolved&&typeof Module!=='undefined'&&Module){resolved=Module[__name]||resolved}"
-    "if(!resolved&&typeof globalThis!=='undefined'&&globalThis){resolved=globalThis[__name]||resolved}"
-    "}"
-    "}"
-    # Wrap resolveSymbol in try-catch — newer Emscripten asserts (aborts) on
-    # missing symbols when called without {optional:true}. Reset ABORT flag
-    # since abort() sets it before throwing.
-    "if(!resolved){try{resolved=resolveSymbol(prop)}catch(e){if(typeof ABORT!=='undefined')ABORT=false}}"
-    "if(!resolved&&/^__cxa_find_matching_catch_\\d+$/.test(prop)){resolved=()=>0}"
-    # If resolveSymbol failed, try resolveSymbol with name variants as last resort.
-    "if(!resolved){"
-    "var __baseProp2=String(prop||'');"
-    "var __trimmed2=__baseProp2.replace(/^_+/, '');"
-    "var __candidates2=[__baseProp2,'_'+__baseProp2,__trimmed2,'_'+__trimmed2];"
-    "for(var __i2=0;__i2<__candidates2.length&&!resolved;__i2++){"
-    "var __name2=__candidates2[__i2];"
-    "if(!__name2||__name2===prop){continue}"
-    "if(typeof __name2==='string'&&typeof resolveSymbol==='function'){try{resolved=resolveSymbol(__name2)||resolved}catch(e){if(typeof ABORT!=='undefined')ABORT=false}}"
     "}"
     "}"
     "if(typeof resolved==='number'){"
@@ -716,7 +618,7 @@ stub_new = (
     "if(typeof resolved!=='function'){console.error('OpenMoHAA non-callable runtime import',prop,typeof resolved,resolved,args);"
     "throw new Error('OpenMoHAA non-callable runtime import: '+prop)}"
     "try{return resolved(...args)}catch(e){"
-    "if(prop==='emscripten_longjmp'||prop==='emscripten_throw_longjmp'||prop==='_emscripten_throw_longjmp'||e===Infinity){throw e}"
+    "if(prop==='emscripten_longjmp'){throw e}"
     "console.error('OpenMoHAA runtime import threw',prop,e,e&&e.message,e&&e.stack,args);"
     "throw e}}"
 )
@@ -726,6 +628,64 @@ if stub_old in src:
     print("Patched mohaa.js runtime import diagnostics")
 else:
     print("WARNING: Could not find runtime import stub marker; import diagnostics skipped")
+
+# Emscripten's side-module relocator resolves GOT entries through
+# resolveGlobalSymbol(), which only checks wasmImports. The proxy import stub
+# above can synthesise invoke_* wrappers during instantiation, but later GOT
+# resolution still asserts if invoke_ii / invoke_iii / etc. are absent from
+# wasmImports. Seed wasmImports lazily with equivalent wrappers so both lookup
+# paths see the same helpers.
+resolve_old = "var resolveGlobalSymbol=(symName,direct=false)=>{var sym;if(isSymbolDefined(symName)){sym=wasmImports[symName]}return{sym,name:symName}};"
+resolve_new = (
+    "var resolveGlobalSymbol=(symName,direct=false)=>{var sym;if(isSymbolDefined(symName)){sym=wasmImports[symName]}"
+    "if(!sym&&typeof symName==='string'){"
+    "var __baseSym=String(symName||'');"
+    "var __trimmedSym=__baseSym.replace(/^_+/, '');"
+    "var __candidates=[__baseSym,'_'+__baseSym,__trimmedSym,'_'+__trimmedSym];"
+    "for(var __i=0;__i<__candidates.length&&!sym;__i++){"
+    "var __name=__candidates[__i];"
+    "if(!__name){continue}"
+    "if(isSymbolDefined(__name)){sym=wasmImports[__name]}"
+    "if(!sym&&typeof Module!=='undefined'&&Module){sym=Module[__name]||sym}"
+    "if(!sym&&typeof globalThis!=='undefined'&&globalThis){sym=globalThis[__name]||sym}"
+    "}"
+    "}"
+    "if(!sym&&symName==='emscripten_longjmp'){"
+    "var __throwLongjmp=(typeof emscripten_throw_longjmp==='function'&&emscripten_throw_longjmp)||"
+    "(typeof _emscripten_throw_longjmp==='function'&&_emscripten_throw_longjmp)||"
+    "(typeof Module!=='undefined'&&Module&&(Module.emscripten_throw_longjmp||Module._emscripten_throw_longjmp))||"
+    "(typeof globalThis!=='undefined'&&globalThis&&(globalThis.emscripten_throw_longjmp||globalThis._emscripten_throw_longjmp));"
+    "var __cLongjmp=(typeof ___c_longjmp!=='undefined'&&___c_longjmp)||(typeof __c_longjmp!=='undefined'&&__c_longjmp)||"
+    "(typeof Module!=='undefined'&&Module&&(Module.___c_longjmp||Module.__c_longjmp))||"
+    "(typeof globalThis!=='undefined'&&globalThis&&(globalThis.___c_longjmp||globalThis.__c_longjmp));"
+    "var __wasmLongjmp=(typeof ___wasm_longjmp!=='undefined'&&___wasm_longjmp)||(typeof __wasm_longjmp!=='undefined'&&__wasm_longjmp)||"
+    "(typeof Module!=='undefined'&&Module&&(Module.___wasm_longjmp||Module.__wasm_longjmp))||"
+    "(typeof globalThis!=='undefined'&&globalThis&&(globalThis.___wasm_longjmp||globalThis.__wasm_longjmp));"
+    "if(typeof __cLongjmp==='number'&&typeof wasmTable!=='undefined'){var __cLongjmpFn=wasmTable.get(__cLongjmp|0);if(__cLongjmpFn){__cLongjmp=__cLongjmpFn}}"
+    "if(typeof __wasmLongjmp==='number'&&typeof wasmTable!=='undefined'){var __wasmLongjmpFn=wasmTable.get(__wasmLongjmp|0);if(__wasmLongjmpFn){__wasmLongjmp=__wasmLongjmpFn}}"
+    "if(typeof __throwLongjmp==='function'){sym=(env,val)=>__throwLongjmp(env|0,val|0)}"
+    "else if(typeof __cLongjmp==='function'){sym=(env,val)=>__cLongjmp(env|0,val|0)}"
+    "else if(typeof __wasmLongjmp==='function'){sym=(env,val)=>__wasmLongjmp(env|0,val|0)}"
+    "if(sym){wasmImports[symName]=sym}"
+    "}"
+    "if(!sym&&typeof symName==='string'&&symName.startsWith('invoke_')){"
+    "sym=(...invokeArgs)=>{"
+    "var fnIndex=invokeArgs[0]|0;"
+    "var fn=wasmTable.get(fnIndex);"
+    "try{return fn(...invokeArgs.slice(1))}catch(e){"
+    "if(e&&e.name==='ExitStatus'){throw e}"
+    "if(typeof _setThrew==='function'){_setThrew(1,0)}else if(typeof setThrew==='function'){setThrew(1,0)}"
+    "return 0}};"
+    "sym.sig=symName.slice('invoke_'.length);"
+    "wasmImports[symName]=sym"
+    "}"
+    "return{sym,name:symName}};"
+)
+if resolve_old in src:
+    src = src.replace(resolve_old, resolve_new, 1)
+    print("Patched mohaa.js resolveGlobalSymbol invoke_* fallback")
+else:
+    print("WARNING: Could not find resolveGlobalSymbol marker; invoke_* fallback skipped")
 
 # Pre-register cgame.so in dynamicLibraries so it loads on the main Emscripten thread
 # (before pthreads start) via loadDylibs(). This allows synchronous dlopen() from a
@@ -738,13 +698,12 @@ else:
 dynlib_old = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs),"
 dynlib_new = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs).concat(['main/cgame.so']),"
 if dynlib_new in src:
-    print("dynamicLibraries class constructor already patched (idempotent)")
+    print("dynamicLibraries already patched (idempotent)")
 elif dynlib_old in src:
     src = src.replace(dynlib_old, dynlib_new, 1)
-    print("Patched mohaa.js dynamicLibraries class constructor to pre-register cgame.so")
+    print("Patched mohaa.js dynamicLibraries to pre-register cgame.so")
 else:
-    # Not a fatal error: cgame.so is also pushed via _CGAME_PUSH in the mem block above.
-    print("NOTE: GodotExtension class constructor dynamicLibraries marker not found; relying on direct push above")
+    print("WARNING: Could not find dynamicLibraries marker in mohaa.js; cgame pre-registration skipped")
 
 # Wrap loadDylibs() iterations with try/catch so a failed lib (e.g. compile error) does
 # not escape as an unhandled rejection and prevents removeRunDependency("loadDylibs") from
@@ -870,16 +829,482 @@ js_path.write_text(src, encoding='utf-8')
 PY
 }
 
-render_web_html_from_templates() {
-    if [[ ! -f "$WEB_HTML_RENDERER" ]]; then
-        echo "ERROR: Missing HTML renderer script: $WEB_HTML_RENDERER" >&2
-        exit 1
+patch_web_html_disable_service_worker() {
+    local export_html="$EXPORT_HTML"
+    if [[ ! -f "$export_html" ]]; then
+        echo "WARNING: Export HTML not found for service worker patch: $export_html"
+        return
     fi
-    if [[ ! -d "$WEB_TEMPLATE_DIR" ]]; then
-        echo "ERROR: Missing web template directory: $WEB_TEMPLATE_DIR" >&2
-        exit 1
+
+    python3 - "$export_html" <<'PY'
+import sys
+from pathlib import Path
+
+html_path = Path(sys.argv[1])
+src = html_path.read_text(encoding='utf-8', errors='ignore')
+
+old = "if (GODOT_CONFIG['serviceWorker'] && GODOT_CONFIG['ensureCrossOriginIsolationHeaders'] && 'serviceWorker' in navigator) {"
+new = "if (false) {"
+
+if old in src:
+    src = src.replace(old, new, 1)
+else:
+    print("WARNING: Could not find service-worker registration marker in mohaa.html; patch skipped")
+
+sw_cfg_old = '"serviceWorker":"mohaa.service.worker.js"'
+sw_cfg_new = '"serviceWorker":""'
+if sw_cfg_old in src:
+    src = src.replace(sw_cfg_old, sw_cfg_new, 1)
+    print("Patched mohaa.html serviceWorker config to empty")
+else:
+    print("WARNING: Could not find serviceWorker config marker in mohaa.html")
+
+cleanup_marker = "<head>"
+cleanup_snippet = """<head>\n<script>(function(){\n  if (!('serviceWorker' in navigator)) return;\n  window.addEventListener('load', function(){\n    navigator.serviceWorker.getRegistrations()\n      .then(function(regs){ return Promise.all(regs.map(function(reg){ return reg.unregister(); })); })\n      .then(function(){\n        if (!('caches' in window)) return;\n        return caches.keys().then(function(keys){ return Promise.all(keys.map(function(key){ return caches.delete(key); })); });\n      })\n      .then(function(){ console.log('MOHAAjs: cleared stale service workers/caches'); })\n      .catch(function(err){ console.warn('MOHAAjs: SW cleanup warning', err); });\n  });\n})();</script>"""
+if cleanup_marker in src and "cleared stale service workers/caches" not in src:
+    src = src.replace(cleanup_marker, cleanup_snippet, 1)
+    print("Injected stale service-worker cleanup snippet")
+elif "cleared stale service workers/caches" in src:
+    print("Service-worker cleanup snippet already present")
+else:
+    print("WARNING: Could not inject service-worker cleanup snippet")
+
+html_path.write_text(src, encoding='utf-8')
+print("Patched mohaa.html to disable service-worker registration")
+PY
+
+    local sw_file
+    sw_file="$(dirname "$export_html")/mohaa.service.worker.js"
+    if [[ -f "$sw_file" ]]; then
+        rm -f "$sw_file"
+        echo "Removed generated service worker: $sw_file"
     fi
-    python3 "$WEB_HTML_RENDERER" "$EXPORT_HTML" "$WEB_TEMPLATE_DIR"
+}
+
+patch_web_html_file_picker() {
+    # Inject a local-file-picker UI + IndexedDB cache into mohaa.html so
+    # users can load their own MOHAA game files from disk.  Missing files
+    # are then gap-filled from the server by the JS preRun walker.
+    local export_html="$EXPORT_HTML"
+    if [[ ! -f "$export_html" ]]; then
+        echo "WARNING: Export HTML not found for file picker patch: $export_html"
+        return
+    fi
+
+    python3 - "$export_html" <<'PYPICK'
+import sys
+from pathlib import Path
+
+html_path = Path(sys.argv[1])
+src = html_path.read_text(encoding='utf-8', errors='ignore')
+
+# Idempotency: strip old picker content so we can re-inject with latest code
+if 'opm-loader' in src or 'mohaa-loader' in src:
+    import re
+    print("Stripping old file picker for re-injection...")
+    # Remove old CSS block (from marker comment to just before </style>)
+    src = re.sub(r'/\* ── MOHAAjs Local File Loader ── \*/.*?(?=</style>)', '', src, flags=re.DOTALL)
+    # Remove old HTML loader div (from either legacy or renamed loader id to its closing wrapper)
+    src = re.sub(r'\s*<div id="(?:opm|mohaa)-loader">.*?</div>\s*</div>\s*(?=\s*<script)', '\n', src, flags=re.DOTALL)
+
+# ── 1. Inject CSS before </style> ─────────────────────────────────────────
+picker_css = """
+/* ── MOHAAjs Local File Loader ── */
+#mohaa-loader {
+  position:fixed;inset:0;background:#1a1a1a;z-index:1000;
+  display:none;flex-direction:column;align-items:center;justify-content:center;
+  font-family:'Noto Sans',Arial,sans-serif;color:#e0e0e0;
+}
+.mohaa-inner{text-align:center;max-width:580px;padding:2rem}
+.mohaa-inner h2{color:#c0a060;font-size:1.8rem;margin:0 0 .4rem}
+.mohaa-inner p{margin:.4rem 0;line-height:1.5}
+.mohaa-hint{font-size:.85rem;color:#888}
+.mohaa-hint code{background:#333;padding:.1rem .4rem;border-radius:3px}
+.mohaa-game-select{margin:.6rem 0}
+.mohaa-game-select label{font-size:.9rem;color:#aaa;margin-right:.4rem}
+.mohaa-game-select select{
+  padding:.3rem .6rem;background:#333;color:#e0e0e0;border:1px solid #555;
+  border-radius:4px;font-size:.9rem;
+}
+.mohaa-cache-status{font-size:.85rem;color:#7a7;margin:.3rem 0}
+#mohaa-pick-section{display:none}
+.mohaa-btn{
+  display:inline-block;margin:1rem .5rem;padding:.7rem 2rem;
+  background:#c0a060;color:#1a1a1a;border:none;border-radius:6px;
+  font-size:1rem;font-weight:bold;cursor:pointer;transition:background .2s;
+}
+.mohaa-btn:hover{background:#d4b87a}
+.mohaa-btn:disabled{background:#555;cursor:not-allowed}
+.mohaa-link{
+  display:block;margin:.6rem auto;padding:.3rem;background:none;border:none;
+  color:#888;font-size:.85rem;cursor:pointer;text-decoration:underline;
+}
+.mohaa-link:hover{color:#aaa}
+#mohaa-prog-area{margin:1rem 0;display:none}
+#mohaa-file-prog{width:100%;height:6px}
+#mohaa-prog-text{font-size:.85rem;color:#aaa;margin-top:.3rem}
+.mohaa-disclaimer{font-size:.75rem;color:#666;margin-top:1.5rem;line-height:1.4;max-width:520px}
+.mohaa-disclaimer a{color:#888}
+"""
+
+style_close = '</style>'
+if style_close in src:
+    src = src.replace(style_close, picker_css + style_close, 1)
+    print("Injected file picker CSS")
+else:
+    print("WARNING: Could not find </style> for CSS injection")
+
+# ── 2. Inject HTML before <script src="mohaa.js"> ─────────────────────────
+picker_html = """
+\t\t<div id="mohaa-loader">
+\t\t\t<div class="mohaa-inner">
+\t\t\t\t<h2>MOHAAjs</h2>
+\t\t\t\t<p>Medal of Honor: Allied Assault</p>
+\t\t\t\t<div class="mohaa-game-select" id="mohaa-game-select">
+\t\t\t\t\t<label for="mohaa-target-game">Select game:</label>
+\t\t\t\t\t<select id="mohaa-target-game">
+\t\t\t\t\t\t<option value="0">Allied Assault (main)</option>
+\t\t\t\t\t\t<option value="1">Spearhead (mainta)</option>
+\t\t\t\t\t\t<option value="2">Breakthrough (maintt)</option>
+\t\t\t\t\t</select>
+\t\t\t\t</div>
+\t\t\t\t<p id="mohaa-cache-status" class="mohaa-cache-status"></p>
+\t\t\t\t<button id="mohaa-play-btn" class="mohaa-btn">Play</button>
+\t\t\t\t<div id="mohaa-pick-section">
+\t\t\t\t\t<p class="mohaa-hint"><strong>\u26a0\ufe0f Select the MOHAA <em>installation</em> folder</strong> \u2014 the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself!</p>
+\t\t\t\t\t<button id="mohaa-pick-btn" class="mohaa-btn">Select MOHAA Installation Folder</button>
+\t\t\t\t\t<input type="file" id="mohaa-input-fb" webkitdirectory multiple style="display:none">
+\t\t\t\t\t<div id="mohaa-prog-area">
+\t\t\t\t\t\t<progress id="mohaa-file-prog" style="width:100%"></progress>
+\t\t\t\t\t\t<p id="mohaa-prog-text">Reading files\u2026</p>
+\t\t\t\t\t</div>
+\t\t\t\t</div>
+\t\t\t\t<button id="mohaa-skip-btn" class="mohaa-link">Skip \u2014 use server files only</button>
+\t\t\t\t<p class="mohaa-disclaimer">MOHAAjs is an independent fan project and is not affiliated with, endorsed by, or connected to Electronic Arts, the OpenMoHAA project, or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
+\t\t\t</div>
+\t\t</div>
+
+"""
+
+script_tag = '<script src="mohaa.js"></script>'
+if script_tag in src:
+    src = src.replace(script_tag, picker_html + '\t\t' + script_tag, 1)
+    print("Injected file picker HTML")
+else:
+    print("WARNING: Could not find <script src=mohaa.js> for HTML injection")
+
+# ── 3. Replace the engine.startGame() boot block ──────────────────────────
+# On first patch: locate by original engine markers (setStatusMode/displayFailureNotice).
+# On re-patch: locate by either legacy OPM or current MOHAA custom markers.
+BOOT_MARKERS = [
+    ("/* MOHAA_BOOT_START */", "/* MOHAA_BOOT_END */"),
+    ("/* OPM_BOOT_START */", "/* OPM_BOOT_END */"),
+]
+BOOT_START = "setStatusMode('progress');"
+BOOT_END   = "}, displayFailureNotice);"
+
+si = -1
+ei = -1
+for start_marker, end_marker in BOOT_MARKERS:
+    mohaa_si = src.find(start_marker)
+    mohaa_ei = src.find(end_marker, mohaa_si) if mohaa_si >= 0 else -1
+    if mohaa_si >= 0 and mohaa_ei >= 0:
+        si = mohaa_si
+        ei = mohaa_ei + len(end_marker)
+        print("Found custom boot markers for re-patch")
+        break
+if si < 0 or ei < 0:
+    si = src.find(BOOT_START)
+    ei = src.find(BOOT_END, si) if si >= 0 else -1
+    if si >= 0 and ei >= 0:
+        ei += len(BOOT_END)
+        print("Found original engine boot markers for first-time patch")
+
+if si < 0 or ei < 0:
+    print("WARNING: Could not locate engine.startGame() boot block")
+    html_path.write_text(src, encoding='utf-8')
+    sys.exit(0)
+
+T2 = '\t\t'
+T3 = '\t\t\t'
+T4 = '\t\t\t\t'
+T5 = '\t\t\t\t\t'
+
+new_boot = f"""/* MOHAA_BOOT_START */
+{T2}/* MOHAAjs: Game Selector + Per-Game Cache + Local File Loader */
+{T2}(async function mohaaBoot() {{
+{T3}var DB_VER=1,ST='f';
+{T3}var GAME_DIRS={{0:'main',1:'mainta',2:'maintt'}};
+{T3}var GAME_NAMES={{0:'Allied Assault',1:'Spearhead',2:'Breakthrough'}};
+{T3}/* Which caches to load for each game (base + expansion) */
+{T3}var GAME_DEPS={{0:['main'],1:['main','mainta'],2:['main','maintt']}};
+{T3}var targetGame=0;
+{T3}window.__mohaaTargetGame=0;
+
+{T3}/* ── Pre-select from URL param ── */
+{T3}var urlParams=new URLSearchParams(window.location.search);
+{T3}var urlTG=urlParams.get('com_target_game');
+{T3}if(urlTG!==null){{var p=parseInt(urlTG,10);if(p>=0&&p<=2)targetGame=p}}
+
+{T3}var gameSel=document.getElementById('mohaa-target-game');
+{T3}var loader=document.getElementById('mohaa-loader');
+{T3}var pickSection=document.getElementById('mohaa-pick-section');
+{T3}var playBtn=document.getElementById('mohaa-play-btn');
+{T3}var cacheStatus=document.getElementById('mohaa-cache-status');
+{T3}if(gameSel)gameSel.value=String(targetGame);
+
+{T3}/* ── Per-game IndexedDB helpers ── */
+{T3}function dbName(gd){{return 'mohaa-'+gd}}
+{T3}function openGameDB(gd){{
+{T4}return new Promise(function(ok){{
+{T5}try{{var r=indexedDB.open(dbName(gd),DB_VER);
+{T5}r.onupgradeneeded=function(e){{var db=e.target.result;if(!db.objectStoreNames.contains(ST))db.createObjectStore(ST)}};
+{T5}r.onsuccess=function(e){{ok(e.target.result)}};
+{T5}r.onerror=function(){{ok(null)}}}}catch(e){{ok(null)}}
+{T4}}})
+{T3}}}
+
+{T3}async function loadFromDB(gd){{
+{T4}var db=await openGameDB(gd);if(!db)return null;
+{T4}return new Promise(function(ok){{
+{T5}try{{var tx=db.transaction(ST,'readonly'),s=tx.objectStore(ST),out={{}},n=0;
+{T5}var cur=s.openCursor();
+{T5}cur.onsuccess=function(e){{var c=e.target.result;if(c){{out[c.key]=c.value;n++;c.continue()}}else{{db.close();ok(n?out:null)}}}};
+{T5}cur.onerror=function(){{db.close();ok(null)}}}}catch(e){{db.close();ok(null)}}
+{T4}}})
+{T3}}}
+
+{T3}async function saveToDB(gd,files){{
+{T4}var db=await openGameDB(gd);if(!db)return;
+{T4}var keys=Object.keys(files),bs=20;
+{T4}for(var i=0;i<keys.length;i+=bs){{
+{T5}var chunk=keys.slice(i,i+bs);
+{T5}await new Promise(function(done){{
+{T5}{T2}try{{var tx=db.transaction(ST,'readwrite'),s=tx.objectStore(ST);
+{T5}{T2}chunk.forEach(function(k){{s.put(files[k],k)}});
+{T5}{T2}tx.oncomplete=done;tx.onerror=function(){{done()}}}}catch(e){{done()}}
+{T5}}})
+{T4}}}
+{T4}db.close()
+{T3}}}
+
+{T3}async function hasCache(gd){{
+{T4}var db=await openGameDB(gd);if(!db)return false;
+{T4}return new Promise(function(ok){{
+{T5}try{{var tx=db.transaction(ST,'readonly');var req=tx.objectStore(ST).count();
+{T5}req.onsuccess=function(){{db.close();ok(req.result>0)}};
+{T5}req.onerror=function(){{db.close();ok(false)}}}}catch(e){{db.close();ok(false)}}
+{T4}}})
+{T3}}}
+
+{T3}async function loadGameCaches(game){{
+{T4}var deps=GAME_DEPS[game]||['main'];
+{T4}/* ALL deps must be cached — partial hits are a cache miss */
+{T4}for(var i=0;i<deps.length;i++){{
+{T5}if(!(await hasCache(deps[i]))){{
+{T5}{T2}console.log('MOHAAjs: Cache miss: '+deps[i]+' not cached');
+{T5}{T2}return null
+{T5}}}
+{T4}}}
+{T4}var allFiles={{}};
+{T4}for(var i=0;i<deps.length;i++){{
+{T5}var files=await loadFromDB(deps[i]);
+{T5}if(files){{var ks=Object.keys(files);for(var j=0;j<ks.length;j++)allFiles[ks[j]]=files[ks[j]];
+{T5}console.log('MOHAAjs: Loaded '+ks.length+' files from '+deps[i]+' cache')}}
+{T4}}}
+{T4}return Object.keys(allFiles).length?allFiles:null
+{T3}}}
+
+{T3}async function cacheByGameDir(rawFiles){{
+{T4}var buckets={{}};var keys=Object.keys(rawFiles);
+{T4}for(var i=0;i<keys.length;i++){{
+{T5}var rel=keys[i].replace(/\\\\/g,'/');
+{T5}var slash=rel.indexOf('/');
+{T5}if(slash>0){{
+{T5}{T2}var td=rel.substring(0,slash).toLowerCase();
+{T5}{T2}if(td==='main'||td==='mainta'||td==='maintt'){{
+{T5}{T3}if(!buckets[td])buckets[td]={{}};buckets[td][rel]=rawFiles[keys[i]];continue
+{T5}{T2}}}
+{T5}}}
+{T5}if(!buckets['main'])buckets['main']={{}};buckets['main'][rel]=rawFiles[keys[i]]
+{T4}}}
+{T4}var dirs=Object.keys(buckets);
+{T4}console.log('MOHAAjs: Caching files for: '+dirs.join(', '));
+{T4}for(var d=0;d<dirs.length;d++){{
+{T5}var n=Object.keys(buckets[dirs[d]]).length;
+{T5}await saveToDB(dirs[d],buckets[dirs[d]]);
+{T5}console.log('MOHAAjs: Cached '+n+' files to '+dirs[d])
+{T4}}}
+{T3}}}
+
+{T3}async function updateCacheStatus(){{
+{T4}var parts=[];
+{T4}for(var k=0;k<3;k++){{
+{T5}var gd=GAME_DIRS[k];
+{T5}if(await hasCache(gd))parts.push(GAME_NAMES[k]+' \\u2714')
+{T4}}}
+{T4}if(cacheStatus)cacheStatus.textContent=parts.length?'Cached: '+parts.join(', '):'No cached game files'
+{T3}}}
+
+{T3}/* ── File reading helpers ── */
+{T3}async function mohaaReadDirHandle(h,prefix){{
+{T4}var files={{}};
+{T4}for await(var entry of h.values()){{
+{T5}if(entry.name.startsWith('.'))continue;
+{T5}var p=prefix?prefix+'/'+entry.name:entry.name;
+{T5}if(entry.kind==='directory'){{Object.assign(files,await mohaaReadDirHandle(entry,p))}}
+{T5}else{{try{{var f=await entry.getFile();files[p]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}}}
+{T4}}}
+{T4}return files
+{T3}}}
+
+{T3}async function mohaaReadViaInput(){{
+{T4}return new Promise(function(ok){{
+{T5}var inp=document.getElementById('mohaa-input-fb');
+{T5}inp.onchange=async function(){{
+{T5}{T2}var list=Array.from(inp.files),files={{}};
+{T5}{T2}var area=document.getElementById('mohaa-prog-area');
+{T5}{T2}var bar=document.getElementById('mohaa-file-prog');
+{T5}{T2}var txt=document.getElementById('mohaa-prog-text');
+{T5}{T2}area.style.display='block';bar.max=list.length;bar.value=0;
+{T5}{T2}for(var i=0;i<list.length;i++){{
+{T5}{T3}var f=list[i],rp=f.webkitRelativePath||f.name;
+{T5}{T3}var slash=rp.indexOf('/');if(slash>=0)rp=rp.substring(slash+1);
+{T5}{T3}if(!rp||rp.startsWith('.'))continue;
+{T5}{T3}try{{files[rp]=new Uint8Array(await f.arrayBuffer())}}catch(e){{}}
+{T5}{T3}bar.value=i+1;txt.textContent='Reading: '+(i+1)+'/'+list.length
+{T5}{T2}}}
+{T5}{T2}area.style.display='none';
+{T5}{T2}ok(Object.keys(files).length?files:null)
+{T5}}};
+{T5}inp.click()
+{T4}}})
+{T3}}}
+
+{T3}async function mohaaPickFiles(){{
+{T4}var area=document.getElementById('mohaa-prog-area');
+{T4}var txt=document.getElementById('mohaa-prog-text');
+{T4}if(window.showDirectoryPicker){{
+{T5}try{{
+{T5}{T2}area.style.display='block';txt.textContent='Reading files from folder\\u2026';
+{T5}{T2}var dh=await window.showDirectoryPicker({{mode:'read'}});
+{T5}{T2}var files=await mohaaReadDirHandle(dh,'');
+{T5}{T2}area.style.display='none';
+{T5}{T2}if(Object.keys(files).length)return files
+{T5}}}catch(e){{
+{T5}{T2}area.style.display='none';
+{T5}{T2}if(e.name==='AbortError')return null;
+{T5}{T2}console.warn('MOHAAjs: Directory picker error, trying fallback:',e)
+{T5}}}
+{T4}}}
+{T4}return mohaaReadViaInput()
+{T3}}}
+
+{T3}function mohaaMapFilesToMemfs(rawFiles){{
+{T4}var mapped={{}};var keys=Object.keys(rawFiles);var foundDirs={{}};
+{T4}for(var i=0;i<keys.length;i++){{
+{T5}var rel=keys[i].replace(/\\\\/g,'/');
+{T5}var firstSlash=rel.indexOf('/');
+{T5}if(firstSlash>0){{
+{T5}{T2}var topDir=rel.substring(0,firstSlash).toLowerCase();
+{T5}{T2}if(topDir==='main'||topDir==='mainta'||topDir==='maintt')foundDirs[topDir]=true
+{T5}}}
+{T5}mapped[rel]=rawFiles[keys[i]]
+{T4}}}
+{T4}var dirList=Object.keys(foundDirs);
+{T4}if(dirList.length>0)console.log('MOHAAjs: Detected game directories: '+dirList.join(', '));
+{T4}else console.warn('MOHAAjs: No main/mainta/maintt subdirs found in selection');
+{T4}return mapped
+{T3}}}
+
+{T3}/* ── Engine starter ── */
+{T3}function startEngine(){{
+{T4}var currentUrl=new URL(window.location.href);
+{T4}currentUrl.searchParams.set('com_target_game',String(targetGame));
+{T4}window.history.replaceState(null,'',currentUrl.toString());
+{T4}window.__mohaaTargetGame=targetGame;
+{T4}window.__mohaaGameDir=GAME_DIRS[targetGame]||'main';
+{T4}setStatusMode('progress');
+{T4}var engineArgs=['+set','com_target_game',String(targetGame)];
+{T4}var qMap=urlParams.get('map');
+{T4}if(qMap)engineArgs.push('+map',qMap);
+{T4}var qExec=urlParams.get('exec');
+{T4}if(qExec)engineArgs.push('+exec',qExec);
+{T4}if(urlParams.get('server')==='1'&&!qExec)engineArgs.push('+exec','server.cfg');
+{T4}if(urlParams.get('dedicated')==='1')engineArgs.push('--dedicated');
+{T4}var qConnect=urlParams.get('connect');
+{T4}if(qConnect)engineArgs.push('+connect',qConnect);
+{T4}var qRelay=urlParams.get('relay');
+{T4}if(qRelay){{
+{T5}qRelay=qRelay.replace('ws://','').replace('wss://','');
+{T5}engineArgs.push('+set','net_ws_relay',qRelay);
+{T4}}}
+{T4}engine.startGame({{
+{T5}'args':engineArgs,
+{T5}'onProgress':function(current,total){{
+{T5}{T2}if(current>0&&total>0){{statusProgress.value=current;statusProgress.max=total}}
+{T5}{T2}else{{statusProgress.removeAttribute('value');statusProgress.removeAttribute('max')}}
+{T5}}}
+{T4}}}).then(function(){{setStatusMode('hidden')}},displayFailureNotice)
+{T3}}}
+
+{T3}/* ── Always show game picker ── */
+{T3}statusOverlay.style.visibility='hidden';
+{T3}loader.style.display='flex';
+{T3}if(pickSection)pickSection.style.display='none';
+{T3}await updateCacheStatus();
+
+{T3}await new Promise(function(resolve){{
+{T4}playBtn.onclick=async function(){{
+{T5}targetGame=parseInt(gameSel.value,10)||0;
+{T5}window.__mohaaTargetGame=targetGame;
+{T5}playBtn.disabled=true;playBtn.textContent='Loading\\u2026';
+{T5}/* Check per-game caches */
+{T5}var cached=await loadGameCaches(targetGame);
+{T5}if(cached){{
+{T5}{T2}console.log('MOHAAjs: Cache hit for '+GAME_NAMES[targetGame]);
+{T5}{T2}window.__mohaaLocalFiles=cached;
+{T5}{T2}loader.style.display='none';
+{T5}{T2}resolve();return
+{T5}}}
+{T5}/* No cache \u2014 show file picker */
+{T5}playBtn.style.display='none';
+{T5}if(pickSection)pickSection.style.display='block';
+{T5}document.getElementById('mohaa-pick-btn').onclick=async function(){{
+{T5}{T2}this.disabled=true;
+{T5}{T2}var rawFiles=await mohaaPickFiles();
+{T5}{T2}if(rawFiles){{
+{T5}{T3}targetGame=parseInt(gameSel.value,10)||0;
+{T5}{T3}window.__mohaaTargetGame=targetGame;
+{T5}{T3}window.__mohaaGameDir=GAME_DIRS[targetGame]||'main';
+{T5}{T3}var files=mohaaMapFilesToMemfs(rawFiles);
+{T5}{T3}var n=Object.keys(files).length;
+{T5}{T3}console.log('MOHAAjs: Read '+n+' local files (target: '+GAME_NAMES[targetGame]+')');
+{T5}{T3}window.__mohaaLocalFiles=files;
+{T5}{T3}loader.style.display='none';
+{T5}{T3}cacheByGameDir(files).catch(function(e){{console.warn('MOHAAjs: Cache save failed',e)}});
+{T5}{T3}resolve()
+{T5}{T2}}}else{{this.disabled=false}}
+{T5}}}
+{T4}}};
+{T4}document.getElementById('mohaa-skip-btn').onclick=function(){{
+{T5}targetGame=parseInt(gameSel.value,10)||0;
+{T5}window.__mohaaTargetGame=targetGame;
+{T5}loader.style.display='none';
+{T5}resolve()
+{T4}}}
+{T3}}});
+
+{T3}startEngine()
+{T2}}})().catch(displayFailureNotice);
+/* MOHAA_BOOT_END */"""
+
+src = src[:si] + new_boot + src[ei:]
+print("Patched boot sequence with local file picker gate")
+
+html_path.write_text(src, encoding='utf-8')
+print("File picker HTML patch complete")
+PYPICK
 }
 
 patch_web_ws_relay() {
@@ -953,16 +1378,16 @@ ws_bridge_js = r"""
 
             _opmWsRelay.onopen = function() {
                 _opmWsConnected = true;
-                console.log('[mohaa-ws] Connected to relay:', url);
+                console.log('mohaa-ws: Connected to relay:', url);
             };
 
             _opmWsRelay.onclose = function(ev) {
                 _opmWsConnected = false;
-                console.log('[mohaa-ws] Disconnected from relay, code=' + ev.code);
+                console.log('mohaa-ws: Disconnected from relay, code=' + ev.code);
             };
 
             _opmWsRelay.onerror = function(ev) {
-                console.error('[mohaa-ws] WebSocket error:', ev);
+                console.error('mohaa-ws: WebSocket error:', ev);
             };
 
             _opmWsRelay.onmessage = function(ev) {
@@ -973,7 +1398,7 @@ ws_bridge_js = r"""
 
             return 1;
         } catch (e) {
-            console.error('[mohaa-ws] Failed to create WebSocket:', e);
+            console.error('mohaa-ws: Failed to create WebSocket:', e);
             return 0;
         }
     };
@@ -1002,12 +1427,12 @@ ws_bridge_js = r"""
         try {
             var M = _getModule();
             var heap = M ? M.HEAPU8 : (typeof HEAPU8 !== 'undefined' ? HEAPU8 : null);
-            if (!heap) { console.error('[mohaa-ws] Send: no HEAPU8'); return 0; }
+            if (!heap) { console.error('mohaa-ws: Send: no HEAPU8'); return 0; }
             var data = heap.slice(data_ptr, data_ptr + length);
             _opmWsRelay.send(data.buffer);
             return 1;
         } catch (e) {
-            console.error('[mohaa-ws] Send failed:', e);
+            console.error('mohaa-ws: Send failed:', e);
             return 0;
         }
     };
@@ -1024,7 +1449,7 @@ ws_bridge_js = r"""
         var len = Math.min(pkt.length, maxlen);
         var M = _getModule();
         var heap = M ? M.HEAPU8 : (typeof HEAPU8 !== 'undefined' ? HEAPU8 : null);
-        if (!heap) { console.error('[mohaa-ws] Recv: no HEAPU8'); return 0; }
+        if (!heap) { console.error('mohaa-ws: Recv: no HEAPU8'); return 0; }
         heap.set(pkt.subarray(0, len), data_ptr);
         return len;
     };
@@ -1046,7 +1471,7 @@ ws_bridge_js = r"""
     globalThis.opm_ws_recv   = globalThis._opm_ws_recv;
     globalThis.opm_ws_status = globalThis._opm_ws_status;
 
-    console.log('[mohaa-ws] WebSocket relay bridge registered on globalThis');
+    console.log('mohaa-ws: WebSocket relay bridge registered on globalThis');
 })();
 /* ═══════ End OpenMoHAA WebSocket Relay Bridge ═══════ */
 """
@@ -1054,9 +1479,7 @@ ws_bridge_js = r"""
 # Inject the bridge early in the JS file. The exact position doesn't matter
 # since we use globalThis (always available), not Module.
 marker = "var ENVIRONMENT_IS_WEB="
-if "OpenMoHAA WebSocket Relay Bridge" in src:
-    print("WebSocket relay bridge already injected (idempotent)")
-elif marker in src:
+if marker in src:
     src = src.replace(marker, ws_bridge_js + marker, 1)
     print("Patched mohaa.js with WebSocket relay bridge functions (globalThis)")
 else:
@@ -1066,14 +1489,209 @@ js_path.write_text(src, encoding='utf-8')
 PYWS
 }
 
+obfuscate_godot_fingerprints() {
+    # Post-build pass: remove/rename ALL Godot-identifiable strings from the
+    # exported JS, HTML, and audio worklet files so the engine lineage is not
+    # visible in browser DevTools, page source, or network requests.
+    #
+    # This is purely cosmetic — WASM binaries are already opaque bytecode.
+    # We rename identifiers consistently across all files so cross-references
+    # (e.g. worklet processor names) remain valid.
+
+    local export_dir="$EXPORT_DIR"
+    [[ -d "$export_dir" ]] || return 0
+
+    python3 - "$export_dir" << 'PYOBF'
+import sys, os, re, pathlib
+
+export_dir = pathlib.Path(sys.argv[1])
+
+# ── Files to process ──
+js_file = export_dir / 'mohaa.js'
+html_file = export_dir / 'mohaa.html'
+worklet_file = export_dir / 'mohaa.audio.worklet.js'
+pos_worklet_file = export_dir / 'mohaa.audio.position.worklet.js'
+manifest_file = export_dir / 'mohaa.manifest.json'
+
+def read(p):
+    return p.read_text(encoding='utf-8') if p.exists() else None
+
+def write(p, txt):
+    if txt is not None:
+        p.write_text(txt, encoding='utf-8')
+
+# ── 1. Identifier renaming (order matters: longer matches first) ──
+# These replacements are applied to ALL text files.
+renames = [
+    # PascalCase class names
+    ('GodotAudioScript',             'OpmAudioScript'),
+    ('GodotAudioWorklet',            'OpmAudioWorklet'),
+    ('GodotAudio',                   'OpmAudio'),
+    ('GodotChannel',                 'OpmChannel'),
+    ('GodotConfig',                  'OpmConfig'),
+    ('GodotDisplayCursor',           'OpmDisplayCursor'),
+    ('GodotDisplayScreen',           'OpmDisplayScreen'),
+    ('GodotDisplayVK',               'OpmDisplayVK'),
+    ('GodotDisplay',                 'OpmDisplay'),
+    ('GodotEmscripten',              'OpmEmscripten'),
+    ('GodotEventListeners',          'OpmEventListeners'),
+    ('GodotFetch',                   'OpmFetch'),
+    ('GodotFS',                      'OpmFS'),
+    ('GodotIME',                     'OpmIME'),
+    ('GodotInputDragDrop',           'OpmInputDragDrop'),
+    ('GodotInputGamepads',           'OpmInputGamepads'),
+    ('GodotInput',                   'OpmInput'),
+    ('GodotJSWrapper',               'OpmJSWrapper'),
+    ('GodotOS',                      'OpmOS'),
+    ('GodotPWA',                     'OpmPWA'),
+    ('GodotRTCDataChannel',          'OpmRTCDataChannel'),
+    ('GodotRTCPeerConnection',       'OpmRTCPeerConnection'),
+    ('GodotRuntime',                 'OpmRuntime'),
+    ('GodotWebGL',                   'OpmWebGL'),
+    ('GodotWebMidi',                 'OpmWebMidi'),
+    ('GodotWebSocket',               'OpmWebSocket'),
+    ('GodotWebXR',                   'MohaaWebXR'),
+    ('GodotProcessor',               'MohaaProcessor'),
+    ('GodotPositionReportingProcessor', 'MohaaPositionReportingProcessor'),
+
+    # Worklet processor registration names (cross-referenced between JS and worklet files)
+    ('godot-position-reporting-processor', 'mohaa-position-reporting-processor'),
+    ('godot-processor',              'mohaa-processor'),
+
+    # Config property names (HTML + JS)
+    ('gdextensionLibs',              'extensionLibs'),
+    ('godotPoolSize',                'workerPoolSize'),
+
+    # UPPER_CASE config names (HTML inline script)
+    ('GODOT_THREADS_ENABLED',        'MOHAA_THREADS_ENABLED'),
+    ('GODOT_CONFIG',                 'MOHAA_CONFIG'),
+
+    # NOTE: Do NOT rename godot_* / _godot_* snake_case function names!
+    # These are WASM import/export symbols (C-exported via Emscripten) and
+    # C++ mangled names (e.g. _Z14godot_web_mainiPPc). The .wasm binary
+    # still references the original names — renaming them in JS breaks linking.
+
+    # Safe string-only renames
+    ('OpenMoHAA',                    'MOHAAjs'),
+    ('godotengine.org',              'openmohaa.net'),
+]
+
+def apply_renames(txt):
+    for old, new in renames:
+        txt = txt.replace(old, new)
+    # Only rename user-visible "Godot" text, NOT snake_case function names
+    # which are WASM import symbols that must match the compiled binary.
+    txt = re.sub(r'\bGodot Engine\b', 'MOHAAjs Engine', txt)
+    txt = re.sub(r'\bGodot projects\b', 'projects', txt)
+    # Rename PascalCase "Godot" only when NOT preceded by _ or lowercase
+    # (to avoid mangled C++ names like _Z14godot_web_mainiPPc)
+    # The PascalCase class renames above already handle GodotXxx classes.
+    # This catches any remaining standalone "Godot" in string literals.
+    txt = re.sub(r'(?<![_a-z0-9])Godot(?![_a-z])', 'Opm', txt)
+    return txt
+
+# ── 2. Strip copyright headers mentioning Godot from worklet files ──
+def strip_godot_headers(txt):
+    if txt is None:
+        return None
+    # Remove multi-line /* ... GODOT ENGINE ... */ comment blocks
+    txt = re.sub(
+        r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/\s*',
+        '',
+        txt,
+        count=0,
+        flags=re.DOTALL
+    )
+    # Remove any remaining single-line // comments mentioning godot
+    txt = re.sub(r'//.*godot.*\n', '\n', txt, flags=re.IGNORECASE)
+    return txt
+
+# ── 3. Silence noisy console output in mohaa.js ──
+def silence_console(txt):
+    if txt is None:
+        return None
+    marker = '/*mohaa-console-silence*/'
+    # Strip any previously-prepended silencers (idempotent)
+    txt = re.sub(r'(?:/\*mohaa-console-silence\*/\s*)?\(function\(\)\{var _n=function\(\)\{\};\s*console\.log=_n;\s*console\.info=_n;\s*console\.warn=_n;\s*console\.debug=_n;\}\)\(\);\n?', '', txt)
+    # Redirect console.log/info/debug to no-ops.  Keep warn and error for debugging.
+    silencer = (
+        marker + '(function(){var _n=function(){}; '
+        'console.log=_n; console.info=_n; '
+        'console.debug=_n;})();\n'
+    )
+    txt = silencer + txt
+    return txt
+
+# ── 4. Clean HTML ──
+def clean_html(txt):
+    if txt is None:
+        return None
+    txt = apply_renames(txt)
+    # After apply_renames, "Godot" is now "Opm" — match the transformed text
+    txt = txt.replace(
+        'required to run Opm projects on the Web are missing',
+        'required to run this application on the Web are missing'
+    )
+    txt = txt.replace(
+        'required to run projects on the Web are missing',
+        'required to run this application on the Web are missing'
+    )
+    # Clean page title if still default
+    txt = txt.replace('OpenMoHAA Test', 'MOHAAjs')
+    txt = txt.replace('OpenMoHAA', 'MOHAAjs')
+    return txt
+
+# ── Process all files ──
+counts = {}
+
+# mohaa.js — main runtime
+js = read(js_file)
+if js:
+    js = silence_console(js)
+    js = apply_renames(js)
+    # Strip the "Godot Engine v4.x.x" startup banner from print output
+    js = re.sub(r'Opm Engine v[\d.]+[^\n]*', '', js)
+    write(js_file, js)
+    counts['mohaa.js'] = True
+
+# mohaa.html
+html = read(html_file)
+if html:
+    html = clean_html(html)
+    write(html_file, html)
+    counts['mohaa.html'] = True
+
+# Audio worklet files
+for wf in [worklet_file, pos_worklet_file]:
+    w = read(wf)
+    if w:
+        w = strip_godot_headers(w)
+        w = apply_renames(w)
+        write(wf, w)
+        counts[wf.name] = True
+
+# Manifest
+m = read(manifest_file)
+if m:
+    m = m.replace('OpenMoHAA Test', 'MOHAAjs')
+    m = m.replace('OpenMoHAA', 'MOHAAjs')
+    write(manifest_file, m)
+    counts['manifest'] = True
+
+print(f"Obfuscated Godot fingerprints in {len(counts)} files: {', '.join(counts.keys())}")
+PYOBF
+}
+
 cd "$OPENMOHAA_DIR"
 
 if [[ "$PATCH_ONLY" -eq 1 ]]; then
     echo "Patch-only mode: re-applying JS/HTML patches to existing export..."
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
-    render_web_html_from_templates
+    patch_web_html_disable_service_worker
+    patch_web_html_file_picker
     patch_web_ws_relay
+    obfuscate_godot_fingerprints
     echo "Patch-only complete."
     if [[ "$SERVE_ONLY" -eq 1 ]]; then
         serve_docker
@@ -1102,25 +1720,30 @@ for artifact in "${WASM_ARTIFACTS[@]}"; do
     echo "Deployed: $(basename "$artifact") -> $PROJECT_BIN_DIR"
 done
 
-# Keep a canonical filename that existing Godot export presets/paths expect.
-CANONICAL_WASM="$PROJECT_BIN_DIR/libopenmohaa.wasm"
-if [[ ! -f "$CANONICAL_WASM" ]]; then
-    cp -f "${WASM_ARTIFACTS[0]}" "$CANONICAL_WASM"
-    echo "Deployed canonical wasm: $(basename "${WASM_ARTIFACTS[0]}") -> $CANONICAL_WASM"
-fi
-
 sync_gdextension_web_entries "${WASM_ARTIFACTS[@]}"
 
-if [[ "$BUILD_ONLY" -eq 1 ]]; then
-    echo "Build-only mode: produced wasm artefacts in $OPENMOHAA_DIR/bin"
-    printf '  - %s\n' "${WASM_ARTIFACTS[@]}"
-    echo "Build-only mode: deployed wasm artefacts to $PROJECT_BIN_DIR and updated $PROJECT_GDEXT"
-    echo "Web build complete (target=$BUILD_TARGET)."
-    exit 0
+if [[ "$COPY_GAME_FILES" -eq 1 ]]; then
+    # GAME_FILES_DIR should point to the MOHAA install root (parent of main/, mainta/, maintt/).
+    # If it points directly to main/, use its parent instead.
+    GAME_BASE_DIR="$GAME_FILES_DIR"
+    if [[ "$(basename "$GAME_BASE_DIR")" == "main" ]]; then
+        GAME_BASE_DIR="$(dirname "$GAME_BASE_DIR")"
+    fi
+    # Copy each game directory that exists
+    for gdir in main mainta maintt; do
+        if [[ -d "$GAME_BASE_DIR/$gdir" ]]; then
+            mkdir -p "$EXPORT_DIR/$gdir"
+            rsync -a --delete --exclude='.*' "$GAME_BASE_DIR/$gdir/" "$EXPORT_DIR/$gdir/"
+            echo "Copied game files: $GAME_BASE_DIR/$gdir -> $EXPORT_DIR/$gdir"
+        fi
+    done
+    if [[ ! -d "$GAME_BASE_DIR/main" && ! -d "$GAME_FILES_DIR" ]]; then
+        echo "WARNING: Game files directory not found: $GAME_FILES_DIR"
+    fi
 fi
 
 # Ensure web export always uses the freshly built cgame module from this build,
-# not a stale file in dist/web from previous runs.
+# not a potentially stale copy from GAME_FILES_DIR.
 # For web builds SCons+emcc may produce libcgame.wasm (WASM SIDE_MODULE) or
 # libcgame.so (same WASM content with .so extension).  Check both.
 CGAME_ARTIFACT=""
@@ -1133,13 +1756,6 @@ if [[ -n "$CGAME_ARTIFACT" ]]; then
     mkdir -p "$EXPORT_DIR/main"
     cp -f "$CGAME_ARTIFACT" "$EXPORT_DIR/main/cgame.so"
     echo "Deployed: $(basename "$CGAME_ARTIFACT") -> $EXPORT_DIR/main/cgame.so"
-    # Also deploy to expansion game dirs so SH/BT can find cgame.so.
-    # The binary is identical for all three games.
-    for _expdir in mainta maintt; do
-        mkdir -p "$EXPORT_DIR/$_expdir"
-        cp -f "$CGAME_ARTIFACT" "$EXPORT_DIR/$_expdir/cgame.so"
-        echo "Deployed: $(basename "$CGAME_ARTIFACT") -> $EXPORT_DIR/$_expdir/cgame.so"
-    done
     # Sanity check: WASM files start with \0asm magic; warn if the file is
     # still an ELF (native) binary which Emscripten dlopen cannot load.
     if file "$EXPORT_DIR/main/cgame.so" 2>/dev/null | grep -q "ELF"; then
@@ -1162,8 +1778,10 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
 
     MAIN_FILES_MANIFEST="$(generate_web_main_manifest)"
     patch_web_runtime_memory "$MAIN_FILES_MANIFEST"
-    render_web_html_from_templates
+    patch_web_html_disable_service_worker
+    patch_web_html_file_picker
     patch_web_ws_relay
+    obfuscate_godot_fingerprints
 fi
 
 echo "Web build complete (target=$BUILD_TARGET)."

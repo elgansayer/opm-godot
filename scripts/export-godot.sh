@@ -87,7 +87,7 @@ echo "  preset:   $preset"
 echo "  variant:  $VARIANT"
 echo "  output:   $output"
 
-LOG_FILE="$(mktemp -t opm-godot-export.XXXXXX.log)"
+LOG_FILE="$(mktemp -t mohaa-godot-export.XXXXXX.log)"
 trap 'rm -f "$LOG_FILE"' EXIT
 
 GODOT_ARGS=(--headless --path "$PROJECT_DIR" "$export_cmd" "$preset" "$output")
