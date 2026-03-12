@@ -12,6 +12,7 @@ var launch_map = ""
 var exec_cfg = ""
 var last_state_logged = -999
 var web_net_tweaks_applied = false
+var last_web_reported_map = ""
 
 func _ready():
 	print("Main: Script started.")
@@ -306,16 +307,28 @@ func _process(delta):
 
 	if runner and runner.is_engine_initialized():
 		var server_state = runner.get_server_state()
+		var current_map = runner.get_current_map()
 		if server_state != last_state_logged:
 			last_state_logged = server_state
 			print("Main: server_state -> ", runner.get_server_state_string(),
 				" (", server_state, ")")
 
+		if OS.has_feature("web") and current_map != "" and server_state == 3 and current_map != last_web_reported_map:
+			last_web_reported_map = current_map
+			if Engine.has_singleton("JavaScriptBridge"):
+				var js = Engine.get_singleton("JavaScriptBridge")
+				if js:
+					# Web E2E fallback: startup map can already be active before the
+					# original signal path is observed, so publish the live map state.
+					js.eval("window.__mohaaMapLoaded = " + JSON.stringify(current_map) + ";")
+					js.eval("window.__mohaaMapLoadedLog = " + JSON.stringify("Main: POLL map_loaded -> " + current_map) + ";")
+				print("Main: POLL map_loaded -> ", current_map)
+
 		status_log_timer += delta
 		if status_log_timer >= 5.0:
 			status_log_timer = 0.0
 			print("Main: Status state=", runner.get_server_state_string(),
-				" map=", runner.get_current_map(),
+				" map=", current_map,
 				" players=", runner.get_player_count())
 
 func take_screenshot(label: String):
