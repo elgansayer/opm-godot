@@ -1,7 +1,0 @@
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/mohaa-engine.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/mohaa-export.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/mohaa-sign-android.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/mohaa-sign-ios.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/mohaa-package.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/edit_cache.dir
-/run/media/elgan/bdb8dbed-86d7-41d2-90f3-09a45ed5ad9c1/dev/opm-godot/build-cmake/macos-release/CMakeFiles/rebuild_cache.dir

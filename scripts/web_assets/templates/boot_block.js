@@ -261,6 +261,19 @@
 				return mapped;
 			}
 
+			/* Global quit handler — called from GDScript via JavaScriptBridge
+			   when the engine signals engine_shutdown_requested. Releases pointer
+			   lock, suppresses further errors, and navigates back to the game
+			   selector after a short delay for Godot cleanup. */
+			window.onEngineQuit = function() {
+				console.log('MOHAAjs: Engine quit — returning to game selector');
+				window.__mohaaQuitRequested = true;
+				try { document.exitPointerLock(); } catch(e) {}
+				setTimeout(function() {
+					window.location.href = window.location.pathname;
+				}, 200);
+			};
+
 			function startEngine() {
 				var currentUrl = new URL(window.location.href);
 				currentUrl.searchParams.set('com_target_game', String(targetGame));
@@ -299,7 +312,7 @@
 			}
 
 			statusOverlay.style.visibility = 'hidden';
-			loader.style.display = 'flex';
+			loader.style.display = 'block';
 			if (pickSection) pickSection.style.display = 'none';
 			await updateCacheStatus();
 

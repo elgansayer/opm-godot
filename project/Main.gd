@@ -236,11 +236,10 @@ func _on_engine_shutdown():
 		if js:
 			js.eval("if(typeof onEngineQuit === 'function') onEngineQuit();")
 			print("Main: Called JS onEngineQuit()")
-			# Refresh the page to return to the selection screen
-			js.eval("window.location.reload();")
-	else:
-		# For native platforms, gracefully exit the Godot process
-		get_tree().quit()
+	# Quit the Godot tree. On web this stops the Emscripten main loop
+	# (preventing CxxException storms); the JS onEngineQuit() handler
+	# navigates back to the game selector after a short delay.
+	get_tree().quit()
 
 func _unhandled_key_input(event: InputEvent):
 	if not (event is InputEventKey and event.pressed and not event.echo):

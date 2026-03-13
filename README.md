@@ -64,6 +64,23 @@ mohaa-godot/
 |- openmohaa/               Engine source and SCons build
 |- project/                 Godot project and export presets
 |- scripts/                 Build/export/package/test helpers
+|  |- build-desktop.sh      Desktop engine build + staging
+|  |- build-web.sh          Web engine build, export, patching, and serving
+|  |- export-godot.sh       Godot CLI export step
+|  |- package-build.sh      Package dist archives
+|  `- web_assets/           Static assets and scripts for web patching
+|     |- patch_web_js.py    Applies 10 named patches to Emscripten-generated mohaa.js
+|     |- render_html_template.py  Patches the exported HTML with templates
+|     |- js/                Static JavaScript injected into mohaa.js
+|     |  |- module_prerun.js        Memory polyfill, stdout capture, VFS preloader
+|     |  |- stubs_resolver.js       C++ exception ABI, longjmp, invoke_* wrappers
+|     |  |- resolve_global_symbol.js  Extended symbol resolution with fallbacks
+|     |  `- ws_relay_bridge.js      WebSocket relay bridge for multiplayer
+|     `- templates/         HTML/CSS/JS templates injected into mohaa.html
+|        |- boot_block.js           Boot UI, file picker logic, cvar display
+|        |- file_picker.html        Pak file upload form
+|        |- file_picker.css         File picker and boot UI styles
+|        `- service_worker_cleanup_head.html  Service worker unregistration
 |- dist/                    Packaged exports
 |- build-cmake/             CMake configure trees
 |- docker/                  Web hosting stack
@@ -86,6 +103,15 @@ There are four layers in the current build pipeline:
 
 4. `build.sh` and root CMake
    High-level orchestration over the scripts above.
+
+### Web patching pipeline
+
+The web build has an extra post-export step. Godot's Emscripten export produces vanilla HTML and JS files that need game-specific patches to work with the OpenMoHAA engine. Two Python scripts handle this:
+
+- `scripts/web_assets/patch_web_js.py` applies 10 named patches to `mohaa.js`: memory pre-grow, Module preRun injection, Emscripten symbol diagnostics, C++ stubs resolver, resolveGlobalSymbol extension, cgame.so pre-registration, loadDynamicLibraries override, locateFile override, CXA exception stubs, and WebSocket relay bridge.
+- `scripts/web_assets/render_html_template.py` patches `mohaa.html` with service worker cleanup, file picker UI, boot block JS, and CSS from template files.
+
+All injected JavaScript lives in `scripts/web_assets/js/` as standalone `.js` files. All injected HTML, CSS, and boot JS lives in `scripts/web_assets/templates/`. The Python scripts read these static files and insert them at the correct locations in the exported output — no inline heredocs or string construction.
 
 For Web specifically, the current full pipeline is special: `scripts/build-web.sh` exports and patches the web build in `web/`, while some adjacent scripts still expect a later `dist/web/<variant>/` layout. Treat `build.sh web-full` as the source of truth for the current web flow.
 
@@ -734,7 +760,9 @@ cmake --build --preset web-release-export
 Notes:
 
 - `scripts/build-web.sh` expects an Emscripten SDK, defaulting to `~/emsdk`.
-- The full web flow is more than just a Godot export; it also applies web-specific JS patching and asset-preload logic.
+- The full web flow is more than just a Godot export; it also applies web-specific JS and HTML patching via `scripts/web_assets/patch_web_js.py` and `scripts/web_assets/render_html_template.py` (see [Web patching pipeline](#web-patching-pipeline)).
+- Use `--patch-only` to re-run just the patching step without rebuilding or re-exporting.
+- Use `--serve` to start a local HTTPS dev server on port 8443 after building.
 - The current full pipeline writes the patched browser build to `web/mohaa.html` and stages related files under `web/`.
 - Some surrounding scripts still expect `dist/web/<variant>/`, including `build.sh serve`, `scripts/build-web-docker.sh`, and `scripts/deploy.sh`, so that part of the web toolchain is not fully reconciled yet.
 

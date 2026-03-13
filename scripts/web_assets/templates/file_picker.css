@@ -2,68 +2,295 @@
 #mohaa-loader {
   position: fixed;
   inset: 0;
-  background: #1a1a1a;
+  background: #111;
   z-index: 1000;
   display: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: 'Segoe UI', 'Noto Sans', Arial, sans-serif;
+  color: #d0d0d0;
+  -webkit-overflow-scrolling: touch;
+}
+.mohaa-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2.5rem 2rem 3rem;
+  display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  font-family: 'Noto Sans', Arial, sans-serif;
-  color: #e0e0e0;
+  min-height: 100vh;
+  box-sizing: border-box;
 }
-.mohaa-inner { text-align: center; max-width: 580px; padding: 2rem; }
-.mohaa-inner h2 { color: #c0a060; font-size: 1.8rem; margin: 0 0 .4rem; }
-.mohaa-inner p { margin: .4rem 0; line-height: 1.5; }
-.mohaa-hint { font-size: .85rem; color: #888; }
-.mohaa-hint code { background: #333; padding: .1rem .4rem; border-radius: 3px; }
-.mohaa-game-select { margin: .6rem 0; }
-.mohaa-game-select label { font-size: .9rem; color: #aaa; margin-right: .4rem; }
+
+/* --- Header --- */
+.mohaa-header {
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+.mohaa-header h1 {
+  color: #c0a060;
+  font-size: 2.2rem;
+  margin: 0;
+  letter-spacing: 0.04em;
+  font-weight: 700;
+}
+.mohaa-header .mohaa-subtitle {
+  color: #888;
+  font-size: 0.95rem;
+  margin: 0.25rem 0 0;
+}
+
+/* --- Card container --- */
+.mohaa-card {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 10px;
+  padding: 1.5rem 1.75rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 1rem;
+}
+
+/* --- Game selector --- */
+.mohaa-game-select {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.4rem 0;
+}
+.mohaa-game-select label {
+  font-size: 0.9rem;
+  color: #999;
+  white-space: nowrap;
+}
 .mohaa-game-select select {
-  padding: .3rem .6rem;
-  background: #333;
+  flex: 1;
+  padding: 0.45rem 0.7rem;
+  background: #252525;
   color: #e0e0e0;
-  border: 1px solid #555;
-  border-radius: 4px;
-  font-size: .9rem;
+  border: 1px solid #444;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
 }
-.mohaa-cache-status { font-size: .85rem; color: #7a7; margin: .3rem 0; }
-#mohaa-pick-section { display: none; }
+.mohaa-game-select select:hover,
+.mohaa-game-select select:focus {
+  border-color: #c0a060;
+}
+.mohaa-cache-status {
+  font-size: 0.82rem;
+  color: #6a9;
+  margin: 0.5rem 0 0;
+  text-align: center;
+}
+
+/* --- Buttons --- */
+.mohaa-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  width: 100%;
+}
 .mohaa-btn {
   display: inline-block;
-  margin: 1rem .5rem;
-  padding: .7rem 2rem;
-  background: #c0a060;
-  color: #1a1a1a;
+  padding: 0.75rem 2.5rem;
+  background: linear-gradient(135deg, #c0a060, #a88840);
+  color: #111;
   border: none;
-  border-radius: 6px;
-  font-size: 1rem;
-  font-weight: bold;
+  border-radius: 8px;
+  font-size: 1.05rem;
+  font-weight: 700;
   cursor: pointer;
-  transition: background .2s;
+  transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+  box-shadow: 0 2px 8px rgba(192, 160, 96, 0.2);
+  letter-spacing: 0.02em;
 }
-.mohaa-btn:hover { background: #d4b87a; }
-.mohaa-btn:disabled { background: #555; cursor: not-allowed; }
+.mohaa-btn:hover {
+  background: linear-gradient(135deg, #d4b87a, #c0a060);
+  box-shadow: 0 4px 16px rgba(192, 160, 96, 0.35);
+  transform: translateY(-1px);
+}
+.mohaa-btn:active { transform: translateY(0); }
+.mohaa-btn:disabled {
+  background: #444;
+  color: #888;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+.mohaa-btn-secondary {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  box-shadow: none;
+}
+.mohaa-btn-secondary:hover {
+  background: #333;
+  color: #e0e0e0;
+  border-color: #666;
+  box-shadow: none;
+}
 .mohaa-link {
-  display: block;
-  margin: .6rem auto;
-  padding: .3rem;
+  display: inline-block;
+  margin-top: 0.25rem;
+  padding: 0.3rem 0.5rem;
   background: none;
   border: none;
-  color: #888;
-  font-size: .85rem;
+  color: #777;
+  font-size: 0.82rem;
   cursor: pointer;
-  text-decoration: underline;
+  text-decoration: none;
+  transition: color 0.2s;
 }
 .mohaa-link:hover { color: #aaa; }
-#mohaa-prog-area { margin: 1rem 0; display: none; }
-#mohaa-file-prog { width: 100%; height: 6px; }
-#mohaa-prog-text { font-size: .85rem; color: #aaa; margin-top: .3rem; }
+
+/* --- File picker --- */
+#mohaa-pick-section { display: none; width: 100%; }
+.mohaa-hint {
+  font-size: 0.82rem;
+  color: #888;
+  line-height: 1.5;
+  margin: 0 0 0.75rem;
+  text-align: center;
+}
+.mohaa-hint code {
+  background: #252525;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid #333;
+  font-size: 0.8rem;
+}
+#mohaa-prog-area { margin: 0.75rem 0; display: none; }
+#mohaa-file-prog {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #252525;
+}
+#mohaa-file-prog::-webkit-progress-value {
+  background: #c0a060;
+  border-radius: 3px;
+}
+#mohaa-file-prog::-moz-progress-bar {
+  background: #c0a060;
+  border-radius: 3px;
+}
+#mohaa-prog-text { font-size: 0.82rem; color: #999; margin-top: 0.4rem; text-align: center; }
+
+/* --- Info / reference section --- */
+.mohaa-info-section {
+  width: 100%;
+  margin-top: 0.75rem;
+  box-sizing: border-box;
+}
+.mohaa-info-section summary {
+  cursor: pointer;
+  color: #c0a060;
+  font-size: 0.88rem;
+  text-align: center;
+  padding: 0.5rem 0.75rem;
+  user-select: none;
+  list-style: none;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #1a1a1a;
+  transition: background 0.2s, border-color 0.2s;
+}
+.mohaa-info-section summary::-webkit-details-marker { display: none; }
+.mohaa-info-section summary::before {
+  content: '\25B6\00a0';
+  font-size: 0.7rem;
+  vertical-align: middle;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.mohaa-info-section[open] summary::before {
+  transform: rotate(90deg);
+}
+.mohaa-info-section summary:hover {
+  background: #222;
+  border-color: #444;
+}
+.mohaa-info-content {
+  margin-top: 0.5rem;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+.mohaa-info-content h4 {
+  color: #c0a060;
+  font-size: 0.82rem;
+  margin: 1rem 0 0.4rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid #2a2a2a;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.mohaa-info-content h4:first-child { margin-top: 0; }
+.mohaa-info-content p {
+  font-size: 0.8rem;
+  color: #888;
+  margin: 0.2rem 0 0.5rem;
+  line-height: 1.5;
+}
+.mohaa-info-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  margin-bottom: 0.25rem;
+}
+.mohaa-info-table td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid #222;
+  vertical-align: top;
+  line-height: 1.45;
+}
+.mohaa-info-table tr:last-child td { border-bottom: none; }
+.mohaa-info-table td:first-child {
+  white-space: nowrap;
+  color: #7aafdb;
+  width: 32%;
+  font-weight: 500;
+}
+.mohaa-info-table code {
+  background: #252525;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid #333;
+  font-size: 0.78rem;
+}
+
+/* --- Footer disclaimer --- */
 .mohaa-disclaimer {
-  font-size: .75rem;
-  color: #666;
+  font-size: 0.72rem;
+  color: #555;
   margin-top: 1.5rem;
-  line-height: 1.4;
+  line-height: 1.5;
+  text-align: center;
   max-width: 520px;
 }
-.mohaa-disclaimer a { color: #888; }
+.mohaa-disclaimer a { color: #777; }
+
+/* --- Responsive --- */
+@media (max-width: 680px) {
+  .mohaa-inner { padding: 1.5rem 1rem 2rem; }
+  .mohaa-card { padding: 1.25rem 1rem; }
+  .mohaa-header h1 { font-size: 1.8rem; }
+  .mohaa-info-content { padding: 0.75rem 0.8rem; }
+  .mohaa-info-table td:first-child { width: auto; }
+}
+@media (max-width: 420px) {
+  .mohaa-inner { padding: 1rem 0.75rem 1.5rem; }
+  .mohaa-card { padding: 1rem 0.75rem; }
+  .mohaa-header h1 { font-size: 1.5rem; }
+  .mohaa-btn { padding: 0.65rem 1.5rem; font-size: 0.95rem; }
+}
 /* MOHAA_FILE_PICKER_CSS_END */

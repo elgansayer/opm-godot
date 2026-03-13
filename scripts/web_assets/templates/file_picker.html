@@ -1,29 +1,81 @@
 <!-- MOHAA_FILE_PICKER_HTML_START -->
 		<div id="mohaa-loader">
 			<div class="mohaa-inner">
-				<h2>MOHAAjs</h2>
-				<p>Medal of Honor: Allied Assault</p>
-				<div class="mohaa-game-select" id="mohaa-game-select">
-					<label for="mohaa-target-game">Select game:</label>
-					<select id="mohaa-target-game">
-						<option value="0">Allied Assault (main)</option>
-						<option value="1">Spearhead (mainta)</option>
-						<option value="2">Breakthrough (maintt)</option>
-					</select>
+				<div class="mohaa-header">
+					<h1>MOHAAjs</h1>
+					<p class="mohaa-subtitle">Medal of Honor: Allied Assault</p>
 				</div>
-				<p id="mohaa-cache-status" class="mohaa-cache-status"></p>
-				<button id="mohaa-play-btn" class="mohaa-btn">Play</button>
-				<div id="mohaa-pick-section">
-					<p class="mohaa-hint"><strong>Select the MOHAA <em>installation</em> folder</strong> - the folder that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>NOT</strong> select the <code>main</code> folder itself.</p>
-					<button id="mohaa-pick-btn" class="mohaa-btn">Select MOHAA Installation Folder</button>
-					<input type="file" id="mohaa-input-fb" webkitdirectory multiple style="display:none">
-					<div id="mohaa-prog-area">
-						<progress id="mohaa-file-prog" style="width:100%"></progress>
-						<p id="mohaa-prog-text">Reading files...</p>
+
+				<div class="mohaa-card">
+					<div class="mohaa-game-select" id="mohaa-game-select">
+						<label for="mohaa-target-game">Game:</label>
+						<select id="mohaa-target-game">
+							<option value="0">Allied Assault (main)</option>
+							<option value="1">Spearhead (mainta)</option>
+							<option value="2">Breakthrough (maintt)</option>
+						</select>
+					</div>
+					<p id="mohaa-cache-status" class="mohaa-cache-status"></p>
+					<div class="mohaa-actions">
+						<button id="mohaa-play-btn" class="mohaa-btn">Play</button>
+					</div>
+					<div id="mohaa-pick-section">
+						<p class="mohaa-hint"><strong>Select the MOHAA <em>installation</em> folder</strong> &mdash; the one that <em>contains</em> <code>main</code>, <code>mainta</code>, and/or <code>maintt</code>.<br>Do <strong>not</strong> select the <code>main</code> folder itself.</p>
+						<div class="mohaa-actions">
+							<button id="mohaa-pick-btn" class="mohaa-btn mohaa-btn-secondary">Select MOHAA Installation Folder</button>
+						</div>
+						<input type="file" id="mohaa-input-fb" webkitdirectory multiple style="display:none">
+						<div id="mohaa-prog-area">
+							<progress id="mohaa-file-prog" style="width:100%"></progress>
+							<p id="mohaa-prog-text">Reading files...</p>
+						</div>
+					</div>
+					<div class="mohaa-actions">
+						<button id="mohaa-skip-btn" class="mohaa-link">Skip &mdash; use server files only</button>
 					</div>
 				</div>
-				<button id="mohaa-skip-btn" class="mohaa-link">Skip - use server files only</button>
-				<p class="mohaa-disclaimer">MOHAAjs is an independent fan project and is not affiliated with, endorsed by, or connected to Electronic Arts, the OpenMoHAA project, or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
+
+				<details class="mohaa-info-section">
+					<summary>URL Parameters &amp; Custom CVars</summary>
+					<div class="mohaa-info-content">
+						<h4>URL Parameters</h4>
+						<p>Append to the URL as query strings, e.g. <code>?map=dm/mohdm1&amp;connect=host:port</code></p>
+						<table class="mohaa-info-table">
+							<tr><td><code>com_target_game</code></td><td>Game selection: <code>0</code>&nbsp;=&nbsp;AA, <code>1</code>&nbsp;=&nbsp;SH, <code>2</code>&nbsp;=&nbsp;BT</td></tr>
+							<tr><td><code>map</code></td><td>Load a map on startup, e.g. <code>dm/mohdm1</code></td></tr>
+							<tr><td><code>connect</code></td><td>Connect to a server on startup</td></tr>
+							<tr><td><code>relay</code></td><td>WebSocket relay address for multiplayer</td></tr>
+							<tr><td><code>exec</code></td><td>Execute a config file on startup</td></tr>
+							<tr><td><code>server</code></td><td>Set to <code>1</code> to auto-exec <code>server.cfg</code></td></tr>
+							<tr><td><code>dedicated</code></td><td>Set to <code>1</code> for dedicated server mode</td></tr>
+						</table>
+						<h4>OpenMoHAA Custom CVars</h4>
+						<p>New CVars introduced by this port. Set via the console (<code>~</code>) or URL, e.g. <code>?r_shadows=1</code></p>
+						<table class="mohaa-info-table">
+							<tr><td><code>r_shadows</code></td><td><code>0</code>&nbsp;=&nbsp;classic shadow blobs (default); <code>1</code>&nbsp;=&nbsp;GPU shadows &mdash; dynamic shadow casting from the map&rsquo;s sun direction (worldspawn <code>sundirection</code>/<code>suncolor</code>), entities cast and receive real-time shadows</td></tr>
+							<tr><td><code>r_dlight_shadows</code></td><td><code>0</code>&nbsp;=&nbsp;off (default), <code>1</code>&nbsp;=&nbsp;dynamic point lights also cast shadows (expensive, requires <code>r_shadows 1</code>)</td></tr>
+							<tr><td><code>r_godot_rain</code></td><td><code>0</code>&nbsp;=&nbsp;original engine rain, <code>1</code>&nbsp;=&nbsp;Godot GPU particle rain (default)</td></tr>
+							<tr><td><code>r_zfar</code></td><td>Draw distance override: <code>0</code>&nbsp;=&nbsp;auto (default), positive value sets max render distance in engine units (~39 units per metre)</td></tr>
+							<tr><td><code>ui_dmbox_scale</code></td><td>Font scale for the death message box (default&nbsp;<code>1.0</code>)</td></tr>
+							<tr><td><code>ui_gmbox_scale</code></td><td>Font scale for the game message box (default&nbsp;<code>1.0</code>)</td></tr>
+							<tr><td><code>ui_console_scale</code></td><td>Font scale for the in-game console (default&nbsp;<code>1.0</code>)</td></tr>
+							<tr><td><code>ui_minicon_scale</code></td><td>Font scale for the mini-console / notify area (default&nbsp;<code>1.0</code>)</td></tr>
+						</table>
+						<h4>Audio</h4>
+						<table class="mohaa-info-table">
+							<tr><td><code>s_volume</code></td><td>Master volume (<code>0.0</code>&ndash;<code>1.0</code>)</td></tr>
+							<tr><td><code>s_musicvolume</code></td><td>Music volume (<code>0.0</code>&ndash;<code>1.0</code>)</td></tr>
+						</table>
+						<h4>Geometry &amp; LOD</h4>
+						<table class="mohaa-info-table">
+							<tr><td><code>r_subdivisions</code></td><td>Patch tessellation (<code>2</code>&ndash;<code>16</code>, lower&nbsp;=&nbsp;more detail)</td></tr>
+							<tr><td><code>r_lodBias</code></td><td>Model LOD bias (<code>0</code>&ndash;<code>2</code>, higher&nbsp;=&nbsp;less detail)</td></tr>
+							<tr><td><code>ter_maxlod</code></td><td>Terrain LOD (<code>0</code>&ndash;<code>6</code>, higher&nbsp;=&nbsp;coarser)</td></tr>
+						</table>
+					</div>
+				</details>
+
+				<p class="mohaa-disclaimer">MOHAAjs is an independent fan project not affiliated with Electronic Arts or any original rights holders of Medal of Honor: Allied Assault. All trademarks belong to their respective owners. You must own a legitimate copy of the game to use this application.</p>
 			</div>
 		</div>
 <!-- MOHAA_FILE_PICKER_HTML_END -->

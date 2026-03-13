@@ -13,30 +13,24 @@
 *.pyc
 __pycache__/
 
-# Build output directories
-openmohaa/build/
-godot-cpp/CMakeFiles/
-godot-cpp/bin/
-godot-cpp/cmake_install.cmake
-godot-cpp/CMakeCache.txt
-godot-cpp/Makefile
-godot-cpp/gen/
+# CMake build output (root-level)
+build-cmake/
 
-# Binary output
-openmohaa/bin/libopenmohaa.so
-openmohaa/bin/libcgame.so
-openmohaa/bin/*.wasm
-openmohaa/bin/*.side.wasm
-openmohaa/bin/*.dll
-openmohaa/bin/*.dylib
+# Binary / distribution output
 project/bin/
 project/.godot/
+dist/
 web/
+mohaa-godot-web-export/
 
 # Godot editor files
 .godot/
 *.import
 godot_log.txt
+project/gdb.txt
+
+# Logs
+console*.log
 
 # IDE
 .vscode/
@@ -46,10 +40,9 @@ godot_log.txt
 # OS
 .DS_Store
 Thumbs.db
-project/gdb.txt
+
+# Misc
 node_modules/
 tmp/
 test-results/
-openmohaa/.cmake-native/
-mohaa-godot-web-export/
 scripts/env.macos-cross.sh

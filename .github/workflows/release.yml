@@ -1,11 +1,10 @@
-# Full release pipeline: build all platforms, create GitHub Release.
-# Docker image is built+pushed by build-web.yml on every push to main.
-# Triggered on tag push (v*) and manual dispatch.
+# Full release pipeline: build all platforms, create/update GitHub Release.
+# Triggered only on release publish and manual dispatch.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       create_release:
@@ -43,7 +42,7 @@ jobs:
   release:
     needs: [build-linux, build-macos, build-windows, build-android, build-web]
     runs-on: ubuntu-22.04
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
 
     steps:
       - name: Download all artifacts
@@ -65,8 +64,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          name: Release ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
           draft: false
           prerelease: false
           files: |
