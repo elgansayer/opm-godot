@@ -286,6 +286,18 @@ else
         "$SCRIPT_DIR/test-web-e2e.sh"
 fi
 
+# Test 4c: Web E2E — Map transition (dm/mohdm1 -> dm/mohdm2)
+if [[ "$HAS_DOCKER" = false ]]; then
+    skip_test "Web E2E — Map transition" "Docker not available"
+elif [[ "$HAS_NODE" = false ]]; then
+    skip_test "Web E2E — Map transition" "Node/npm not available"
+elif [[ "$HAS_GAME_ASSETS" = false ]]; then
+    skip_test "Web E2E — Map transition" "No game assets"
+else
+    run_test "Web E2E — Map transition" \
+        "$SCRIPT_DIR/test-map-transition-e2e.sh"
+fi
+
 # Test 5: Viewmodel/NODRAW regression
 if [[ "$HEADLESS_ONLY" = true ]]; then
     skip_test "Viewmodel/NODRAW regression" "--headless-only flag"

@@ -345,9 +345,33 @@ elif "__wm_pages" in src:
 else:
     print("WARNING: Could not find LDSO.init();loadDylibs(); marker; memory pre-grow skipped")
 
-preload_old = "var moduleRtn;var Module=moduleArg;var ENVIRONMENT_IS_WEB="
+import re
+preload_re = re.compile(r'var Module=moduleArg;\s*var ENVIRONMENT_IS_WEB=')
+preload_match = preload_re.search(src)
+preload_old = preload_match.group(0) if preload_match else None
 preload_new = (
-    "var moduleRtn;var Module=moduleArg;"
+    "var Module=moduleArg;"
+    # --- libc++ polyfill: __hash_memory (murmur2 32-bit) ---
+    # Godot 4.6 export templates use emsdk 4.0.20; our SIDE_MODULEs may be built
+    # with a newer emsdk whose libc++ externalises __hash_memory.  The main module
+    # doesn't export it, so the stubs resolver would throw.  Register a JS
+    # implementation on globalThis so the resolver's fallback chain finds it.
+    # wasmMemory is a local var in this scope; the closure captures it by reference
+    # and it will be initialised by the time __hash_memory is first called.
+    "globalThis._ZNSt3__213__hash_memoryEPKvm=function(ptr,len){"
+    "var h=len>>>0,m=0x5bd1e995,r=24;"
+    "var u8=new Uint8Array(wasmMemory.buffer);"
+    "var i=0;"
+    "while(i+4<=len){"
+    "var k=(u8[ptr+i]|(u8[ptr+i+1]<<8)|(u8[ptr+i+2]<<16)|(u8[ptr+i+3]<<24))>>>0;"
+    "k=Math.imul(k,m)>>>0;k=(k^(k>>>r))>>>0;k=Math.imul(k,m)>>>0;"
+    "h=Math.imul(h,m)>>>0;h=(h^k)>>>0;i+=4}"
+    "var rem=len-i;"
+    "if(rem>=3)h=(h^(u8[ptr+i+2]<<16))>>>0;"
+    "if(rem>=2)h=(h^(u8[ptr+i+1]<<8))>>>0;"
+    "if(rem>=1){h=(h^u8[ptr+i])>>>0;h=Math.imul(h,m)>>>0}"
+    "h=(h^(h>>>13))>>>0;h=Math.imul(h,m)>>>0;h=(h^(h>>>15))>>>0;"
+    "return h};"
     "if(typeof window!=='undefined'){window.__mohaaStdout=window.__mohaaStdout||[];window.__mohaaMapLoadedLog='';}"
     "(function(){"
     "  var __wrap=function(name){"
@@ -488,12 +512,11 @@ preload_new = (
     "var ENVIRONMENT_IS_WEB="
 )
 
-if preload_old in src:
+if preload_old and preload_old in src:
     src = src.replace(preload_old, preload_new, 1)
     print("Patched mohaa.js async preRun VFS preload (fresh)")
 elif "openmohaa-pk3-preload" in src or "openmohaa-vfs-preload" in src:
     # Already patched with old or current preloader — strip and re-inject
-    import re
     # The preloader block starts with Module['preRun'] and ends just before var ENVIRONMENT_IS_WEB=
     pat = re.compile(
         r"Module\['preRun'\]=Module\['preRun'\]\|\|\[\];.*?"
@@ -503,7 +526,7 @@ elif "openmohaa-pk3-preload" in src or "openmohaa-vfs-preload" in src:
     m = pat.search(src)
     if m:
         # Replace old preloader text with just the marker (the new preload_new ends with it)
-        src = src[:m.start()] + preload_new.split("var moduleRtn;var Module=moduleArg;", 1)[-1] + src[m.end():]
+        src = src[:m.start()] + preload_new.split("var Module=moduleArg;", 1)[-1] + src[m.end():]
         print("Patched mohaa.js async preRun VFS preload (replaced old preloader)")
     else:
         print("WARNING: Found preloader dep ID but could not locate preloader block boundary")
@@ -695,13 +718,19 @@ else:
 # PATH.normalize("./main/cgame.so") == "main/cgame.so" (strips ./ prefix, no leading slash).
 # loadDynamicLibrary stores the key verbatim, so we must register with "main/cgame.so" (no
 # leading slash) to match the normalized path that dlopenInternal looks up.
+# Godot 4.6+ renamed extensionLibs → gdextensionLibs; try both patterns.
+dynlib_old_gd = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.gdextensionLibs),"
+dynlib_new_gd = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.gdextensionLibs).concat(['main/cgame.so']),"
 dynlib_old = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs),"
 dynlib_new = "'dynamicLibraries': [`${loadPath}.side.wasm`].concat(this.extensionLibs).concat(['main/cgame.so']),"
-if dynlib_new in src:
+if dynlib_new_gd in src or dynlib_new in src:
     print("dynamicLibraries already patched (idempotent)")
+elif dynlib_old_gd in src:
+    src = src.replace(dynlib_old_gd, dynlib_new_gd, 1)
+    print("Patched mohaa.js dynamicLibraries to pre-register cgame.so (gdextensionLibs)")
 elif dynlib_old in src:
     src = src.replace(dynlib_old, dynlib_new, 1)
-    print("Patched mohaa.js dynamicLibraries to pre-register cgame.so")
+    print("Patched mohaa.js dynamicLibraries to pre-register cgame.so (extensionLibs)")
 else:
     print("WARNING: Could not find dynamicLibraries marker in mohaa.js; cgame pre-registration skipped")
 

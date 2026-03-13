@@ -299,6 +299,17 @@ func _process(delta):
 		runner.execute_command("set ui_gamespy 0; set sv_gamespy 0")
 		print("Main: Web tweaks applied -> ui_gamespy=0 sv_gamespy=0")
 
+	# Web: poll for pending commands from JavaScript (e2e test support).
+	# Browser tests set window.__mohaaPendingCommand = "map dm/mohdm2" etc.
+	if OS.has_feature("web") and runner and runner.is_engine_initialized():
+		if Engine.has_singleton("JavaScriptBridge"):
+			var js = Engine.get_singleton("JavaScriptBridge")
+			if js:
+				var cmd = js.eval("(function(){ var c = window.__mohaaPendingCommand; if(typeof c === 'string' && c.length > 0){ window.__mohaaPendingCommand = ''; return c; } return ''; })()")
+				if typeof(cmd) == TYPE_STRING and cmd != "":
+					print("Main: JS command bridge -> ", cmd)
+					runner.execute_command(cmd)
+
 	if screenshot_pending:
 		screenshot_timer += delta
 		if screenshot_timer >= SCREENSHOT_DELAY:

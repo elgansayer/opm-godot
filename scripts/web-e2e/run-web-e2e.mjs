@@ -10,6 +10,7 @@ const browserExecutable = process.env.BROWSER_EXECUTABLE || '';
 const url = new URL('/mohaa.html', baseUrl);
 url.searchParams.set('map', targetMap);
 url.searchParams.set('com_target_game', targetGame);
+url.searchParams.set('webdriver', '1');
 
 const errors = [];
 const logs = [];
