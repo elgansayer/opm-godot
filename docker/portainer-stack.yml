@@ -1,0 +1,24 @@
+# =============================================================================
+# OpenMoHAA Web — Portainer Stack (CDN-first)
+# =============================================================================
+# This stack is intended for Portainer Git deployments.
+#
+# Required env vars:
+#   CDN_URL    Base URL serving game assets (for example: https://cdn.example.com/mohaa)
+#
+# Optional env vars:
+#   ASSET_PATH Host assets directory mounted to /srv/assets for fallback local serving.
+#              If omitted, /var/empty is mounted and CDN remains the source of truth.
+# =============================================================================
+
+services:
+  web:
+    image: ghcr.io/elgansayer/mohaa-godot:latest
+    container_name: mohaa-godot-web
+    ports:
+      - "8086:80"
+    environment:
+      - CDN_URL=${CDN_URL:?Set CDN_URL to your CDN base URL}
+    volumes:
+      - ${ASSET_PATH:-/var/empty}:/srv/assets:ro
+    restart: unless-stopped
