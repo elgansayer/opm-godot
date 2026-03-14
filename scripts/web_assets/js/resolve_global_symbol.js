@@ -28,6 +28,51 @@ var resolveGlobalSymbol = (symName, direct = false) => {
         }
     }
 
+    /* ── LDSO loaded-library GOT.data search ──
+     * Belt-and-suspenders: if the GOT repair sweep in loadDylibs didn't fire
+     * (e.g. this function is called during module loading before all libs are
+     * ready), search every already-loaded LDSO library for a 'got.<sym>'
+     * export.  This handles data globals imported by cgame.wasm (SIDE_MODULE=2)
+     * that are defined in openmohaa.wasm (SIDE_MODULE=1), e.g. numDebugLines.
+     * Each 'got.<sym>' export is a WebAssembly.Global (mutable i32) whose
+     * .value is the in-memory address of the variable. */
+    if (!sym && typeof LDSO !== 'undefined' && LDSO) {
+        var _ldsoLibs = Object.values(LDSO.loadedLibsByName || {});
+        for (var _ldi = 0; _ldi < _ldsoLibs.length && !sym; _ldi++) {
+            var _ldlib = _ldsoLibs[_ldi];
+            if (!_ldlib || !_ldlib.exports) continue;
+            /* Primary: 'got.<symName>' — Emscripten's PIC data-global export */
+            var _gotKey = 'got.' + symName;
+            if (_gotKey in _ldlib.exports) {
+                var _gotGlobal = _ldlib.exports[_gotKey];
+                var _gotAddr = (typeof _gotGlobal === 'object' && _gotGlobal !== null && 'value' in _gotGlobal)
+                    ? _gotGlobal.value : _gotGlobal;
+                if (typeof _gotAddr === 'number' && _gotAddr !== -1) {
+                    sym = _gotAddr;
+                    /* Repair the GOT entry if still -1 so cgame gets the correct address */
+                    if (typeof GOT !== 'undefined' && GOT && (symName in GOT) && GOT[symName].value === -1) {
+                        GOT[symName].value = _gotAddr;
+                    }
+                }
+            }
+            /* Fallback: 'got.mem.<symName>' (some linker versions use this prefix) */
+            if (!sym) {
+                var _gotMemKey = 'got.mem.' + symName;
+                if (_gotMemKey in _ldlib.exports) {
+                    var _gotMemGlobal = _ldlib.exports[_gotMemKey];
+                    var _gotMemAddr = (typeof _gotMemGlobal === 'object' && _gotMemGlobal !== null && 'value' in _gotMemGlobal)
+                        ? _gotMemGlobal.value : _gotMemGlobal;
+                    if (typeof _gotMemAddr === 'number' && _gotMemAddr !== -1) {
+                        sym = _gotMemAddr;
+                        if (typeof GOT !== 'undefined' && GOT && (symName in GOT) && GOT[symName].value === -1) {
+                            GOT[symName].value = _gotMemAddr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* ── emscripten_longjmp polyfill ── */
     if (!sym && symName === 'emscripten_longjmp') {
         var throwLJ = (typeof emscripten_throw_longjmp === 'function' && emscripten_throw_longjmp)

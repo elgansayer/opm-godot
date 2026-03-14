@@ -116,16 +116,42 @@ try {
   }
 
   console.log('[web-e2e] Waiting for map-loaded signal');
-  await page.waitForFunction(() => {
-    if (typeof window.__mohaaEngineError === 'string' && window.__mohaaEngineError.length > 0) {
-      throw new Error(`engine error: ${window.__mohaaEngineError}`);
-    }
-    const jsBridgeSignal = typeof window.__mohaaMapLoaded === 'string' && window.__mohaaMapLoaded.length > 0;
-    const stdoutSignal = typeof window.__mohaaMapLoadedLog === 'string' && window.__mohaaMapLoadedLog.length > 0;
-    return jsBridgeSignal || stdoutSignal;
-  }, null, {
-    timeout: timeoutMs,
-  });
+
+  // Periodically poll engine state for diagnostics while waiting
+  const diagInterval = setInterval(async () => {
+    try {
+      if (page.isClosed()) { clearInterval(diagInterval); return; }
+      const diag = await page.evaluate(() => ({
+        serverState: typeof window.__mohaaServerState === 'number' ? window.__mohaaServerState : -1,
+        currentMap: typeof window.__mohaaCurrentMap === 'string' ? window.__mohaaCurrentMap : '',
+        engineInit: !!window.__mohaaEngineInit,
+        mapLoaded: typeof window.__mohaaMapLoaded === 'string' ? window.__mohaaMapLoaded : null,
+        engineError: typeof window.__mohaaEngineError === 'string' ? window.__mohaaEngineError : null,
+      }));
+      console.log(`[web-e2e] DIAG: engineInit=${diag.engineInit} serverState=${diag.serverState} map="${diag.currentMap}" mapLoaded=${diag.mapLoaded} error=${diag.engineError}`);
+      if (httpIssues.length > 0) {
+        console.log(`[web-e2e] DIAG: ${httpIssues.length} HTTP issues so far`);
+        for (const issue of httpIssues.slice(-5)) {
+          console.log(`  ${issue}`);
+        }
+      }
+    } catch { /* page may be navigating */ }
+  }, 10000);
+
+  try {
+    await page.waitForFunction(() => {
+      if (typeof window.__mohaaEngineError === 'string' && window.__mohaaEngineError.length > 0) {
+        throw new Error(`engine error: ${window.__mohaaEngineError}`);
+      }
+      const jsBridgeSignal = typeof window.__mohaaMapLoaded === 'string' && window.__mohaaMapLoaded.length > 0;
+      const stdoutSignal = typeof window.__mohaaMapLoadedLog === 'string' && window.__mohaaMapLoadedLog.length > 0;
+      return jsBridgeSignal || stdoutSignal;
+    }, null, {
+      timeout: timeoutMs,
+    });
+  } finally {
+    clearInterval(diagInterval);
+  }
 
   const loadedMap = await page.evaluate(() => {
     if (typeof window.__mohaaMapLoaded === 'string' && window.__mohaaMapLoaded.length > 0) {

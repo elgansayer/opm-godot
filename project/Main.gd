@@ -334,6 +334,14 @@ func _process(delta):
 					js.eval("window.__mohaaMapLoadedLog = " + JSON.stringify("Main: POLL map_loaded -> " + current_map) + ";")
 				print("Main: POLL map_loaded -> ", current_map)
 
+		# Continuously expose engine state to browser for E2E diagnostics.
+		if OS.has_feature("web") and Engine.has_singleton("JavaScriptBridge"):
+			var js = Engine.get_singleton("JavaScriptBridge")
+			if js:
+				js.eval("window.__mohaaServerState = %d;" % server_state)
+				js.eval("window.__mohaaCurrentMap = %s;" % JSON.stringify(current_map))
+				js.eval("window.__mohaaEngineInit = true;")
+
 		status_log_timer += delta
 		if status_log_timer >= 5.0:
 			status_log_timer = 0.0
