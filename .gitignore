@@ -23,6 +23,11 @@ dist/
 web/
 mohaa-godot-web-export/
 
+# Keep Docker web image sources tracked even though */web/ paths are ignored.
+!docker/web/
+!docker/web/Dockerfile
+!docker/web/nginx.conf
+
 # Godot editor files
 .godot/
 *.import
