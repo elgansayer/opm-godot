@@ -149,31 +149,37 @@ if [[ "$SERVE_ONLY" -eq 2 && "$PATCH_ONLY" -eq 0 ]]; then
     exit 0
 fi
 
-set +u
-# shellcheck disable=SC1090
-source "$EMSDK_ENV_SH" >/dev/null
-set -u
+# --patch-only only needs the repo tree; skip toolchain setup entirely.
+if [[ "$PATCH_ONLY" -eq 0 ]]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$EMSDK_ENV_SH" >/dev/null
+    set -u
 
-# emsdk_env.sh sets PATH and EMSDK but may not set EM_CONFIG.
-# If emcc is still not working (requires binaryen), point it at the bundled config
-# that lives alongside the upstream binaries so BINARYEN_ROOT is resolved correctly.
-if ! command -v emcc >/dev/null 2>&1; then
-    echo "ERROR: emcc not found in PATH after sourcing $EMSDK_ENV_SH" >&2
-    exit 1
-fi
-_EMSDK_BUNDLED_CONFIG="$EMSDK_DIR/upstream/emscripten_config"
-if [[ -f "$_EMSDK_BUNDLED_CONFIG" ]]; then
-    export EM_CONFIG="$_EMSDK_BUNDLED_CONFIG"
-fi
+    # emsdk_env.sh sets EMSDK but may clear EMSDK_DIR; re-derive it.
+    EMSDK_DIR="${EMSDK_DIR:-${EMSDK:-$HOME/emsdk}}"
 
-if ! command -v scons >/dev/null 2>&1; then
-    echo "ERROR: scons not found in PATH" >&2
-    exit 1
-fi
+    # emsdk_env.sh sets PATH and EMSDK but may not set EM_CONFIG.
+    # If emcc is still not working (requires binaryen), point it at the bundled config
+    # that lives alongside the upstream binaries so BINARYEN_ROOT is resolved correctly.
+    if ! command -v emcc >/dev/null 2>&1; then
+        echo "ERROR: emcc not found in PATH after sourcing $EMSDK_ENV_SH" >&2
+        exit 1
+    fi
+    _EMSDK_BUNDLED_CONFIG="$EMSDK_DIR/upstream/emscripten_config"
+    if [[ -f "$_EMSDK_BUNDLED_CONFIG" ]]; then
+        export EM_CONFIG="$_EMSDK_BUNDLED_CONFIG"
+    fi
 
-if ! command -v godot >/dev/null 2>&1; then
-    echo "ERROR: godot not found in PATH" >&2
-    exit 1
+    if ! command -v scons >/dev/null 2>&1; then
+        echo "ERROR: scons not found in PATH" >&2
+        exit 1
+    fi
+
+    if ! command -v godot >/dev/null 2>&1; then
+        echo "ERROR: godot not found in PATH" >&2
+        exit 1
+    fi
 fi
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
