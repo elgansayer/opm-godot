@@ -68,7 +68,11 @@ jobs:
       - name: Verify WASM artifacts
         run: |
           ls -la openmohaa/bin/*.wasm
-          mv openmohaa/bin/libopenmohaa*.wasm openmohaa/bin/libopenmohaa.wasm
+          # Rename suffixed output (e.g. libopenmohaa.web.template_debug.wasm)
+          # to the canonical name if needed; skip if already correct.
+          for f in openmohaa/bin/libopenmohaa*.wasm; do
+            [ "$f" != "openmohaa/bin/libopenmohaa.wasm" ] && mv "$f" openmohaa/bin/libopenmohaa.wasm
+          done
           test -f openmohaa/bin/libopenmohaa.wasm
 
       - name: Install Godot
