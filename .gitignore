@@ -31,11 +31,20 @@ mohaa-godot-web-export/
 # Godot editor files
 .godot/
 *.import
+*.uid
 godot_log.txt
 project/gdb.txt
 
+# Project — generated/test images and junk files
+project/*.png
+project/*.jpg
+project/*.jpeg
+project/AOI_*
+project/Gemini_*
+
 # Logs
 console*.log
+*.log
 
 # IDE
 .vscode/
