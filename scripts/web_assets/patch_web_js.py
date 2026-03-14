@@ -15,10 +15,11 @@ Patches applied (in order):
   3a. Unresolved symbol diagnostics (BSS fallback in reportUndefinedSymbols)
   3b. reportUndefinedSymbols assert(value,...) → safe skip
   3c. resolveSymbol assert → no-op stub fallback
+  3d. GOT.func tracking proxy (distinguish func vs mem GOT entries)
   4.  Runtime import stub resolver (stubs_resolver.js)
   5.  resolveGlobalSymbol fallback chain (resolve_global_symbol.js)
   6.  cgame.so pre-registration in dynamicLibraries
-  7.  loadDylibs try/catch wrapper
+  7.  loadDylibs try/catch wrapper + GOT.func addFunction for func entries
   8.  locateFile gdextension lookup fix
   9.  createExportWrapper runtimeInitialized assertion removal
   10. C++ exception ABI stubs (inline — simple find/replace pairs)
@@ -123,6 +124,12 @@ def patch_symbol_diagnostics(src: str) -> str:
         "var reportUndefinedSymbols=()=>{for(var[symName,entry]of Object.entries(GOT)){"
         "if(entry.value==-1){var value=resolveGlobalSymbol(symName,true).sym;"
         "if(!value){"
+        # 0. GOT.func entries need function table indices, not data addresses.
+        # __gotFuncSyms is populated by the GOT.func Proxy wrapper (step 3d).
+        "if(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(symName)){"
+        "try{var __fsi=addFunction(function(){return 0},'i');entry.value=__fsi;"
+        "console.warn('OpenMoHAA: GOT.func stub:',symName,'at',__fsi);continue}"
+        "catch(__fe){console.warn('OpenMoHAA: GOT.func stub err:',symName,__fe.message)}}"
         # 1. Check wasmImports directly (bypasses isSymbolDefined stub filter).
         # For function symbols (emscripten_gl*, etc.), register them in the
         # WASM function table via addFunction(fn, sig) to get a valid table index.
@@ -214,6 +221,41 @@ def patch_symbol_diagnostics(src: str) -> str:
     else:
         print("  [3c/10] WARNING: resolveSymbol marker not found")
 
+    return src
+
+
+# ── 3d. GOT.func tracking proxy ───────────────────────────────────────────
+def patch_got_func_tracking(src: str) -> str:
+    """Track which GOT entries are function symbols via a Proxy wrapper.
+
+    Emscripten's GOT is flat — both GOT.func and GOT.mem imports map to the
+    same GOTProxyHandler and entries are stored as GOT[symbolName] with no
+    indicator of which namespace imported them.  This matters because:
+    - GOT.func entries need function TABLE indices (via addFunction())
+    - GOT.mem entries need memory addresses (via malloc)
+
+    This patch wraps the GOT.func import namespace in a Proxy that records
+    symbol names into a __gotFuncSyms Set.  The BSS-alloc blocks in
+    reportUndefinedSymbols (step 3a) and loadDylibs (step 7) check this
+    Set to determine whether to use addFunction() or malloc().
+    """
+    old = (
+        'var imports={env:wasmImports,wasi_snapshot_preview1:wasmImports,'
+        '"GOT.mem":GOTProxyHandler,"GOT.func":GOTProxyHandler};'
+    )
+    new = (
+        "var __gotFuncSyms=new Set();"
+        "var imports={env:wasmImports,wasi_snapshot_preview1:wasmImports,"
+        '"GOT.mem":GOTProxyHandler,'
+        '"GOT.func":new Proxy(GOTProxyHandler,{get:function(t,n)'
+        "{if(typeof n==='string')__gotFuncSyms.add(n);return Reflect.get(t,n)}})}"
+        ";"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
+        print("  [3d/11] GOT.func tracking proxy")
+    else:
+        print("  [3d/11] WARNING: GOT.func import marker not found")
     return src
 
 
@@ -319,7 +361,9 @@ def patch_loaddylibs(src: str) -> str:
         # Phase 2: Register functions + BSS-allocate data for entries still -1.
         # Function GOT entries store table indices, not memory addresses.
         # If a symbol is a JS function in wasmImports, use addFunction(fn,sig)
-        # to get a proper table index.  Data symbols get BSS-allocated.
+        # to get a proper table index.  GOT.func entries (tracked by
+        # __gotFuncSyms from step 3d) also get addFunction stubs.
+        # Data symbols get BSS-allocated via malloc.
         # Use wasmExports.malloc (raw) because _malloc's wrapper asserts
         # runtimeInitialized which is still false at loadDylibs time.
         "var __rmfn2=(typeof wasmExports!=='undefined'&&wasmExports&&typeof wasmExports.malloc==='function')?wasmExports.malloc:null;"
@@ -329,6 +373,11 @@ def patch_loaddylibs(src: str) -> str:
         "for(var __bi=0;__bi<__bssE.length;__bi++){"
         "var __bs=__bssE[__bi][0],__be=__bssE[__bi][1];"
         "if(__be.value!==-1)continue;"
+        # GOT.func entries need function table indices, not data addresses
+        "if(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(__bs)){"
+        "try{var __fsi=addFunction(function(){return 0},'i');__be.value=__fsi;__bssN++;"
+        "console.warn('OpenMoHAA: GOT.func stub:',__bs,'at',__fsi);continue}"
+        "catch(__fe){console.warn('OpenMoHAA: GOT.func stub err:',__bs,__fe.message)}}"
         # Try addFunction for symbols that are functions in wasmImports
         "if(typeof wasmImports!=='undefined'&&wasmImports"
         "&&typeof wasmImports[__bs]==='function'"
@@ -530,6 +579,7 @@ def main() -> int:
     src = patch_memory_pregrow(src)
     src = patch_module_prerun(src, js_dir / "module_prerun.js")
     src = patch_symbol_diagnostics(src)
+    src = patch_got_func_tracking(src)
     src = patch_runtime_stubs(src, js_dir / "stubs_resolver.js")
     src = patch_resolve_global_symbol(src, js_dir / "resolve_global_symbol.js")
     src = patch_cgame_registration(src)
