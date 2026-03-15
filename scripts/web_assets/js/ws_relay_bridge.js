@@ -113,12 +113,22 @@
                 _opmWsRelay.readyState === WebSocket.OPEN) ? 1 : 0;
     };
 
+    /** _opm_ws_is_secure() — @returns 1 if page served over HTTPS, 0 otherwise */
+    globalThis._opm_ws_is_secure = function() {
+        try {
+            return (window.location.protocol === 'https:') ? 1 : 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+
     /* Register without underscore prefix too — stub resolver tries both. */
-    globalThis.opm_ws_open   = globalThis._opm_ws_open;
-    globalThis.opm_ws_close  = globalThis._opm_ws_close;
-    globalThis.opm_ws_send   = globalThis._opm_ws_send;
-    globalThis.opm_ws_recv   = globalThis._opm_ws_recv;
-    globalThis.opm_ws_status = globalThis._opm_ws_status;
+    globalThis.opm_ws_open       = globalThis._opm_ws_open;
+    globalThis.opm_ws_close      = globalThis._opm_ws_close;
+    globalThis.opm_ws_send       = globalThis._opm_ws_send;
+    globalThis.opm_ws_recv       = globalThis._opm_ws_recv;
+    globalThis.opm_ws_status     = globalThis._opm_ws_status;
+    globalThis.opm_ws_is_secure  = globalThis._opm_ws_is_secure;
 
     console.log('mohaa-ws: WebSocket relay bridge registered on globalThis');
 })();

@@ -195,12 +195,20 @@ func _auto_relay_url() -> String:
 	var hostname = js.eval("window.location.hostname")
 	if typeof(hostname) != TYPE_STRING or hostname == "":
 		return ""
-	# When served over HTTPS the relay is behind the Apache proxy at /relay.
-	# When served over plain HTTP (local dev) fall back to direct port 12300.
+	# The relay always runs behind the nginx /relay proxy — both in Docker
+	# (port 80 inside container, mapped to host 8086) and in production
+	# (HTTPS reverse-proxy).  Never connect to port 12300 directly; it is
+	# only exposed inside the container.
 	var protocol = js.eval("window.location.protocol")
 	if typeof(protocol) == TYPE_STRING and protocol == "https:":
+		# HTTPS — default port (443); scheme handled by NET_WS_BuildURL.
 		return hostname + "/relay"
-	return hostname + ":12300"
+	# HTTP — include the explicit port so the browser connects to the
+	# same origin (e.g. localhost:8086/relay, not localhost:12300).
+	var port = js.eval("window.location.port")
+	if typeof(port) == TYPE_STRING and port != "" and port != "80":
+		return hostname + ":" + port + "/relay"
+	return hostname + "/relay"
 
 # -- Signal handlers --
 

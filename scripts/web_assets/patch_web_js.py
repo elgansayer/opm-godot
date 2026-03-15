@@ -16,6 +16,7 @@ Patches applied (in order):
   3b. reportUndefinedSymbols assert(value,...) → safe skip
   3c. resolveSymbol assert → no-op stub fallback
   3d. GOT.func tracking proxy (distinguish func vs mem GOT entries)
+  3d-1. updateGOT TLS init function fix
   4.  Runtime import stub resolver (stubs_resolver.js)
   5.  resolveGlobalSymbol fallback chain (resolve_global_symbol.js)
   6.  cgame.so pre-registration in dynamicLibraries
@@ -126,7 +127,13 @@ def patch_symbol_diagnostics(src: str) -> str:
         "if(!value){"
         # 0. GOT.func entries need function table indices, not data addresses.
         # __gotFuncSyms is populated by the GOT.func Proxy wrapper (step 3d).
-        "if(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(symName)){"
+        # Also detect C++ function symbols by mangled name prefix:
+        #   _ZTH = TLS init guard, _ZN = namespace function, _Z = any C++ fn
+        # These are NEVER data globals and must get addFunction() table indices.
+        "var __isFunc=(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(symName))"
+        "||symName.startsWith('_ZTH')||symName.startsWith('_ZN')"
+        "||(/^_Z[0-9A-Z]/.test(symName));"
+        "if(__isFunc){"
         "try{var __fsi=addFunction(function(){return 0},'i');entry.value=__fsi;"
         "console.warn('OpenMoHAA: GOT.func stub:',symName,'at',__fsi);continue}"
         "catch(__fe){console.warn('OpenMoHAA: GOT.func stub err:',symName,__fe.message)}}"
@@ -221,6 +228,39 @@ def patch_symbol_diagnostics(src: str) -> str:
     else:
         print("  [3c/10] WARNING: resolveSymbol marker not found")
 
+    return src
+
+
+# ── 3d-1. updateGOT TLS init function fix ─────────────────────────────────
+def patch_update_got_tls(src: str) -> str:
+    """Fix updateGOT for C++ TLS init functions exported as data globals.
+
+    wasm-ld can export _ZTH* symbols (C++ TLS init functions) as
+    WebAssembly.Global data addresses instead of function exports.
+    updateGOT then stores the memory address in the GOT entry.  When
+    WASM code later calls through this GOT entry it expects a function
+    table index, causing:
+        RangeError: WebAssembly.Table.get(): invalid address N in funcref table
+
+    This patch intercepts the 'typeof value.value=="number"' branch in
+    updateGOT to check for _ZTH symbol prefixes and create a no-op stub
+    function via addFunction() instead.
+    """
+    old = (
+        'else if(typeof value.value=="number"){newValue=value}'
+    )
+    new = (
+        'else if(typeof value.value=="number"){'
+        "if(symName.startsWith('_ZTH')){"
+        "try{var __ts=addFunction(function(){return 0},'i');"
+        "console.warn('OpenMoHAA updateGOT: TLS init stub:',symName,'idx',__ts);"
+        "newValue=__ts}catch(__te){newValue=value}}else{newValue=value}}"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
+        print("  [3d-1/12] updateGOT TLS init function fix")
+    else:
+        print("  [3d-1/12] WARNING: updateGOT data branch marker not found")
     return src
 
 
@@ -373,8 +413,11 @@ def patch_loaddylibs(src: str) -> str:
         "for(var __bi=0;__bi<__bssE.length;__bi++){"
         "var __bs=__bssE[__bi][0],__be=__bssE[__bi][1];"
         "if(__be.value!==-1)continue;"
-        # GOT.func entries need function table indices, not data addresses
-        "if(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(__bs)){"
+        # GOT.func entries need function table indices, not data addresses.
+        # Also detect C++ TLS init functions by mangled name prefix (_ZTH).
+        "var __isFn=(typeof __gotFuncSyms!=='undefined'&&__gotFuncSyms.has(__bs))"
+        "||__bs.startsWith('_ZTH');"
+        "if(__isFn){"
         "try{var __fsi=addFunction(function(){return 0},'i');__be.value=__fsi;__bssN++;"
         "console.warn('OpenMoHAA: GOT.func stub:',__bs,'at',__fsi);continue}"
         "catch(__fe){console.warn('OpenMoHAA: GOT.func stub err:',__bs,__fe.message)}}"
@@ -579,6 +622,7 @@ def main() -> int:
     src = patch_memory_pregrow(src)
     src = patch_module_prerun(src, js_dir / "module_prerun.js")
     src = patch_symbol_diagnostics(src)
+    src = patch_update_got_tls(src)
     src = patch_got_func_tracking(src)
     src = patch_runtime_stubs(src, js_dir / "stubs_resolver.js")
     src = patch_resolve_global_symbol(src, js_dir / "resolve_global_symbol.js")
