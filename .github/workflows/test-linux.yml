@@ -20,7 +20,6 @@ jobs:
         with:
           submodules: recursive
           token: ${{ secrets.GH_PAT || github.token }}
-          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -125,7 +124,6 @@ jobs:
         with:
           submodules: recursive
           token: ${{ secrets.GH_PAT || github.token }}
-          persist-credentials: false
 
       - name: Download built artifacts
         uses: actions/download-artifact@v4
