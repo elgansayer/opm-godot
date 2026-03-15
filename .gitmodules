@@ -1,8 +1,6 @@
 [submodule "godot-cpp"]
 	path = godot-cpp
-	url = ../godot-cpp.git
-	branch = 4.2
+        url = https://github.com/godotengine/godot-cpp.git
 [submodule "openmohaa"]
-	path = openmohaa
-	url = ../openmohaa-godot.git
-	branch = godot
+        path = openmohaa
+        url = https://github.com/elgansayer/openmohaa-godot.git
