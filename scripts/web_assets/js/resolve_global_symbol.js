@@ -40,7 +40,7 @@ var resolveGlobalSymbol = (symName, direct = false) => {
         var _ldsoLibs = Object.values(LDSO.loadedLibsByName || {});
         for (var _ldi = 0; _ldi < _ldsoLibs.length && !sym; _ldi++) {
             var _ldlib = _ldsoLibs[_ldi];
-            if (!_ldlib || !_ldlib.exports) continue;
+            if (!_ldlib || !_ldlib.exports || typeof _ldlib.exports !== 'object') continue;
             /* Primary: 'got.<symName>' — Emscripten's PIC data-global export */
             var _gotKey = 'got.' + symName;
             if (_gotKey in _ldlib.exports) {

@@ -343,7 +343,7 @@ def patch_loaddylibs(src: str) -> str:
         "if(__geEnt.value!==-1)continue;"
         "for(var __gli=0;__gli<__glLibs.length;__gli++){"
         "var __gle=__glLibs[__gli]&&__glLibs[__gli].exports;"
-        "if(!__gle)continue;"
+        "if(!__gle||typeof __gle!=='object')continue;"
         # Try raw name, _name, got.name, got.mem.name variants
         "var __geCands=[__geSym,'_'+__geSym,'got.'+__geSym,'got.mem.'+__geSym];"
         "for(var __gci=0;__gci<__geCands.length;__gci++){"
