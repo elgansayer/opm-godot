@@ -19,6 +19,7 @@
 
 'use strict';
 
+const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const dgram = require('dgram');
 const { Buffer } = require('buffer');
@@ -32,15 +33,34 @@ const MAX_CLIENTS = 64;
 /* Idle timeout: close the UDP socket if no traffic for 5 minutes */
 const UDP_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
+const startTime = Date.now();
 let clientCount = 0;
 
-const wss = new WebSocketServer({
-    port: RELAY_PORT,
-    maxPayload: 65536,
+/* HTTP server handles health checks; WebSocket upgrades are delegated to wss. */
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        const uptime = Math.floor((Date.now() - startTime) / 1000);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', clients: clientCount, maxClients: MAX_CLIENTS, uptime }));
+        return;
+    }
+    res.writeHead(426, { 'Content-Type': 'text/plain' });
+    res.end('Upgrade Required\n');
 });
 
-console.log(`mohaa-relay: Listening on port ${RELAY_PORT}`);
-console.log(`mohaa-relay: Web clients should set: +set net_ws_relay ws://<this-host>:${RELAY_PORT}`);
+const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
+
+server.on('upgrade', (req, socket, head) => {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+    });
+});
+
+server.listen(RELAY_PORT, () => {
+    console.log(`mohaa-relay: Listening on port ${RELAY_PORT}`);
+    console.log(`mohaa-relay: Health check: http://localhost:${RELAY_PORT}/health`);
+    console.log(`mohaa-relay: Web clients should set: +set net_ws_relay ws://<this-host>:${RELAY_PORT}`);
+});
 
 wss.on('connection', (ws, req) => {
     if (clientCount >= MAX_CLIENTS) {
@@ -141,18 +161,21 @@ wss.on('connection', (ws, req) => {
 });
 
 wss.on('error', (err) => {
-    console.error(`mohaa-relay: Server error: ${err.message}`);
+    console.error(`mohaa-relay: WS server error: ${err.message}`);
+});
+
+server.on('error', (err) => {
+    console.error(`mohaa-relay: HTTP server error: ${err.message}`);
     process.exit(1);
 });
 
 /* Graceful shutdown */
-process.on('SIGINT', () => {
-    console.log('\nmohaa-relay: Shutting down...');
+function shutdown() {
+    console.log('mohaa-relay: Shutting down...');
     wss.clients.forEach((ws) => ws.close(1001, 'Server shutting down'));
-    wss.close(() => process.exit(0));
-});
+    wss.close();
+    server.close(() => process.exit(0));
+}
 
-process.on('SIGTERM', () => {
-    wss.clients.forEach((ws) => ws.close(1001, 'Server shutting down'));
-    wss.close(() => process.exit(0));
-});
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

@@ -184,7 +184,19 @@ case "$TARGET" in
         cd "$REPO"
         ASSET_PATH="$ASSET_PATH_OVERRIDE" WEB_DIST="$WEB_DIST" CDN_URL="${CDN_URL:-/assets}" \
             docker compose -f docker/docker-compose.yml up -d --force-recreate
-        echo "Stack running at http://localhost:8086"
+        echo "Waiting for relay health check..."
+        max_wait=60; waited=0
+        while [[ $waited -lt $max_wait ]]; do
+            if curl -sf http://127.0.0.1:8086/health >/dev/null 2>&1; then
+                curl -sf http://127.0.0.1:8086/health
+                echo ""
+                echo "Stack running at http://localhost:8086"
+                break
+            fi
+            sleep 2; waited=$((waited + 2))
+            echo "  ...waiting ($waited/${max_wait}s)"
+        done
+        [[ $waited -ge $max_wait ]] && echo "WARNING: Relay health check timed out. Check: docker logs mohaa-godot-web"
         ;;
 
     deploy)

@@ -76,9 +76,19 @@ Module['preRun'].push(() => {
     addRunDependency(__dep);
 
     (async () => {
-        var cfg = (typeof MOHAA_CONFIG !== 'undefined' ? MOHAA_CONFIG : {}),
-            cdn = cfg['CDN_URL'] || '/assets';
+        /* Resolve CDN base URL from multiple sources (first wins):
+         *   1. window.MOHAA_CDN_URL — set by Docker runtime config script
+         *   2. URL parameter ?cdn_url=...
+         *   3. GODOT_CONFIG.CDN_URL (Godot 4.6+)
+         *   4. MOHAA_CONFIG.CDN_URL (legacy Godot)
+         *   5. Default: /assets (nginx autoindex in Docker) */
+        var cdn = (typeof window !== 'undefined' && window.MOHAA_CDN_URL)
+            || (typeof URLSearchParams !== 'undefined' && (new URLSearchParams(window.location.search)).get('cdn_url'))
+            || (typeof GODOT_CONFIG !== 'undefined' && GODOT_CONFIG['CDN_URL'])
+            || (typeof MOHAA_CONFIG !== 'undefined' && MOHAA_CONFIG['CDN_URL'])
+            || '/assets';
         if (cdn && !cdn.endsWith('/')) cdn += '/';
+        console.log('MOHAAjs: CDN base URL:', cdn);
 
         var cache = null;
         try { cache = await caches.open('mohaajs-assets-v1'); }
@@ -111,16 +121,30 @@ Module['preRun'].push(() => {
 
         /* Helper: fetch directory listing as JSON array */
         var __listDir = async (relDir) => {
+            var url = cdn + relDir;
             try {
-                var r = await fetch(cdn + relDir, {
+                var r = await fetch(url, {
                     cache: 'no-cache',
                     headers: { 'Accept': 'application/json' }
                 });
-                if (!r.ok) return [];
-                var j = await r.json();
+                if (!r.ok) {
+                    console.warn('MOHAAjs: Directory listing failed:', url, 'status:', r.status, r.statusText);
+                    return [];
+                }
+                var txt = await r.text();
+                try {
+                    var j = JSON.parse(txt);
+                } catch (pe) {
+                    console.warn('MOHAAjs: Directory listing not JSON:', url, '(got', txt.substring(0, 200), ')');
+                    return [];
+                }
                 if (Array.isArray(j) && j.length && typeof j[0] === 'object') return j;
+                console.warn('MOHAAjs: Directory listing unexpected format:', url, j);
                 return [];
-            } catch (e) { return []; }
+            } catch (e) {
+                console.warn('MOHAAjs: Directory listing fetch error:', url, e.message || e);
+                return [];
+            }
         };
 
         /* Helper: fetch a single file with Cache API, return {dst, data} or null */

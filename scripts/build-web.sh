@@ -9,7 +9,6 @@ EXPORT_DIR="$REPO_ROOT/web"
 EXPORT_HTML="$EXPORT_DIR/mohaa.html"
 EXPORT_JS="$EXPORT_DIR/mohaa.js"
 PROJECT_GDEXT="$PROJECT_DIR/openmohaa.gdextension"
-GAME_FILES_DIR="${GAME_FILES_DIR:-$HOME/.local/share/openmohaa}"
 
 if [[ -f "$REPO_ROOT/openmohaa/SConstruct" ]]; then
     OPENMOHAA_DIR="$REPO_ROOT/openmohaa"
@@ -24,7 +23,6 @@ EMSDK_DIR="${EMSDK_DIR:-$HOME/emsdk}"
 BUILD_TARGET="template_debug"
 CHECK_ONLY=0
 EXPORT_AFTER_BUILD=1
-COPY_GAME_FILES=1
 PATCH_ONLY=0
 SERVE_ONLY=0
 ASSET_PATH="${ASSET_PATH:-}"
@@ -51,7 +49,6 @@ while [[ $# -gt 0 ]]; do
         --patch-only)
             PATCH_ONLY=1
             EXPORT_AFTER_BUILD=0
-            COPY_GAME_FILES=0
             shift
             ;;
         --serve)
@@ -72,25 +69,12 @@ while [[ $# -gt 0 ]]; do
             ASSET_PATH="$2"
             shift 2
             ;;
-        --no-game-files)
-            COPY_GAME_FILES=0
-            shift
-            ;;
         --emsdk)
             if [[ $# -lt 2 ]]; then
                 echo "ERROR: --emsdk requires a path" >&2
                 exit 1
             fi
             EMSDK_DIR="$2"
-            shift 2
-            ;;
-        --game-files)
-            if [[ $# -lt 2 ]]; then
-                echo "ERROR: --game-files requires a path" >&2
-                exit 1
-            fi
-            GAME_FILES_DIR="$2"
-            COPY_GAME_FILES=1
             shift 2
             ;;
         *)
@@ -135,7 +119,26 @@ serve_docker() {
     WEB_DIST="$EXPORT_DIR" \
     CDN_URL="${CDN_URL:-/assets}" \
     docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build --force-recreate
-    echo "Stack is up. Web: http://localhost:8086"
+
+    # Wait for the relay health check to confirm the container is fully up.
+    echo "Waiting for relay health check..."
+    local max_wait=60
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -sf http://127.0.0.1:8086/health >/dev/null 2>&1; then
+            local health
+            health=$(curl -sf http://127.0.0.1:8086/health)
+            echo "Relay healthy: $health"
+            echo "Stack is up. Web: http://localhost:8086"
+            return 0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+        echo "  ...waiting ($waited/${max_wait}s)"
+    done
+    echo "WARNING: Relay health check failed after ${max_wait}s. Container may still be starting."
+    echo "  Check: docker logs mohaa-godot-web"
+    echo "Stack may be up. Web: http://localhost:8086"
 }
 
 EMSDK_ENV_SH="$EMSDK_DIR/emsdk_env.sh"
@@ -331,34 +334,7 @@ done
 
 sync_gdextension_web_entries "${WASM_ARTIFACTS[@]}"
 
-if [[ "$COPY_GAME_FILES" -eq 1 ]]; then
-    # GAME_FILES_DIR should point to the MOHAA install root (parent of main/, mainta/, maintt/).
-    # If it points directly to main/, use its parent instead.
-    GAME_BASE_DIR="$GAME_FILES_DIR"
-    if [[ "$(basename "$GAME_BASE_DIR")" == "main" ]]; then
-        GAME_BASE_DIR="$(dirname "$GAME_BASE_DIR")"
-    fi
-    # Copy each game directory that exists
-    for gdir in main mainta maintt; do
-        if [[ -d "$GAME_BASE_DIR/$gdir" ]]; then
-            mkdir -p "$EXPORT_DIR/$gdir"
-            # Use rsync if available (fast delta sync), otherwise cp -a.
-            if command -v rsync >/dev/null 2>&1; then
-                rsync -a --delete --exclude='.*' "$GAME_BASE_DIR/$gdir/" "$EXPORT_DIR/$gdir/"
-            else
-                rm -rf "$EXPORT_DIR/$gdir"
-                cp -a "$GAME_BASE_DIR/$gdir" "$EXPORT_DIR/$gdir"
-            fi
-            echo "Copied game files: $GAME_BASE_DIR/$gdir -> $EXPORT_DIR/$gdir"
-        fi
-    done
-    if [[ ! -d "$GAME_BASE_DIR/main" && ! -d "$GAME_FILES_DIR" ]]; then
-        echo "WARNING: Game files directory not found: $GAME_FILES_DIR"
-    fi
-fi
-
-# Ensure web export always uses the freshly built cgame module from this build,
-# not a potentially stale copy from GAME_FILES_DIR.
+# Ensure web export always uses the freshly built cgame module from this build.
 # For web builds SCons+emcc may produce libcgame.wasm (WASM SIDE_MODULE) or
 # libcgame.so (same WASM content with .so extension).  Check both.
 CGAME_ARTIFACT=""
