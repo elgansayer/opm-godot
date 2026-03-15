@@ -117,6 +117,11 @@ stubs[prop] = (...args) => {
         var fn4 = wasmTable.get(resolved.value | 0); if (fn4) resolved = fn4;
     }
 
+    /* ── TLS init functions (_ZTH*) — no-op in single-threaded WASM ── */
+    if (!resolved && typeof prop === 'string' && prop.startsWith('_ZTH')) {
+        resolved = () => 0;
+    }
+
     /* ── Final dispatch with error handling ── */
     if (!resolved) {
         console.error('OpenMoHAA unresolved runtime import', prop, args);
