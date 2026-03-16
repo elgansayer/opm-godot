@@ -7,6 +7,10 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
+      tag_name:
+        description: "Release tag name (e.g. v1.0.0)"
+        required: true
+        default: "v0.0.0-dev"
       create_release:
         description: "Create a GitHub Release"
         required: false
@@ -64,8 +68,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
-          name: Release ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag_name }}
+          name: Release ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag_name }}
           draft: false
           prerelease: false
           files: |
