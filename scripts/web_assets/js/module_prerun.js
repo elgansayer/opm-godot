@@ -280,8 +280,9 @@ Module['preRun'].push(() => {
                 var e = entries[i], name = e.name;
                 if (name.startsWith('.')) continue;
                 if (e.type === 'directory') continue;
-                var ln = name.toLowerCase();
-                if (!(ln.endsWith('.pk3') || ln.endsWith('.cfg'))) continue;
+                /* Manifest entries include all files (sounds, music, videos, configs, pk3s).
+                 * Only skip hidden files and the manifest itself. */
+                if (name === 'manifest.json') continue;
                 var rel = relDir + name;
                 total++;
                 promises.push((async (r) => {

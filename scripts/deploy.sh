@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
-# release.sh — Full build → deploy → push pipeline
+# deploy.sh — Push code to trigger GitHub Actions build + optionally sync CDN
+#
+# The web build is done by GitHub Actions (build-web.yml), which produces a
+# Docker image and pushes it to ghcr.io/elgansayer/mohaa-godot:latest.
+# The production server (Portainer) pulls that image and serves the web export.
+# Game assets live on a remote CDN — no local assets on the server.
 #
 # Usage:
-#   ./release.sh --asset-path /path/to/game/assets [OPTIONS]
+#   ./scripts/deploy.sh [OPTIONS]
 #
 # Options:
-#   --asset-path PATH   Path to game assets directory (required for serve)
-#   --skip-build        Skip the full web build (reuse existing web/)
-#   --skip-serve        Don't start local Docker stack after building
-#   --no-push           Build but don't commit/push
-#   --message "MSG"     Custom commit message (default: auto-generated timestamp)
+#   --cdn-remote REMOTE   Sync game assets to CDN via rclone (e.g. r2:mohaa-cdn)
+#   --asset-path PATH     Local path to game assets (required with --cdn-remote)
+#   --no-push             Stage changes but don't commit/push
+#   --message "MSG"       Custom commit message (default: auto-generated timestamp)
+#   --local-build         Also run a local web build before pushing
+#   --local-serve         Also start local Docker stack (requires --asset-path)
+#   -h, --help            Show this help
 #
-# Pipeline:
-#   1. Full web build         — build-web.sh (SCons + Godot export + JS patches)
-#   2. Local deploy (optional)— Docker compose up (nginx + relay)
-#   3. Commit + push          — mohaa-godot
-#   4. GitHub Actions         — builds Docker image → ghcr.io/elgansayer/mohaa-godot:latest
-#   5. Portainer              — pulls latest image on next poll/manual redeploy
+# Default pipeline (remote-first):
+#   1. CDN asset sync (if --cdn-remote) — deploy-cdn.sh (manifest gen + rclone)
+#   2. Commit + push to GitHub
+#   3. GitHub Actions builds Docker image → ghcr.io/elgansayer/mohaa-godot:latest
+#   4. Portainer pulls latest image (configured with CDN_URL env var)
+#
+# Examples:
+#   # Just push code — GitHub Actions builds, Portainer redeploys
+#   ./scripts/deploy.sh
+#
+#   # Sync CDN assets then push
+#   ./scripts/deploy.sh --cdn-remote r2:mohaa-cdn --asset-path ~/mohaa-assets
+#
+#   # Local dev: build locally + serve + push
+#   ./scripts/deploy.sh --local-build --local-serve --asset-path ~/mohaa-assets
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,21 +42,23 @@ cd "$REPO_ROOT"
 
 # --- Defaults ---
 ASSET_PATH=""
-SKIP_BUILD=0
-SKIP_SERVE=0
+CDN_REMOTE=""
 NO_PUSH=0
 COMMIT_MSG=""
+LOCAL_BUILD=0
+LOCAL_SERVE=0
 
 # --- Parse flags ---
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --asset-path)   ASSET_PATH="$2"; shift 2 ;;
-        --skip-build)   SKIP_BUILD=1; shift ;;
-        --skip-serve)   SKIP_SERVE=1; shift ;;
+        --cdn-remote)   CDN_REMOTE="$2"; shift 2 ;;
         --no-push)      NO_PUSH=1; shift ;;
         --message)      COMMIT_MSG="$2"; shift 2 ;;
+        --local-build)  LOCAL_BUILD=1; shift ;;
+        --local-serve)  LOCAL_SERVE=1; shift ;;
         -h|--help)
-            head -20 "$0" | tail -19
+            sed -n '2,/^set -euo/{ /^set -euo/d; s/^# \?//p; }' "$0"
             exit 0 ;;
         *)
             echo "Unknown option: $1" >&2
@@ -48,9 +67,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validation ---
-if [[ -z "$ASSET_PATH" && "$SKIP_SERVE" -eq 0 ]]; then
-    echo "ERROR: --asset-path is required (or use --skip-serve to skip local deploy)." >&2
-    echo "Usage: $0 --asset-path /path/to/game/assets" >&2
+if [[ -n "$CDN_REMOTE" && -z "$ASSET_PATH" ]]; then
+    echo "ERROR: --cdn-remote requires --asset-path to know which files to upload." >&2
+    exit 1
+fi
+if [[ "$LOCAL_SERVE" -eq 1 && -z "$ASSET_PATH" ]]; then
+    echo "ERROR: --local-serve requires --asset-path for the Docker volume mount." >&2
     exit 1
 fi
 
@@ -59,6 +81,13 @@ if [[ -z "$COMMIT_MSG" ]]; then
     COMMIT_MSG="release: web export ${TIMESTAMP}"
 fi
 
+# Count total steps
+TOTAL_STEPS=1  # push is always a step
+[[ "$LOCAL_BUILD" -eq 1 ]] && TOTAL_STEPS=$(( TOTAL_STEPS + 1 ))
+[[ -n "$CDN_REMOTE" ]] && TOTAL_STEPS=$(( TOTAL_STEPS + 1 ))
+[[ "$LOCAL_SERVE" -eq 1 ]] && TOTAL_STEPS=$(( TOTAL_STEPS + 1 ))
+CURRENT_STEP=0
+
 # --- Colours ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -66,50 +95,50 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-step() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
+next_step() { CURRENT_STEP=$(( CURRENT_STEP + 1 )); echo -e "\n${CYAN}=== Step ${CURRENT_STEP}/${TOTAL_STEPS}: $1 ===${NC}"; }
 ok()   { echo -e "${GREEN}✓ $1${NC}"; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
 fail() { echo -e "${RED}✗ $1${NC}" >&2; exit 1; }
 
 # =========================================================================
-# Step 1: Full web build
+# Optional: Local web build (dev only)
 # =========================================================================
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-    step "Step 1/3: Full web build"
+if [[ "$LOCAL_BUILD" -eq 1 ]]; then
+    next_step "Local web build"
     BUILD_ARGS=(--release)
     if [[ -n "$ASSET_PATH" ]]; then
         BUILD_ARGS+=(--asset-path "$ASSET_PATH")
     fi
     "$SCRIPT_DIR/build-web.sh" "${BUILD_ARGS[@]}"
     ok "Web build complete"
-else
-    step "Step 1/3: Skipping build (--skip-build)"
-    if [[ ! -f "$REPO_ROOT/dist/web/release/mohaa.html" ]]; then
-        fail "dist/web/release/mohaa.html not found — run without --skip-build first"
-    fi
-    if [[ -n "$ASSET_PATH" ]]; then
-        "$SCRIPT_DIR/build-web.sh" --patch-only --release --asset-path "$ASSET_PATH"
-    else
-        "$SCRIPT_DIR/build-web.sh" --patch-only --release
-    fi
-    ok "Patches re-applied"
 fi
 
 # =========================================================================
-# Step 2: Local deploy (Docker compose)
+# Optional: CDN asset sync
 # =========================================================================
-if [[ "$SKIP_SERVE" -eq 0 ]]; then
-    step "Step 2/3: Local deploy"
-    WEB_DIST="$REPO_ROOT/dist/web/release" ASSET_PATH="$ASSET_PATH" docker compose -f docker/docker-compose.yml up -d
+if [[ -n "$CDN_REMOTE" ]]; then
+    next_step "CDN asset sync"
+    "$SCRIPT_DIR/deploy-cdn.sh" --source "$ASSET_PATH" --remote "$CDN_REMOTE"
+    ok "CDN assets synced to $CDN_REMOTE"
+fi
+
+# =========================================================================
+# Optional: Local Docker serve (dev only)
+# =========================================================================
+if [[ "$LOCAL_SERVE" -eq 1 ]]; then
+    next_step "Local Docker deploy"
+    WEB_DIST="${REPO_ROOT}/dist/web/release"
+    if [[ ! -f "$WEB_DIST/mohaa.html" ]]; then
+        fail "dist/web/release/mohaa.html not found — run with --local-build first"
+    fi
+    WEB_DIST="$WEB_DIST" ASSET_PATH="$ASSET_PATH" docker compose -f docker/docker-compose.yml up -d
     ok "Local stack running at http://localhost:8086"
-else
-    step "Step 2/3: Skipping local deploy (--skip-serve)"
 fi
 
 # =========================================================================
-# Step 3: Commit + push mohaa-godot
+# Commit + push (triggers GitHub Actions)
 # =========================================================================
-step "Step 3/3: Commit + push"
+next_step "Commit + push"
 if [[ "$NO_PUSH" -eq 0 ]]; then
     git add -A
     if git diff --cached --quiet; then
@@ -127,16 +156,20 @@ fi
 # Summary
 # =========================================================================
 echo ""
-echo "  Repo:          git@github.com:elgansayer/mohaa-godot.git"
-echo "  Docker image:  ghcr.io/elgansayer/mohaa-godot:latest"
+echo "  Repo:   git@github.com:elgansayer/mohaa-godot.git"
+echo "  Image:  ghcr.io/elgansayer/mohaa-godot:latest"
+if [[ -n "$CDN_REMOTE" ]]; then
+    echo "  CDN:    $CDN_REMOTE"
+fi
 echo ""
 if [[ "$NO_PUSH" -eq 0 ]]; then
     echo "  GitHub Actions will build + push the Docker image to GHCR."
     echo "  Check: https://github.com/elgansayer/mohaa-godot/actions"
     echo ""
     echo "  Once complete, redeploy in Portainer or wait for auto-poll."
+    echo "  Ensure CDN_URL is set in the Portainer stack environment."
 else
     echo "  Run again without --no-push to commit and deploy."
 fi
 echo ""
-ok "Release pipeline complete"
+ok "Deploy complete"

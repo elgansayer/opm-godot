@@ -1,14 +1,18 @@
 # =============================================================================
-# OpenMoHAA Web — Docker Compose
+# OpenMoHAA Web — Docker Compose (local development)
 # =============================================================================
-# Dev profile — builds the web+relay image locally, mounts local web export:
+# CDN-only (default — no local game assets needed):
+#   WEB_DIST=./dist/web/debug CDN_URL=https://cdn.example.com/mohaa \
+#     docker compose -f docker/docker-compose.yml up --build
 #
+# With local assets (add override file or uncomment volume below):
 #   WEB_DIST=./dist/web/debug ASSET_PATH=/path/to/mohaa-assets \
 #     docker compose -f docker/docker-compose.yml up --build
 #
-# Required env vars:
-#   ASSET_PATH — host directory containing main/, mainta/, maintt/ with pk3s
-#   WEB_DIST   — path to web export directory (default: ./dist/web/debug)
+# Env vars:
+#   WEB_DIST    — path to web export directory (default: ./dist/web/debug)
+#   CDN_URL     — CDN base URL (default: /assets; set to remote URL for CDN-only)
+#   ASSET_PATH  — host directory with main/, mainta/, maintt/ (for local assets)
 # =============================================================================
 
 services:
@@ -23,5 +27,6 @@ services:
       - CDN_URL=${CDN_URL:-/assets}
     volumes:
       - ${WEB_DIST:-../dist/web/debug}:/srv/web:ro
-      - ${ASSET_PATH:?Set ASSET_PATH to game assets directory}:/srv/assets:ro
+      # Uncomment to serve game assets locally (instead of remote CDN):
+      # - ${ASSET_PATH:?Set ASSET_PATH}:/srv/assets:ro
     restart: unless-stopped

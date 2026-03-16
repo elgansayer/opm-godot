@@ -24,6 +24,9 @@ RUN chmod +x /mohaa-entrypoint.sh
 # CI exports and patches web build output into /web before publish.
 COPY web/ /srv/web/
 
+# Empty assets dir — nginx /assets/ needs this even when using remote CDN.
+RUN mkdir -p /srv/assets
+
 # Health check: relay responds on /health via nginx proxy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:12300/health || exit 1
