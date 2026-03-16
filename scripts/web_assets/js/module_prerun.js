@@ -161,8 +161,32 @@ Module['preRun'].push(() => {
             } catch (e) {}
         };
 
-        /* Helper: fetch directory listing as JSON array */
+        /* Helper: fetch directory listing as JSON array.
+         * Tries three approaches in order:
+         *   1. Static manifest.json in the directory (works on any CDN/static host)
+         *   2. nginx autoindex JSON (requires autoindex_format json)
+         *   3. Returns [] — caller will fall back to known-filename probing */
         var __listDir = async (relDir) => {
+            /* 1. Try static manifest.json (deployer-created) */
+            var manifestUrl = cdn + relDir + 'manifest.json';
+            try {
+                var mr = await fetch(manifestUrl, { cache: 'no-cache' });
+                if (mr.ok) {
+                    var mtxt = await mr.text();
+                    var mj = JSON.parse(mtxt);
+                    if (Array.isArray(mj) && mj.length) {
+                        /* Normalise entries: accept both [{name:"foo"},...] and ["foo",...] */
+                        var entries = mj.map(function(e) {
+                            if (typeof e === 'string') return { name: e, type: 'file' };
+                            return e;
+                        });
+                        console.log('MOHAAjs: Using manifest.json for ' + relDir + ' (' + entries.length + ' entries)');
+                        return entries;
+                    }
+                }
+            } catch (e) {}
+
+            /* 2. Try nginx autoindex JSON */
             var url = cdn + relDir;
             try {
                 var r = await fetch(url, {
@@ -218,8 +242,39 @@ Module['preRun'].push(() => {
 
         /* Walk a server directory: fetch only .pk3 and .cfg files */
         var total = 0, loaded = 0, failed = 0;
+
+        /* Known MOHAA pk3 filenames per game directory.  Used as fallback
+         * when the CDN doesn't support JSON directory listing (autoindex). */
+        var __knownPaks = {
+            'main/':    ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3','Pak4.pk3','Pak5.pk3','Pak6.pk3'],
+            'mainta/':  ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3'],
+            'maintt/':  ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3']
+        };
+
+        /* Fetch a list of files by known names (HEAD probe then GET).
+         * Returns synthetic entries compatible with __walk's loop. */
+        var __probeKnownPaks = async (relDir) => {
+            var known = __knownPaks[relDir];
+            if (!known) return [];
+            console.log('MOHAAjs: Directory listing unavailable for ' + relDir + ' — trying ' + known.length + ' known pak names');
+            var entries = [];
+            var probes = known.map(async (name) => {
+                try {
+                    var url = cdn + relDir + name;
+                    var r = await fetch(url, { method: 'HEAD' });
+                    if (r.ok) entries.push({ name: name, type: 'file' });
+                } catch (e) {}
+            });
+            await Promise.all(probes);
+            return entries;
+        };
+
         var __walk = async (relDir) => {
             var entries = await __listDir(relDir);
+            if (entries.length === 0) {
+                /* Fallback: CDN has no directory listing — probe known pk3 names */
+                entries = await __probeKnownPaks(relDir);
+            }
             var promises = [];
             for (var i = 0; i < entries.length; i++) {
                 var e = entries[i], name = e.name;
@@ -290,7 +345,14 @@ Module['preRun'].push(() => {
         }
 
         console.log('MOHAAjs: VFS preload complete: ' + loaded + ' files ready, ' + failed + ' failed');
-        __setVfsStatus('Starting engine\u2026');
+        if (loaded === 0 && __lfKeys.length === 0) {
+            console.error('MOHAAjs: WARNING — No game files loaded! The engine will not work correctly.');
+            console.error('MOHAAjs: Check that the CDN URL (' + cdn + ') serves pk3 files.');
+            console.error('MOHAAjs: Either enable nginx autoindex_format json, or place Pak0.pk3-Pak6.pk3 at ' + cdn + 'main/');
+            __setVfsStatus('Warning: No game files found. Check CDN configuration.');
+        } else {
+            __setVfsStatus('Starting engine\u2026');
+        }
     })().catch(e => console.error('MOHAAjs: PreRun error', e))
         .finally(() => { __cleanupVfsOverlay(); removeRunDependency(__dep); });
 });
