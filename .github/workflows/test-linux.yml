@@ -1,7 +1,8 @@
 # Build + test pipeline for Linux.
-# Runs on every push to main and on PRs.  The headless smoke test needs
-# only the built .so — no game assets.  Viewmodel and resolution tests
-# are skipped in CI (they need a display server and pk3 game assets).
+# Triggered via workflow_dispatch (manual) or workflow_call (from other
+# workflows).  The headless smoke test needs only the built .so — no
+# game assets.  Viewmodel and resolution tests are skipped in CI (they
+# need a display server and pk3 game assets).
 name: Test Linux
 
 on:
