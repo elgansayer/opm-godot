@@ -2,7 +2,7 @@
 #mohaa-loader {
   position: fixed;
   inset: 0;
-  background: #111 url(mohaa.png) center center / cover no-repeat;
+  background: #111;
   z-index: 1000;
   display: none;
   overflow-y: auto;
@@ -11,17 +11,7 @@
   color: #d0d0d0;
   -webkit-overflow-scrolling: touch;
 }
-#mohaa-loader::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-  z-index: 0;
-  pointer-events: none;
-}
 .mohaa-inner {
-  position: relative;
-  z-index: 1;
   max-width: 640px;
   margin: 0 auto;
   padding: 2.5rem 2rem 3rem;

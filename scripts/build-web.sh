@@ -298,6 +298,12 @@ cd "$OPENMOHAA_DIR"
 
 if [[ "$PATCH_ONLY" -eq 1 ]]; then
     echo "Patch-only mode: re-applying JS/HTML patches to existing export..."
+    # Ensure custom boot splash is present.
+    _splash_src="$PROJECT_DIR/Gemini_Generated_Image_9eun199eun199eun.png"
+    if [[ -f "$_splash_src" && -d "$EXPORT_DIR" ]]; then
+        cp -f "$_splash_src" "$EXPORT_DIR/mohaa.png"
+        echo "Boot splash: copied custom image -> $EXPORT_DIR/mohaa.png"
+    fi
     patch_web_js
     patch_web_html
     echo "Patch-only complete."
@@ -380,6 +386,15 @@ if [[ "$EXPORT_AFTER_BUILD" -eq 1 ]]; then
     if [[ "$godot_export_status" -ne 0 ]]; then
         echo "ERROR: Godot export failed with status $godot_export_status" >&2
         exit 1
+    fi
+
+    # Godot's headless web export sometimes produces the default Godot logo as
+    # mohaa.png instead of the project's boot_splash/image (import cache missing).
+    # Overwrite with the actual source image to guarantee the correct splash.
+    _splash_src="$PROJECT_DIR/Gemini_Generated_Image_9eun199eun199eun.png"
+    if [[ -f "$_splash_src" ]]; then
+        cp -f "$_splash_src" "$EXPORT_DIR/mohaa.png"
+        echo "Boot splash: copied custom image -> $EXPORT_DIR/mohaa.png"
     fi
 
     patch_web_js
