@@ -1,9 +1,12 @@
-# Build GDExtension for macOS (x86_64 and arm64).
+# Build GDExtension for macOS (x86_64 and arm64), then export as standalone game.
 name: Build macOS
 
 on:
   workflow_dispatch:
   workflow_call:
+
+env:
+  GODOT_VERSION: "4.6.1"
 
 jobs:
   build:
@@ -71,4 +74,58 @@ jobs:
         with:
           name: gdextension-macos-${{ matrix.arch }}
           path: gdextension-macos-${{ matrix.arch }}.zip
+          if-no-files-found: warn
+
+      # ── Godot Export: standalone game .app bundle ──
+      - name: Install Godot
+        if: matrix.arch == 'arm64'
+        run: |
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_macos.universal.zip" -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp
+          sudo cp -R "/tmp/Godot.app" /Applications/Godot.app
+          sudo ln -sf /Applications/Godot.app/Contents/MacOS/Godot /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+
+      - name: Install Godot export templates
+        if: matrix.arch == 'arm64'
+        run: |
+          TEMPLATES_DIR="$HOME/Library/Application Support/Godot/export_templates/${{ env.GODOT_VERSION }}.stable"
+          mkdir -p "$TEMPLATES_DIR"
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_export_templates.tpz" -O /tmp/templates.tpz
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$TEMPLATES_DIR/"
+
+      - name: Deploy library to project
+        if: matrix.arch == 'arm64'
+        run: |
+          mkdir -p project/bin
+          cp -f openmohaa/bin/libopenmohaa.dylib project/bin/
+          cp -f openmohaa/bin/libcgame.dylib project/bin/ || true
+
+      - name: Export Godot project
+        if: matrix.arch == 'arm64'
+        run: |
+          mkdir -p dist/macos
+          cd project
+          godot --headless --export-debug "macOS" ../dist/macos/ShinMOHAA.app 2>&1 || true
+          test -d ../dist/macos/ShinMOHAA.app
+
+      - name: Stage companion binaries
+        if: matrix.arch == 'arm64'
+        run: |
+          cp -f openmohaa/bin/libcgame.dylib dist/macos/cgame.dylib || true
+
+      - name: Zip game export
+        if: matrix.arch == 'arm64'
+        run: |
+          cd dist/macos
+          zip -r -y ../../shinmohaa-macos-arm64.zip .
+          cd ../..
+
+      - name: Upload game export
+        if: matrix.arch == 'arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shinmohaa-macos-arm64
+          path: shinmohaa-macos-arm64.zip
           if-no-files-found: warn

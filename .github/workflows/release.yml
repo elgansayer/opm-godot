@@ -1,4 +1,4 @@
-# Full release pipeline: build all platforms, create/update GitHub Release.
+# Full release pipeline: build all platforms, export games, create GitHub Release.
 # Triggered only on release publish and manual dispatch.
 name: Release
 
@@ -22,7 +22,7 @@ permissions:
   packages: write
 
 jobs:
-  # ─── Build each platform ───
+  # ─── Build each platform (library + game export) ───
   build-linux:
     uses: ./.github/workflows/build-linux.yml
     secrets: inherit
@@ -43,7 +43,7 @@ jobs:
     uses: ./.github/workflows/build-web.yml
     secrets: inherit
 
-  # ─── Create GitHub Release with all artifacts ───
+  # ─── Create GitHub Release with all game exports ───
   release:
     needs: [build-linux, build-macos, build-windows, build-android, build-web]
     runs-on: ubuntu-22.04
@@ -56,15 +56,36 @@ jobs:
           path: artifacts/
 
       - name: List artifacts
-        run: find artifacts/ -type f | head -50
+        run: find artifacts/ -type f | head -80
 
       - name: Prepare Release Assets
         run: |
           mkdir -p release_assets
-          # Collect all native zips
-          cp artifacts/gdextension-*/*.zip release_assets/
-          # Web is already zipped as openmohaa-web.zip inside its folder
-          cp artifacts/web-export/openmohaa-web.zip release_assets/
+
+          # ── Game exports (standalone playable) ──
+          # Linux game
+          [ -f artifacts/shinmohaa-linux-x86_64/shinmohaa-linux-x86_64.zip ] && \
+            cp artifacts/shinmohaa-linux-x86_64/shinmohaa-linux-x86_64.zip release_assets/
+
+          # Windows game
+          [ -f artifacts/shinmohaa-windows-x86_64/shinmohaa-windows-x86_64.zip ] && \
+            cp artifacts/shinmohaa-windows-x86_64/shinmohaa-windows-x86_64.zip release_assets/
+
+          # macOS game
+          [ -f artifacts/shinmohaa-macos-arm64/shinmohaa-macos-arm64.zip ] && \
+            cp artifacts/shinmohaa-macos-arm64/shinmohaa-macos-arm64.zip release_assets/
+
+          # Web game
+          [ -f artifacts/web-export/openmohaa-web.zip ] && \
+            cp artifacts/web-export/openmohaa-web.zip release_assets/shinmohaa-web.zip
+
+          # ── GDExtension libraries (for developers) ──
+          for f in artifacts/gdextension-*/*.zip; do
+            [ -f "$f" ] && cp "$f" release_assets/
+          done
+
+          echo "=== Release assets ==="
+          ls -la release_assets/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -73,6 +94,24 @@ jobs:
           name: Release ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.tag_name }}
           draft: false
           prerelease: false
+          body: |
+            ## ShinMOHAA Game Downloads
+
+            | Platform | Download |
+            |----------|----------|
+            | Windows (x86_64) | `shinmohaa-windows-x86_64.zip` |
+            | Linux (x86_64) | `shinmohaa-linux-x86_64.zip` |
+            | macOS (arm64) | `shinmohaa-macos-arm64.zip` |
+            | Web | `shinmohaa-web.zip` |
+
+            ### How to play
+            1. Download the zip for your platform
+            2. Extract to a folder
+            3. Copy your MOHAA `Pak0.pk3`–`Pak6.pk3` files to `~/.local/share/openmohaa/main/` (Linux/macOS) or `%APPDATA%\openmohaa\main\` (Windows)
+            4. Run the executable
+
+            ### GDExtension Libraries (for developers)
+            The `gdextension-*` zips contain only the engine libraries for use with the Godot editor.
           files: |
             release_assets/*.zip
         env:
