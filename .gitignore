@@ -40,7 +40,6 @@ project/*.png
 project/*.jpg
 project/*.jpeg
 project/AOI_*
-project/Gemini_*
 
 # Logs
 console*.log
@@ -54,6 +53,14 @@ console*.log
 # OS
 .DS_Store
 Thumbs.db
+
+# AI / agent config (keep locally, not committed)
+CLAUDE.md
+.claude/
+.github/copilot-instructions.md
+.github/prompts/
+openmohaa/TASKS.md
+openmohaa/AGENTS.md
 
 # Misc
 node_modules/
