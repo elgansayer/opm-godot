@@ -61,9 +61,10 @@ jobs:
         working-directory: openmohaa
         shell: pwsh
         run: |
-          # Force -j1 on Windows: SCons hits deep recursion with parallel builds + MSVC + 1400+ source files
-          Write-Host "Building with -j1 (serial, avoids SCons recursion issue)"
-          scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
+          # --implicit-deps-unchanged skips the C header scanner which triggers
+          # infinite recursion on Windows with 1400+ source files.  CI always
+          # builds from scratch so implicit-dep tracking is unnecessary.
+          scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no --implicit-deps-unchanged
 
       - name: Zip GDExtension artifacts
         shell: pwsh
