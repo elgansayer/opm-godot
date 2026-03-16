@@ -1,4 +1,4 @@
-# Full release pipeline: build all platforms, export games, create GitHub Release.
+# Full release pipeline: build all platforms, export standalone games, create GitHub Release.
 # Triggered only on release publish and manual dispatch.
 name: Release
 
@@ -22,7 +22,7 @@ permissions:
   packages: write
 
 jobs:
-  # ─── Build each platform (library + game export) ───
+  # ─── Build each platform (GDExtension libraries only) ───
   build-linux:
     uses: ./.github/workflows/build-linux.yml
     secrets: inherit
@@ -43,11 +43,153 @@ jobs:
     uses: ./.github/workflows/build-web.yml
     secrets: inherit
 
+  # ─── Export standalone game executables from Linux ───
+  # Godot cross-exports for all desktop platforms without needing native hosts.
+  # Web export is handled by build-web.yml directly.
+  export-games:
+    needs: [build-linux, build-macos, build-windows]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    env:
+      GODOT_VERSION: "4.6.1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Install Godot
+        run: |
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64.zip" -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp
+          sudo mv "/tmp/Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+
+      - name: Install Godot export templates
+        run: |
+          TEMPLATES_DIR="$HOME/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.stable"
+          mkdir -p "$TEMPLATES_DIR"
+          wget -q "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_export_templates.tpz" -O /tmp/templates.tpz
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$TEMPLATES_DIR/"
+
+      - name: Download GDExtension artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List downloaded artifacts
+        run: find artifacts/ -type f | head -80
+
+      # Pre-import: let Godot build the .godot/ import cache.
+      # project/bin/ is empty so no GDExtension loads; this just imports resources.
+      - name: Import Godot project resources
+        run: |
+          mkdir -p project/bin
+          cd project
+          timeout 120 godot --headless --quit 2>&1 || true
+
+      # ── Linux x86_64 ──
+      - name: Export Linux game
+        run: |
+          rm -rf project/bin/* dist/linux
+          mkdir -p project/bin dist/linux
+
+          # Unzip the library artifact and deploy to project/bin/
+          unzip -o artifacts/gdextension-linux-x86_64/gdextension-linux-x86_64.zip -d /tmp/linux-libs
+          ls -la /tmp/linux-libs/
+          cp -f /tmp/linux-libs/libopenmohaa.so project/bin/
+
+          cd project
+          godot --headless --export-debug "Linux" ../dist/linux/shinmohaa.x86_64 2>&1 || true
+          cd ..
+          ls -la dist/linux/
+          test -f dist/linux/shinmohaa.x86_64
+
+          # Stage companion: cgame goes in main/ next to the game
+          mkdir -p dist/linux/main
+          cp -f /tmp/linux-libs/libcgame.so dist/linux/main/cgame.so 2>/dev/null || true
+
+          cd dist/linux && zip -r ../../shinmohaa-linux-x86_64.zip . && cd ../..
+
+      # ── Windows x86_64 ──
+      - name: Export Windows game
+        if: ${{ hashFiles('artifacts/gdextension-windows-x86_64/gdextension-windows-x86_64.zip') != '' }}
+        run: |
+          rm -rf project/bin/* dist/windows
+          mkdir -p project/bin dist/windows
+
+          unzip -o artifacts/gdextension-windows-x86_64/gdextension-windows-x86_64.zip -d /tmp/win-libs
+          ls -la /tmp/win-libs/
+          # Windows library has no "lib" prefix
+          cp -f /tmp/win-libs/openmohaa.dll project/bin/ 2>/dev/null || \
+          cp -f /tmp/win-libs/libopenmohaa.dll project/bin/openmohaa.dll 2>/dev/null || true
+
+          cd project
+          godot --headless --export-debug "Windows Desktop" ../dist/windows/shinmohaa.exe 2>&1 || true
+          cd ..
+          ls -la dist/windows/
+          test -f dist/windows/shinmohaa.exe
+
+          # Stage companion
+          mkdir -p dist/windows/main
+          cp -f /tmp/win-libs/cgame.dll dist/windows/main/ 2>/dev/null || true
+
+          cd dist/windows && zip -r ../../shinmohaa-windows-x86_64.zip . && cd ../..
+
+      # ── macOS arm64 ──
+      - name: Export macOS game
+        if: ${{ hashFiles('artifacts/gdextension-macos-arm64/gdextension-macos-arm64.zip') != '' }}
+        run: |
+          rm -rf project/bin/* dist/macos
+          mkdir -p project/bin dist/macos
+
+          unzip -o artifacts/gdextension-macos-arm64/gdextension-macos-arm64.zip -d /tmp/mac-libs
+          ls -la /tmp/mac-libs/
+          cp -f /tmp/mac-libs/libopenmohaa.dylib project/bin/
+
+          cd project
+          godot --headless --export-debug "macOS" ../dist/macos/ShinMOHAA.app 2>&1 || true
+          cd ..
+          ls -la dist/macos/
+          test -d dist/macos/ShinMOHAA.app
+
+          # Stage companion
+          mkdir -p dist/macos/main
+          cp -f /tmp/mac-libs/libcgame.dylib dist/macos/main/cgame.dylib 2>/dev/null || true
+
+          cd dist/macos && zip -r -y ../../shinmohaa-macos-arm64.zip . && cd ../..
+
+      - name: Upload Linux game
+        if: ${{ hashFiles('shinmohaa-linux-x86_64.zip') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shinmohaa-linux-x86_64
+          path: shinmohaa-linux-x86_64.zip
+
+      - name: Upload Windows game
+        if: ${{ hashFiles('shinmohaa-windows-x86_64.zip') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shinmohaa-windows-x86_64
+          path: shinmohaa-windows-x86_64.zip
+
+      - name: Upload macOS game
+        if: ${{ hashFiles('shinmohaa-macos-arm64.zip') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shinmohaa-macos-arm64
+          path: shinmohaa-macos-arm64.zip
+
   # ─── Create GitHub Release with all game exports ───
   release:
-    needs: [build-linux, build-macos, build-windows, build-android, build-web]
+    needs: [build-linux, build-macos, build-windows, build-android, build-web, export-games]
+    if: |
+      !cancelled() &&
+      (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true'))
     runs-on: ubuntu-22.04
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
 
     steps:
       - name: Download all artifacts
@@ -63,25 +205,21 @@ jobs:
           mkdir -p release_assets
 
           # ── Game exports (standalone playable) ──
-          # Linux game
           [ -f artifacts/shinmohaa-linux-x86_64/shinmohaa-linux-x86_64.zip ] && \
-            cp artifacts/shinmohaa-linux-x86_64/shinmohaa-linux-x86_64.zip release_assets/
+            cp artifacts/shinmohaa-linux-x86_64/shinmohaa-linux-x86_64.zip release_assets/ || true
 
-          # Windows game
           [ -f artifacts/shinmohaa-windows-x86_64/shinmohaa-windows-x86_64.zip ] && \
-            cp artifacts/shinmohaa-windows-x86_64/shinmohaa-windows-x86_64.zip release_assets/
+            cp artifacts/shinmohaa-windows-x86_64/shinmohaa-windows-x86_64.zip release_assets/ || true
 
-          # macOS game
           [ -f artifacts/shinmohaa-macos-arm64/shinmohaa-macos-arm64.zip ] && \
-            cp artifacts/shinmohaa-macos-arm64/shinmohaa-macos-arm64.zip release_assets/
+            cp artifacts/shinmohaa-macos-arm64/shinmohaa-macos-arm64.zip release_assets/ || true
 
-          # Web game
           [ -f artifacts/web-export/openmohaa-web.zip ] && \
-            cp artifacts/web-export/openmohaa-web.zip release_assets/shinmohaa-web.zip
+            cp artifacts/web-export/openmohaa-web.zip release_assets/shinmohaa-web.zip || true
 
           # ── GDExtension libraries (for developers) ──
           for f in artifacts/gdextension-*/*.zip; do
-            [ -f "$f" ] && cp "$f" release_assets/
+            [ -f "$f" ] && cp "$f" release_assets/ || true
           done
 
           echo "=== Release assets ==="

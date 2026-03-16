@@ -1,4 +1,4 @@
-# Build GDExtension for Windows (x86_64) using CMake + MSVC, then export as standalone game.
+# Build GDExtension for Windows (x86_64) using CMake + MSVC.
 # CMake is used instead of SCons on Windows to avoid a Python RecursionError
 # that occurs in SCons' internal variable substitution with 1400+ source files.
 name: Build Windows
@@ -6,9 +6,6 @@ name: Build Windows
 on:
   workflow_dispatch:
   workflow_call:
-
-env:
-  GODOT_VERSION: "4.6.1"
 
 jobs:
   build:
@@ -81,56 +78,4 @@ jobs:
         with:
           name: gdextension-windows-${{ matrix.arch }}
           path: gdextension-windows-${{ matrix.arch }}.zip
-          if-no-files-found: warn
-
-      # ── Godot Export: standalone game executable ──
-      - name: Install Godot
-        shell: pwsh
-        run: |
-          $url = "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_win64.exe.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\godot.zip"
-          Expand-Archive -Path "$env:TEMP\godot.zip" -DestinationPath "$env:TEMP\godot"
-          Copy-Item "$env:TEMP\godot\Godot_v${{ env.GODOT_VERSION }}-stable_win64.exe" -Destination "C:\godot.exe"
-
-      - name: Install Godot export templates
-        shell: pwsh
-        run: |
-          $tplDir = "$env:APPDATA\Godot\export_templates\${{ env.GODOT_VERSION }}.stable"
-          New-Item -ItemType Directory -Force -Path $tplDir | Out-Null
-          $url = "https://github.com/godotengine/godot/releases/download/${{ env.GODOT_VERSION }}-stable/Godot_v${{ env.GODOT_VERSION }}-stable_export_templates.tpz"
-          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\templates.tpz"
-          Expand-Archive -Path "$env:TEMP\templates.tpz" -DestinationPath "$env:TEMP\templates"
-          Copy-Item "$env:TEMP\templates\templates\*" -Destination $tplDir -Recurse -Force
-
-      - name: Deploy library to project
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path project\bin | Out-Null
-          Copy-Item -Force openmohaa\bin\openmohaa.dll project\bin\
-          if (Test-Path openmohaa\bin\cgame.dll) { Copy-Item -Force openmohaa\bin\cgame.dll project\bin\ }
-
-      - name: Export Godot project
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist\windows | Out-Null
-          Push-Location project
-          & C:\godot.exe --headless --export-debug "Windows Desktop" ..\dist\windows\shinmohaa.exe 2>&1
-          Pop-Location
-          if (-not (Test-Path dist\windows\shinmohaa.exe)) { throw "Export failed" }
-
-      - name: Stage companion binaries
-        shell: pwsh
-        run: |
-          if (Test-Path openmohaa\bin\cgame.dll) { Copy-Item -Force openmohaa\bin\cgame.dll dist\windows\ }
-
-      - name: Zip game export
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\windows\*" -DestinationPath "shinmohaa-windows-x86_64.zip"
-
-      - name: Upload game export
-        uses: actions/upload-artifact@v4
-        with:
-          name: shinmohaa-windows-x86_64
-          path: shinmohaa-windows-x86_64.zip
           if-no-files-found: warn
