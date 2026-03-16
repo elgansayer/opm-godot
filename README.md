@@ -840,8 +840,6 @@ seta ui_console_scale 0.8
 | `r_speeds` | `0` | cheat | Show per-frame rendering stats overlay. |
 | `r_lockpvs` | `0` | cheat | Freeze PVS culling at the current position. |
 | `r_showbbox` | `0` | cheat | Draw entity bounding boxes. |
-| `godot_dump_2d` | `0` | — | One-shot trigger: set to `1` to dump one frame of 2D overlay commands to the log. Resets to `0` automatically. |
-| `godot_dump_2d_interval` | `0` | — | Automatic 2D command dump interval in seconds. `0` = disabled. |
 
 ## Troubleshooting
 
