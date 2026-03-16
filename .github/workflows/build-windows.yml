@@ -61,10 +61,9 @@ jobs:
         working-directory: openmohaa
         shell: pwsh
         run: |
-          $cpus = $env:NUMBER_OF_PROCESSORS
-          if (-not $cpus) { $cpus = "2" }
-          Write-Host "Building with -j$cpus"
-          scons platform=windows arch=${{ matrix.arch }} target=template_debug "-j$cpus" dev_build=yes disable_exceptions=no
+          # Force -j1 on Windows: SCons hits deep recursion with parallel builds + MSVC + 1400+ source files
+          Write-Host "Building with -j1 (serial, avoids SCons recursion issue)"
+          scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no
 
       - name: Zip GDExtension artifacts
         shell: pwsh
