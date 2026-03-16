@@ -16,6 +16,10 @@ var last_web_reported_map = ""
 
 func _ready():
 	print("Main: Script started.")
+	# WebGL2 cannot reliably handle 8x MSAA — disable to prevent framebuffer
+	# incomplete errors (GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) and black screen.
+	if OS.has_feature("web"):
+		get_viewport().msaa_3d = Viewport.MSAA_DISABLED
 	if not ClassDB.class_exists("MoHAARunner"):
 		printerr("Main: ERROR - Class 'MoHAARunner' not found in ClassDB. Extension might fail to load.")
 		return

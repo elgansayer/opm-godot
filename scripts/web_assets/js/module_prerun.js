@@ -76,6 +76,48 @@ Module['preRun'].push(() => {
     addRunDependency(__dep);
 
     (async () => {
+        /* ── VFS preload progress overlay ──
+         * Reuses the Godot #status overlay (already visible from setStatusMode('progress'))
+         * and adds a descriptive text + repurposes the progress bar for file download tracking.
+         * This prevents users seeing a "frozen" black screen during pk3 downloads. */
+        var __statusEl = (typeof document !== 'undefined') ? document.getElementById('status') : null;
+        var __progressBar = (typeof document !== 'undefined') ? document.getElementById('status-progress') : null;
+        var __vfsText = null;
+        var __bytesLoaded = 0;
+        if (__statusEl) {
+            __statusEl.style.visibility = 'visible';
+            __vfsText = document.createElement('div');
+            __vfsText.id = 'mohaa-vfs-status';
+            __vfsText.style.cssText = 'color:#e0e0e0;font-family:"Noto Sans","Droid Sans",Arial,sans-serif;font-size:14px;text-align:center;padding:0 1rem;z-index:1;position:absolute;bottom:5%;left:0;right:0;';
+            __vfsText.textContent = 'Preparing game files\u2026';
+            __statusEl.appendChild(__vfsText);
+            if (__progressBar) {
+                __progressBar.style.display = 'block';
+                __progressBar.removeAttribute('value');
+                __progressBar.removeAttribute('max');
+            }
+        }
+        var __formatBytes = function(b) {
+            if (b < 1048576) return (b / 1024).toFixed(0) + ' KB';
+            return (b / 1048576).toFixed(1) + ' MB';
+        };
+        var __setVfsStatus = function(msg) {
+            if (__vfsText) __vfsText.textContent = msg;
+        };
+        var __updateDownloadProgress = function() {
+            if (!__vfsText) return;
+            var done = loaded + failed;
+            var sizeStr = __bytesLoaded > 0 ? ' \u2014 ' + __formatBytes(__bytesLoaded) + ' downloaded' : '';
+            __vfsText.textContent = 'Downloading game files: ' + done + '/' + total + sizeStr;
+            if (__progressBar && total > 0) {
+                __progressBar.value = done;
+                __progressBar.max = total;
+            }
+        };
+        var __cleanupVfsOverlay = function() {
+            if (__vfsText) { __vfsText.remove(); __vfsText = null; }
+        };
+
         /* Resolve CDN base URL from multiple sources (first wins):
          *   1. window.MOHAA_CDN_URL — set by Docker runtime config script
          *   2. URL parameter ?cdn_url=...
@@ -158,7 +200,9 @@ Module['preRun'].push(() => {
                     if (!res.ok) return null;
                     if (cache) try { cache.put(src, res.clone()); } catch (e) {}
                 }
-                return { dst: dst, data: new Uint8Array(await res.arrayBuffer()) };
+                var buf = await res.arrayBuffer();
+                __bytesLoaded += buf.byteLength;
+                return { dst: dst, data: new Uint8Array(buf) };
             } catch (e) { return null; }
         };
 
@@ -198,6 +242,7 @@ Module['preRun'].push(() => {
                         } else { failed++; }
                     } catch (e) { failed++; }
                     finally { __release(); }
+                    __updateDownloadProgress();
                     if ((loaded + failed) % 200 === 0 || loaded + failed === total)
                         console.log('MOHAAjs: Progress: ' + (loaded+failed) + '/' + total + ' (' + failed + ' failed)');
                 })(rel));
@@ -211,12 +256,16 @@ Module['preRun'].push(() => {
         var __lfKeys = Object.keys(__lf);
         if (__lfKeys.length > 0) {
             console.log('MOHAAjs: Writing ' + __lfKeys.length + ' local files to MEMFS...');
+            __setVfsStatus('Loading cached game files\u2026');
+            if (__progressBar) { __progressBar.max = __lfKeys.length; __progressBar.value = 0; }
             for (var __li = 0; __li < __lfKeys.length; __li++) {
                 var __lrel = __lfKeys[__li];
                 var __ldst = '/' + __lrel;
                 var __lcut = __ldst.lastIndexOf('/');
                 if (__lcut > 0) __mkdirs(__ldst.slice(0, __lcut));
                 try { __writeFileWithPakAlias(__ldst, __lf[__lrel]); } catch (e) {}
+                if (__progressBar) __progressBar.value = __li + 1;
+                __setVfsStatus('Loading cached files: ' + (__li + 1) + '/' + __lfKeys.length);
             }
             console.log('MOHAAjs: Wrote ' + __lfKeys.length + ' local files to MEMFS');
             if (typeof window !== 'undefined') window.__mohaaLocalFiles = null;
@@ -232,13 +281,16 @@ Module['preRun'].push(() => {
         __mkdirs('/main');
 
         console.log('MOHAAjs: Server gap-fill: scanning /main/ ...');
+        __setVfsStatus('Scanning server for game files\u2026');
         await __walk('main/');
         if (__expDir) {
             console.log('MOHAAjs: Server gap-fill: scanning /' + __expDir + '/ ...');
+            __setVfsStatus('Scanning server for expansion files\u2026');
             await __walk(__expDir + '/');
         }
 
         console.log('MOHAAjs: VFS preload complete: ' + loaded + ' files ready, ' + failed + ' failed');
+        __setVfsStatus('Starting engine\u2026');
     })().catch(e => console.error('MOHAAjs: PreRun error', e))
-        .finally(() => removeRunDependency(__dep));
+        .finally(() => { __cleanupVfsOverlay(); removeRunDependency(__dep); });
 });
