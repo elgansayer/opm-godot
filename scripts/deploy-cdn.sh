@@ -106,36 +106,7 @@ fi
 if [[ "$SKIP_MANIFESTS" -eq 0 ]]; then
     step "Step 1/2: Generating manifests"
 
-    for gd in "${DIRS[@]}"; do
-        DIR="$SOURCE/$gd"
-        if [[ ! -d "$DIR" ]]; then
-            warn "Skipping $gd/ (not found)"
-            continue
-        fi
-
-        echo "  Generating $gd/manifest.json ..."
-        python3 -c "
-import os, json, sys
-base = sys.argv[1]
-entries = []
-for root, dirs, files in os.walk(base):
-    dirs[:] = [d for d in dirs if d not in ('.wrangler', 'save')]
-    for f in sorted(files):
-        if f == 'manifest.json':
-            continue
-        if f.endswith('.partaa') or f.endswith('.partab'):
-            continue
-        full = os.path.join(root, f)
-        rel = os.path.relpath(full, base)
-        size = os.path.getsize(full)
-        entries.append({'name': rel, 'size': size, 'type': 'file'})
-entries.sort(key=lambda e: e['name'])
-total_mb = sum(e['size'] for e in entries) / 1048576
-with open(os.path.join(base, 'manifest.json'), 'w') as fh:
-    json.dump(entries, fh, indent=1)
-print(f'    -> {len(entries)} files, {total_mb:.1f} MB total')
-" "$DIR"
-    done
+    "$SCRIPT_DIR/generate-manifests.sh" "$SOURCE" --game-dirs "$GAME_DIRS"
     ok "Manifests generated"
 else
     step "Step 1/2: Skipping manifest generation (--skip-manifests)"

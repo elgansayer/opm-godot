@@ -167,7 +167,10 @@ Module['preRun'].push(() => {
          *   2. nginx autoindex JSON (requires autoindex_format json)
          *   3. Returns [] — caller will fall back to known-filename probing */
         var __listDir = async (relDir) => {
-            /* 1. Try static manifest.json (deployer-created) */
+            /* 1. Try static manifest.json (deployer-created).
+             *    In CDN-only mode (no local assets), the manifest is the ONLY way
+             *    to discover files. Without it, only known pk3 names are probed
+             *    and ALL loose files (sounds, music, configs) are missed. */
             var manifestUrl = cdn + relDir + 'manifest.json';
             try {
                 var mr = await fetch(manifestUrl, { cache: 'no-cache' });
@@ -184,7 +187,10 @@ Module['preRun'].push(() => {
                         return entries;
                     }
                 }
-            } catch (e) {}
+                console.warn('MOHAAjs: manifest.json for ' + relDir + ' returned empty or invalid data');
+            } catch (e) {
+                console.warn('MOHAAjs: manifest.json not found at ' + manifestUrl + ' — loose files (sounds, music, configs) will NOT be downloaded. Generate manifests with: scripts/generate-manifests.sh');
+            }
 
             /* 2. Try nginx autoindex JSON */
             var url = cdn + relDir;
@@ -256,7 +262,8 @@ Module['preRun'].push(() => {
         var __probeKnownPaks = async (relDir) => {
             var known = __knownPaks[relDir];
             if (!known) return [];
-            console.log('MOHAAjs: Directory listing unavailable for ' + relDir + ' — trying ' + known.length + ' known pak names');
+            console.warn('MOHAAjs: No manifest.json for ' + relDir + ' — falling back to ' + known.length + ' known pk3 names ONLY. Loose files (sounds, music, configs) will NOT be downloaded!');
+            console.warn('MOHAAjs: Generate manifests with: scripts/generate-manifests.sh <asset-dir> && scripts/deploy-cdn.sh');
             var entries = [];
             var probes = known.map(async (name) => {
                 try {
