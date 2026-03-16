@@ -28,9 +28,10 @@ COPY web/ /srv/web/
 RUN mkdir -p /srv/assets
 
 # Default CDN proxy config (overwritten by docker-entrypoint.sh at startup).
-# Needed so nginx doesn't fail on the `include` directive during config test.
+# Uses .inc extension so nginx's conf.d/*.conf auto-include doesn't pick it up
+# (set directives are only valid inside server/location blocks).
 RUN printf 'set $cdn_host "localhost";\nset $cdn_backend "http://127.0.0.1:9999/";\n' \
-    > /etc/nginx/conf.d/cdn-proxy-upstream.conf
+    > /etc/nginx/conf.d/cdn-proxy-upstream.inc
 
 # Health check: relay responds on /health via nginx proxy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
