@@ -132,6 +132,41 @@ Module['preRun'].push(() => {
         if (cdn && !cdn.endsWith('/')) cdn += '/';
         console.log('MOHAAjs: CDN base URL:', cdn);
 
+        /* ── CORS proxy fallback ──
+         * If the CDN is cross-origin and lacks CORS headers, browsers block
+         * all fetches.  Detect this and transparently reroute through the
+         * same-origin /cdn-proxy/ reverse proxy provided by nginx.
+         *
+         * The proxy strips /cdn-proxy/ from the URL and forwards the request
+         * to the real CDN, adding Access-Control-Allow-Origin headers. */
+        var __cdnIsCrossOrigin = false;
+        var __corsProxyBase = '/cdn-proxy/';
+        try {
+            if (typeof window !== 'undefined' && cdn.indexOf('://') !== -1) {
+                var cdnOrigin = (new URL(cdn)).origin;
+                __cdnIsCrossOrigin = (cdnOrigin !== window.location.origin);
+            }
+        } catch (e) {}
+
+        if (__cdnIsCrossOrigin) {
+            /* Probe the CDN with a simple HEAD to test CORS.  If it fails
+             * (TypeError from opaque response / network error), switch to proxy. */
+            var __useCorsProxy = false;
+            try {
+                var __probe = await fetch(cdn + 'main/Pak0.pk3', { method: 'HEAD', mode: 'cors' });
+                /* If we got here, CORS is fine — keep using the CDN directly. */
+            } catch (e) {
+                console.warn('MOHAAjs: Cross-origin CDN blocked by CORS (' + cdn + '). Falling back to /cdn-proxy/.');
+                __useCorsProxy = true;
+            }
+            if (__useCorsProxy) {
+                /* Rewrite cdn to route through the same-origin proxy.
+                 * e.g. https://cdn.example.com/mohaa/ → /cdn-proxy/main/... */
+                cdn = __corsProxyBase;
+                console.log('MOHAAjs: CDN URL rewritten to:', cdn);
+            }
+        }
+
         var cache = null;
         try { cache = await caches.open('mohaajs-assets-v1'); }
         catch (e) { console.warn('MOHAAjs: Cache API unavailable', e); }
@@ -362,5 +397,11 @@ Module['preRun'].push(() => {
             __setVfsStatus('Starting engine\u2026');
         }
     })().catch(e => console.error('MOHAAjs: PreRun error', e))
-        .finally(() => { __cleanupVfsOverlay(); removeRunDependency(__dep); });
+        .finally(() => {
+            /* __cleanupVfsOverlay is inside the IIFE scope; inline the cleanup
+             * here in the outer scope to avoid a ReferenceError. */
+            var el = (typeof document !== 'undefined') ? document.getElementById('mohaa-vfs-status') : null;
+            if (el) el.remove();
+            removeRunDependency(__dep);
+        });
 });

@@ -27,6 +27,11 @@ COPY web/ /srv/web/
 # Empty assets dir — nginx /assets/ needs this even when using remote CDN.
 RUN mkdir -p /srv/assets
 
+# Default CDN proxy config (overwritten by docker-entrypoint.sh at startup).
+# Needed so nginx doesn't fail on the `include` directive during config test.
+RUN printf 'set $cdn_host "localhost";\nset $cdn_backend "http://127.0.0.1:9999/";\n' \
+    > /etc/nginx/conf.d/cdn-proxy-upstream.conf
+
 # Health check: relay responds on /health via nginx proxy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:12300/health || exit 1
