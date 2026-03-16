@@ -1,4 +1,6 @@
-# Build GDExtension for Windows (x86_64).
+# Build GDExtension for Windows (x86_64) using CMake + MSVC.
+# CMake is used instead of SCons on Windows to avoid a Python RecursionError
+# that occurs in SCons' internal variable substitution with 1400+ source files.
 name: Build Windows
 
 on:
@@ -36,11 +38,6 @@ jobs:
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install SCons
-        run: |
-          python -m pip install --upgrade pip
-          pip install "scons>=4.8,<4.9" || pip install "scons>=4.8,<4.9" --break-system-packages
-
       - name: Install Windows dependencies
         run: choco install winflexbison3 -y
 
@@ -57,14 +54,19 @@ jobs:
       - name: Patch sources for Windows build
         run: python scripts/patch-build.py --platform windows
 
-      - name: Build GDExtension
-        working-directory: openmohaa
+      - name: Configure CMake
         shell: pwsh
         run: |
-          # --implicit-deps-unchanged skips the C header scanner which triggers
-          # infinite recursion on Windows with 1400+ source files.  CI always
-          # builds from scratch so implicit-dep tracking is unnecessary.
-          scons platform=windows arch=${{ matrix.arch }} target=template_debug -j1 dev_build=yes disable_exceptions=no --implicit-deps-unchanged
+          cmake -B build-win -S openmohaa `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DGODOTCPP_TARGET=template_debug `
+            -DGODOTCPP_DEV_BUILD=ON `
+            -DGODOTCPP_DISABLE_EXCEPTIONS=OFF
+
+      - name: Build GDExtension
+        shell: pwsh
+        run: |
+          cmake --build build-win --config Debug --parallel
 
       - name: Zip GDExtension artifacts
         shell: pwsh
