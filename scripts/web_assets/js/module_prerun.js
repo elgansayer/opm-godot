@@ -180,20 +180,32 @@ Module['preRun'].push(() => {
             }
         };
 
-        /* Helper: write file + create lowercase pak alias when casing differs */
+        /* Helper: write file + create case aliases for pk3 files.
+         * MOHAA main/ uses capitalised names (Pak0.pk3), expansions use
+         * lowercase (pak1.pk3).  The engine may look for either case, so
+         * create both lowercase and capitalised aliases. */
         var __writeFileWithPakAlias = (dst, data) => {
             FS.writeFile(dst, data, { canRead: true, canWrite: false });
             var m = dst.match(/^(.*\/)([^\/]+)$/);
             if (!m) return;
             var dir = m[1], base = m[2];
             if (!/^pak\d+\.pk3$/i.test(base)) return;
+            /* Create lowercase alias (Pak0.pk3 → pak0.pk3) */
             var lowerBase = base.toLowerCase();
-            if (lowerBase === base) return;
-            var alias = dir + lowerBase;
-            try {
-                if (!FS.analyzePath(alias).exists)
-                    FS.writeFile(alias, data, { canRead: true, canWrite: false });
-            } catch (e) {}
+            if (lowerBase !== base) {
+                try {
+                    if (!FS.analyzePath(dir + lowerBase).exists)
+                        FS.writeFile(dir + lowerBase, data, { canRead: true, canWrite: false });
+                } catch (e) {}
+            }
+            /* Create capitalised alias (pak1.pk3 → Pak1.pk3) */
+            var capBase = base.replace(/^pak/, 'Pak');
+            if (capBase !== base) {
+                try {
+                    if (!FS.analyzePath(dir + capBase).exists)
+                        FS.writeFile(dir + capBase, data, { canRead: true, canWrite: false });
+                } catch (e) {}
+            }
         };
 
         /* Helper: fetch directory listing as JSON array.
@@ -285,11 +297,13 @@ Module['preRun'].push(() => {
         var total = 0, loaded = 0, failed = 0;
 
         /* Known MOHAA pk3 filenames per game directory.  Used as fallback
-         * when the CDN doesn't support JSON directory listing (autoindex). */
+         * when the CDN doesn't support JSON directory listing (autoindex).
+         * main/ uses capitalised names (Pak0–Pak6), expansion packs use
+         * lowercase and start from pak1 (no pak0). */
         var __knownPaks = {
             'main/':    ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3','Pak4.pk3','Pak5.pk3','Pak6.pk3'],
-            'mainta/':  ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3'],
-            'maintt/':  ['Pak0.pk3','Pak1.pk3','Pak2.pk3','Pak3.pk3']
+            'mainta/':  ['pak1.pk3','pak2.pk3','pak3.pk3','pak4.pk3','pak5.pk3'],
+            'maintt/':  ['pak1.pk3','pak2.pk3','pak3.pk3','pak4.pk3']
         };
 
         /* Fetch a list of files by known names (HEAD probe then GET).
