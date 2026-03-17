@@ -386,9 +386,23 @@ Module['preRun'].push(() => {
         /* Gap-fill from server: always walk main/, optionally expansion dir.
          * Expansion dirs (mainta/maintt) may not exist on the server —
          * they're provided entirely by local files / IndexedDB cache. */
-        var __tg = (typeof window !== 'undefined' && window.__mohaaTargetGame) || 0;
+        var __tg = 0;
+        if (typeof window !== 'undefined') {
+            __tg = window.__mohaaTargetGame || 0;
+            if (__tg === 0) {
+                try {
+                    var __sp = new URLSearchParams(window.location.search);
+                    var __urlTG = __sp.get('com_target_game');
+                    if (__urlTG !== null) {
+                        var __v = parseInt(__urlTG, 10);
+                        if (__v >= 1 && __v <= 2) __tg = __v;
+                    }
+                } catch(e) {}
+            }
+        }
         var __gdMap = { 1: 'mainta', 2: 'maintt' };
         var __expDir = __gdMap[__tg];
+        console.log('MOHAAjs: target game=' + __tg + ' (window=' + (typeof window !== 'undefined' ? window.__mohaaTargetGame : 'N/A') + ') expDir=' + (__expDir || 'none'));
         if (__expDir) __mkdirs('/' + __expDir);
         __mkdirs('/main');
 
