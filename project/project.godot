@@ -20,6 +20,13 @@ config/features=PackedStringArray("4.6", "Forward Plus")
 boot_splash/image="uid://xe0fy6r8mulk"
 config/icon="res://icon.svg"
 
+[autoload]
+
+CacheManager="*res://autoloads/CacheManager.gd"
+NetworkHandshake="*res://autoloads/NetworkHandshake.gd"
+MapDownloader="*res://autoloads/MapDownloader.gd"
+ResourceSandboxManager="*res://autoloads/ResourceSandboxManager.gd"
+
 [display]
 
 window/size/viewport_width=1024
