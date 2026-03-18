@@ -233,6 +233,4 @@ func get_loaded_pack_ids() -> PackedStringArray:
 # ---------------------------------------------------------------------------
 
 func _get_cache_manager() -> Node:
-	if Engine.has_singleton("CacheManager"):
-		return Engine.get_singleton("CacheManager")
 	return get_node_or_null("/root/CacheManager")

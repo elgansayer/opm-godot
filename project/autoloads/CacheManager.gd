@@ -66,7 +66,7 @@ func verify_file(sha256_hex: String) -> bool:
 	var path := _path_for(key)
 	if not FileAccess.file_exists(path):
 		return false
-	var actual_hash := _sha256_of_file(path)
+	var actual_hash := CacheManager.sha256_of_file(path)
 	return actual_hash == key
 
 
@@ -161,7 +161,8 @@ func _save_registry() -> void:
 	_registry_dirty = false
 
 
-func _sha256_of_file(path: String) -> String:
+## Compute the SHA-256 hex digest of a file on disk.
+static func sha256_of_file(path: String) -> String:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return ""

@@ -153,7 +153,7 @@ func _on_http_completed(result: int, response_code: int,
 	var sha_actual := _sha256_of_file(_download_path)
 
 	if sha_actual != sha_expected:
-		_handle_failure("Hash mismatch: expected %s, got %s" % [sha_expected.left(12), sha_actual.left(12)])
+		_handle_failure("Hash mismatch: expected %s, got %s" % [sha_expected, sha_actual])
 		return
 
 	# Move temp file to its final cache location.
@@ -219,22 +219,9 @@ func _cleanup_temp() -> void:
 # ---------------------------------------------------------------------------
 
 func _sha256_of_file(path: String) -> String:
-	var f := FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		return ""
-	var ctx := HashingContext.new()
-	ctx.start(HashingContext.HASH_SHA256)
-	while f.get_position() < f.get_length():
-		var chunk := f.get_buffer(65536)
-		if chunk.size() == 0:
-			break
-		ctx.update(chunk)
-	f.close()
-	return ctx.finish().hex_encode()
+	# Delegate to CacheManager's static utility to avoid duplication.
+	return CacheManager.sha256_of_file(path)
 
 
 func _get_cache_manager() -> Node:
-	if Engine.has_singleton("CacheManager"):
-		return Engine.get_singleton("CacheManager")
-	# Autoloads are children of /root.
 	return get_node_or_null("/root/CacheManager")

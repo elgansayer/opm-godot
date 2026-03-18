@@ -145,7 +145,7 @@ func _validate_manifest(data: Dictionary) -> Dictionary:
 		if name_val == "" or sha256_val == "" or size_val <= 0 or url_val == "":
 			push_warning("NetworkHandshake: Skipping invalid resource entry: ", entry)
 			continue
-		# Normalise hash to lowercase.
+		# Normalize hash to lowercase.
 		var resource := {
 			"name": name_val,
 			"sha256": sha256_val.to_lower(),
