@@ -23,9 +23,7 @@ config/icon="res://icon.svg"
 [autoload]
 
 CacheManager="*res://autoloads/CacheManager.gd"
-NetworkHandshake="*res://autoloads/NetworkHandshake.gd"
 MapDownloader="*res://autoloads/MapDownloader.gd"
-ResourceSandboxManager="*res://autoloads/ResourceSandboxManager.gd"
 
 [display]
 

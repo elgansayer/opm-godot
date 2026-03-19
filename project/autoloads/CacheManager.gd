@@ -1,15 +1,14 @@
-## CacheManager.gd — UT-style hash-based cache storage for downloaded mods/maps.
+## CacheManager.gd — Local cache for downloaded map/mod files.
 ##
 ## Files are stored in user://cache/ using their SHA-256 hash as the filename
-## (e.g. user://cache/A1B2C3…F6.pck). A JSON registry maps hashes back to
-## original filenames and metadata so the UI can display human-readable names.
+## (e.g. user://cache/a1b2c3d4.pk3). A JSON registry maps hashes back to
+## original filenames and metadata for display and deduplication.
 ##
 ## Usage (autoload singleton "CacheManager"):
-##   CacheManager.has_file(sha256_hex)       -> bool
-##   CacheManager.get_cached_path(sha256_hex) -> String
+##   CacheManager.has_file(sha256_hex)        -> bool
+##   CacheManager.get_cached_path(sha256_hex)  -> String
 ##   CacheManager.register_file(sha256_hex, original_name, size_bytes)
-##   CacheManager.verify_file(sha256_hex)    -> bool
-##   CacheManager.prune_cache(max_bytes)     -> int  (bytes freed)
+##   CacheManager.install_to_game_dir(sha256_hex, game_dir) -> bool
 extends Node
 
 const CACHE_DIR := "user://cache/"
@@ -60,14 +59,55 @@ func register_file(sha256_hex: String, original_name: String, size_bytes: int) -
 	print("CacheManager: Registered ", original_name, " (", _human_size(size_bytes), ") hash=", key.left(12), "…")
 
 
-## Verify integrity by re-hashing the cached file and comparing to its key.
-func verify_file(sha256_hex: String) -> bool:
+## Get the original filename for a cached hash.
+func get_original_name(sha256_hex: String) -> String:
 	var key := sha256_hex.to_lower()
-	var path := _path_for(key)
-	if not FileAccess.file_exists(path):
+	if _registry.has(key):
+		return _registry[key].get("original_name", "")
+	return ""
+
+
+## Copy a cached file to the game directory so the engine VFS can find it.
+## Returns true on success.
+func install_to_game_dir(sha256_hex: String, game_dir: String) -> bool:
+	var key := sha256_hex.to_lower()
+	var cache_path := _path_for(key)
+	if not FileAccess.file_exists(cache_path):
+		push_warning("CacheManager: Cannot install — cached file not found: ", cache_path)
 		return false
-	var actual_hash := CacheManager.sha256_of_file(path)
-	return actual_hash == key
+
+	var original_name := get_original_name(key)
+	if original_name == "":
+		original_name = key + ".pk3"
+
+	# Ensure game_dir ends with /
+	if not game_dir.ends_with("/"):
+		game_dir += "/"
+
+	var dest_path := game_dir + original_name
+
+	# Read from cache and write to game directory.
+	var src := FileAccess.open(cache_path, FileAccess.READ)
+	if src == null:
+		push_warning("CacheManager: Cannot read cache file: ", FileAccess.get_open_error())
+		return false
+
+	var dst := FileAccess.open(dest_path, FileAccess.WRITE)
+	if dst == null:
+		src.close()
+		push_warning("CacheManager: Cannot write to game dir: ", dest_path, " error=", FileAccess.get_open_error())
+		return false
+
+	while src.get_position() < src.get_length():
+		var chunk := src.get_buffer(65536)
+		if chunk.size() == 0:
+			break
+		dst.store_buffer(chunk)
+
+	src.close()
+	dst.close()
+	print("CacheManager: Installed ", original_name, " -> ", dest_path)
+	return true
 
 
 ## Remove a single entry from the cache (file + registry).
@@ -111,9 +151,20 @@ func get_total_size() -> int:
 	return _total_cache_size()
 
 
-## Return the full registry as a read-only snapshot.
-func get_registry_snapshot() -> Dictionary:
-	return _registry.duplicate(true)
+## Compute the SHA-256 hex digest of a file on disk.
+static func sha256_of_file(path: String) -> String:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return ""
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	while f.get_position() < f.get_length():
+		var chunk := f.get_buffer(65536)
+		if chunk.size() == 0:
+			break
+		ctx.update(chunk)
+	f.close()
+	return ctx.finish().hex_encode()
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +177,7 @@ func _ensure_cache_dir() -> void:
 
 
 func _path_for(key: String) -> String:
-	return CACHE_DIR + key + ".pck"
+	return CACHE_DIR + key + ".pk3"
 
 
 func _load_registry() -> void:
@@ -159,22 +210,6 @@ func _save_registry() -> void:
 	f.store_string(JSON.stringify(_registry, "\t"))
 	f.close()
 	_registry_dirty = false
-
-
-## Compute the SHA-256 hex digest of a file on disk.
-static func sha256_of_file(path: String) -> String:
-	var f := FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		return ""
-	var ctx := HashingContext.new()
-	ctx.start(HashingContext.HASH_SHA256)
-	while f.get_position() < f.get_length():
-		var chunk := f.get_buffer(65536)
-		if chunk.size() == 0:
-			break
-		ctx.update(chunk)
-	f.close()
-	return ctx.finish().hex_encode()
 
 
 func _total_cache_size() -> int:
