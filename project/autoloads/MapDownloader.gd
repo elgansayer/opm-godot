@@ -95,13 +95,16 @@ func _process(delta: float) -> void:
 # ---------------------------------------------------------------------------
 
 func _try_connect_runner() -> void:
-	var node := get_node_or_null("/root/Main/MoHAARunnerInstance")
-	if node == null:
-		return
-	_runner = node
-	_runner_connected = true
-	_runner.engine_error.connect(_on_engine_error)
-	print("MapDownloader: Connected to MoHAARunner engine_error signal.")
+	# Search the tree for the MoHAARunner node — avoids hard-coding a path.
+	var root := get_tree().root
+	for child in root.get_children():
+		for grandchild in child.get_children():
+			if grandchild.get_class() == "MoHAARunner":
+				_runner = grandchild
+				_runner_connected = true
+				_runner.engine_error.connect(_on_engine_error)
+				print("MapDownloader: Connected to MoHAARunner engine_error signal.")
+				return
 
 
 # ---------------------------------------------------------------------------
@@ -166,9 +169,10 @@ func _on_search_completed(result: int, response_code: int,
 		if _retry_count <= MAX_RETRIES:
 			push_warning("MapDownloader: Search retry %d/%d — HTTP result %d" % [
 				_retry_count, MAX_RETRIES, result])
-			# Retry after short delay.
+			# Capture map name in a local to avoid stale closure.
+			var retry_map := _current_map_name
 			get_tree().create_timer(1.0 * _retry_count).timeout.connect(
-				func(): _start_search(_current_map_name))
+				func(): _start_search(retry_map))
 			return
 		_fail("API unreachable after %d retries (result %d)" % [MAX_RETRIES, result])
 		return
@@ -227,12 +231,13 @@ func _on_search_completed(result: int, response_code: int,
 
 	var file_name: String = best.get("file_name",
 		best.get("fileName",
-			best.get("name", _current_map_name))) + ".pk3"
-	# Clean doubled extension.
-	if file_name.ends_with(".pk3.pk3"):
-		file_name = file_name.trim_suffix(".pk3")
-	if not file_name.ends_with(".pk3") and not file_name.ends_with(".zip"):
-		file_name += ".pk3"
+			best.get("name", _current_map_name)))
+	# Strip any existing archive extension before normalizing.
+	for ext in [".pk3", ".zip"]:
+		if file_name.to_lower().ends_with(ext):
+			file_name = file_name.substr(0, file_name.length() - ext.length())
+			break
+	file_name += ".pk3"
 
 	var file_size: int = best.get("file_size", best.get("fileSize", best.get("size", 0)))
 	var file_hash: String = best.get("sha256", best.get("hash", best.get("md5", "")))
@@ -313,9 +318,11 @@ func _on_download_completed(result: int, response_code: int,
 		_fail("Downloaded file is empty or unreadable")
 		return
 
-	# If server provided a hash, verify it.
+	# If the API provided a hash, verify it strictly.
 	if file_hash != "" and actual_hash.to_lower() != file_hash.to_lower():
-		push_warning("MapDownloader: Hash mismatch (expected ", file_hash, ", got ", actual_hash, ") — proceeding anyway")
+		_cleanup_temp()
+		_fail("Hash mismatch: expected %s, got %s" % [file_hash, actual_hash])
+		return
 
 	# Move temp file to cache under its hash name.
 	var cache: Node = get_node_or_null("/root/CacheManager")
