@@ -86,7 +86,8 @@ func find_cached_file_by_name(map_name: String) -> String:
 
 
 ## Copy a cached file to the game directory so the engine VFS can find it.
-## Returns true on success.
+## Returns true on success.  If the destination file already exists, the copy
+## is skipped to protect vanilla game files from being overwritten.
 func install_to_game_dir(sha256_hex: String, game_dir: String) -> bool:
 	var key := sha256_hex.to_lower()
 	var cache_path := _path_for(key)
@@ -103,6 +104,12 @@ func install_to_game_dir(sha256_hex: String, game_dir: String) -> bool:
 		game_dir += "/"
 
 	var dest_path := game_dir + original_name
+
+	# Safety: never overwrite a file already present in the game directory.
+	# It may be a vanilla game pk3 or content from another source.
+	if FileAccess.file_exists(dest_path):
+		print("CacheManager: File already present in game dir, skipping: ", original_name)
+		return true
 
 	# Read from cache and write to game directory.
 	var src := FileAccess.open(cache_path, FileAccess.READ)

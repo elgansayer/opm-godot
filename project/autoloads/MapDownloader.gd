@@ -54,10 +54,15 @@ var _runner: Node = null
 var _runner_connected: bool = false
 var _current_map_bsp: String = ""   # e.g. "maps/dm/mohdm6.bsp"
 var _current_map_name: String = ""  # e.g. "dm/mohdm6"
-var _downloading: bool = false
+var _busy: bool = false             # true while handling search→download→install
+var _downloading: bool = false      # true only during the HTTP download phase
 var _download_path: String = ""     # temp file while downloading
 var _retry_count: int = 0
+var _download_retry_count: int = 0
 var _progress_timer: float = 0.0
+
+## Maximum retries for the download request itself.
+const MAX_DOWNLOAD_RETRIES := 1
 
 # -- UI --
 var _overlay: CanvasLayer = null
@@ -126,13 +131,14 @@ func _on_engine_error(message: String) -> void:
 	# The engine error is: "Couldn't load maps/dm/mohdm6.bsp"
 	if not message.begins_with("Couldn't load "):
 		return
-	if _downloading:
-		return  # already handling a download
+	if _busy:
+		return  # already handling a search/download/install cycle
 
 	var bsp_path := message.substr("Couldn't load ".length()).strip_edges()
 	if not bsp_path.ends_with(".bsp"):
 		return
 
+	_busy = true  # Prevent concurrent processing until this cycle completes.
 	_current_map_bsp = bsp_path
 	# Strip "maps/" prefix and ".bsp" suffix to get the map name.
 	var map_name := bsp_path
@@ -329,12 +335,14 @@ func _on_search_completed(result: int, response_code: int,
 
 func _begin_download(url: String, file_name: String, file_size: int, file_hash: String) -> void:
 	_downloading = true
+	_download_retry_count = 0
 	_progress_timer = 0.0
 
-	# Store metadata for later registration.
+	# Store metadata for later registration and retry.
 	set_meta("dl_file_name", file_name)
 	set_meta("dl_file_size", file_size)
 	set_meta("dl_file_hash", file_hash)
+	set_meta("dl_url", url)
 
 	var cache: Node = get_node_or_null("/root/CacheManager")
 	if cache == null:
@@ -372,6 +380,24 @@ func _on_download_completed(result: int, response_code: int,
 	_downloading = false
 
 	if result != HTTPRequest.RESULT_SUCCESS:
+		_download_retry_count += 1
+		if _download_retry_count <= MAX_DOWNLOAD_RETRIES:
+			push_warning("MapDownloader: Download retry %d/%d — HTTP result %d" % [
+				_download_retry_count, MAX_DOWNLOAD_RETRIES, result])
+			var retry_url: String = get_meta("dl_url", "")
+			if retry_url != "":
+				_downloading = true
+				_download_path = "user://cache/_downloading.tmp"
+				_http_download.download_file = _download_path
+				var backoff := pow(2.0, _download_retry_count)  # 2s, 4s, …
+				get_tree().create_timer(backoff).timeout.connect(
+					func():
+						if not _busy:
+							return  # State changed while waiting — abort retry.
+						var err := _http_download.request(retry_url)
+						if err != OK:
+							_fail("Download retry failed: error %d" % err))
+				return
 		_cleanup_temp()
 		_fail("Download failed: HTTP result %d" % result)
 		return
@@ -489,6 +515,7 @@ func _finish_install() -> void:
 
 	# Wait briefly then reconnect.
 	await get_tree().create_timer(RECONNECT_DELAY).timeout
+	_busy = false
 	_hide_ui()
 	if _runner and _runner.has_method("execute_command"):
 		_runner.execute_command("reconnect")
@@ -500,6 +527,7 @@ func _finish_install() -> void:
 # ---------------------------------------------------------------------------
 
 func _fail(reason: String) -> void:
+	_busy = false
 	_downloading = false
 	_cleanup_temp()
 	push_warning("MapDownloader: FAILED — ", reason)

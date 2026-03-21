@@ -256,8 +256,8 @@ func install_file_for_session(sha256_hex: String, file_name: String, content_typ
 	# Check if already installed in game dir.
 	var dest_path := _ensure_trailing_slash(game_dir) + file_name
 	if FileAccess.file_exists(dest_path):
-		# Already present — just track it.
-		_session_installed[file_name] = content_type
+		# File already exists — do NOT track for cleanup.
+		# It may be a vanilla game file or leftover from a previous session.
 		return true
 
 	var ok := cache.install_to_game_dir(sha256_hex, game_dir)
@@ -293,14 +293,17 @@ func _on_map_loaded(_map_name: String) -> void:
 
 
 func _on_map_unloaded() -> void:
-	# When the map unloads (disconnect), end the session to clean up mods.
-	# A small delay avoids ending the session during map changes on the same server.
+	# When the map unloads (disconnect), end the session to clean up files.
 	if _active_server_id != "":
-		# Check if we're truly disconnected (server_state == 0 = SS_DEAD).
 		if _runner and _runner.has_method("get_server_state"):
+			# Check if we're truly disconnected (server_state == 0 = SS_DEAD).
 			var state: int = _runner.get_server_state()
 			if state == 0:
 				end_session()
+		else:
+			# Cannot determine server state — conservatively end session
+			# to prevent cross-server content leaking.
+			end_session()
 
 
 ## Try to detect the current server address from engine cvars.
@@ -340,8 +343,8 @@ func _install_server_files(server_id: String, game_dir: String) -> void:
 
 		var dest_path := _ensure_trailing_slash(game_dir) + file_name
 		if FileAccess.file_exists(dest_path):
-			# Already installed (perhaps by another server session).
-			_session_installed[file_name] = content_type
+			# File already exists — do NOT track for cleanup.
+			# It may be a vanilla game file we must not remove.
 			continue
 
 		var ok := cache.install_to_game_dir(hash_key, game_dir)
