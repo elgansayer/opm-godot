@@ -1,12 +1,16 @@
-## CacheManager.gd — Local cache for downloaded map/mod files.
+## CacheManager.gd — Content-addressed cache for downloaded map/mod files.
 ##
-## Files are stored in user://cache/ using their SHA-256 hash as the filename
-## (e.g. user://cache/a1b2c3d4.pk3). A JSON registry maps hashes back to
-## original filenames and metadata for display and deduplication.
+## UT-style shared cache: files stored in user://cache/ using their SHA-256
+## hash as the filename (e.g. user://cache/a1b2c3d4.pk3).  A JSON registry
+## maps hashes back to original filenames and metadata.
+##
+## The cache is **shared across all servers** — if two servers need the same
+## map (same hash), it is stored only once.  Per-server isolation is handled
+## by ServerSessionManager, not here.
 ##
 ## Usage (autoload singleton "CacheManager"):
-##   CacheManager.has_file(sha256_hex)        -> bool
-##   CacheManager.get_cached_path(sha256_hex)  -> String
+##   CacheManager.has_file(sha256_hex)         -> bool
+##   CacheManager.get_cached_path(sha256_hex)   -> String
 ##   CacheManager.register_file(sha256_hex, original_name, size_bytes)
 ##   CacheManager.install_to_game_dir(sha256_hex, game_dir) -> bool
 extends Node
@@ -64,6 +68,20 @@ func get_original_name(sha256_hex: String) -> String:
 	var key := sha256_hex.to_lower()
 	if _registry.has(key):
 		return _registry[key].get("original_name", "")
+	return ""
+
+
+## Search the cache for a file whose original name matches the given map name.
+## Returns the hash key if found, or "" if not.
+## Matches case-insensitively, stripping .pk3/.zip extensions.
+func find_cached_file_by_name(map_name: String) -> String:
+	var search_lower := map_name.to_lower()
+	for hash_key in _registry:
+		var entry: Dictionary = _registry[hash_key]
+		var orig_name: String = entry.get("original_name", "")
+		var name_lower := orig_name.to_lower().trim_suffix(".pk3").trim_suffix(".zip")
+		if name_lower == search_lower or name_lower.ends_with(search_lower):
+			return hash_key
 	return ""
 
 

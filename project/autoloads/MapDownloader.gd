@@ -6,8 +6,16 @@
 ##   2. Queries the moh-db.com API for a matching download.
 ##   3. Shows a full-screen download progress overlay.
 ##   4. Downloads the pk3, verifies its hash, caches it locally.
-##   5. Installs it to the engine's game directory.
-##   6. Reconnects to the server automatically.
+##   5. Associates the file with the current server via ServerSessionManager.
+##   6. Installs it to the engine's game directory.
+##   7. Reconnects to the server automatically.
+##
+## UT-style isolation:
+##   - Files are cached once and shared across servers (CacheManager).
+##   - Each server session tracks its own file associations (ServerSessionManager).
+##   - Maps are flagged as "universal" (stay installed across servers).
+##   - Mods are flagged as "server-specific" (removed on disconnect).
+##   - If you already have a map from another server, it is reused (no re-download).
 ##
 ## The system works with any server — no server-side changes required.
 ##
@@ -133,7 +141,72 @@ func _on_engine_error(message: String) -> void:
 	_current_map_name = map_name
 
 	print("MapDownloader: Missing map detected — ", map_name, " (", bsp_path, ")")
+
+	# UT-style: ensure a server session is active so file associations are tracked.
+	_ensure_server_session()
+
+	# Check if the map is already in the shared cache (downloaded for another server).
+	# If so, skip the download — just install and reconnect.
+	if _try_install_from_cache(map_name):
+		return
+
 	_start_search(map_name)
+
+
+# ---------------------------------------------------------------------------
+# UT-style: server session & cache reuse
+# ---------------------------------------------------------------------------
+
+## Ensure a ServerSessionManager session is active for the current server.
+func _ensure_server_session() -> void:
+	var session_mgr: Node = get_node_or_null("/root/ServerSessionManager")
+	if session_mgr == null:
+		return
+	if session_mgr.is_session_active():
+		return
+
+	# Try to detect the server address from engine cvars.
+	var server_addr := ""
+	if _runner and _runner.has_method("get_cvar_string"):
+		for cvar_name in ServerSessionManager.SERVER_ADDRESS_CVARS:
+			var val: String = _runner.get_cvar_string(cvar_name)
+			if val != "" and val != "0.0.0.0":
+				server_addr = val
+				break
+
+	# Fallback: use a generic session ID based on the map being loaded.
+	if server_addr == "":
+		server_addr = "unknown_server"
+
+	session_mgr.begin_session(server_addr)
+
+
+## Check if the map is already in the shared cache (downloaded for any server).
+## If found, install it for the current session and reconnect — no download needed.
+func _try_install_from_cache(map_name: String) -> bool:
+	var cache: Node = get_node_or_null("/root/CacheManager")
+	var session_mgr: Node = get_node_or_null("/root/ServerSessionManager")
+	if cache == null:
+		return false
+
+	# Search the cache for a file whose original name matches this map.
+	var map_base := map_name.get_file().to_lower()  # e.g. "mohdm6"
+	var hash_key: String = cache.find_cached_file_by_name(map_base)
+	if hash_key == "":
+		return false
+
+	var orig_name: String = cache.get_original_name(hash_key)
+	print("MapDownloader: Found in cache — ", orig_name, " (hash=", hash_key.left(12), "…)")
+
+	# Associate with current server session.
+	if session_mgr and session_mgr.is_session_active():
+		session_mgr.associate_file(hash_key, orig_name, ServerSessionManager.TYPE_MAP)
+
+	# Install and reconnect.
+	_show_ui_searching(map_name)
+	_status_label.text = "Found in cache: " + orig_name
+	_install_and_reconnect(hash_key)
+	return true
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +422,12 @@ func _on_download_completed(result: int, response_code: int,
 
 	cache.register_file(actual_hash, file_name, file_size)
 
+	# UT-style: associate the downloaded file with the current server session.
+	var session_mgr: Node = get_node_or_null("/root/ServerSessionManager")
+	if session_mgr and session_mgr.is_session_active():
+		# Maps detected from "Couldn't load" errors are TYPE_MAP (universal).
+		session_mgr.associate_file(actual_hash, file_name, ServerSessionManager.TYPE_MAP)
+
 	# Install to the engine game directory.
 	_install_and_reconnect(actual_hash)
 
@@ -363,12 +442,24 @@ func _install_and_reconnect(file_hash: String) -> void:
 		_fail("CacheManager not available for install")
 		return
 
-	# Determine the engine's game directory.
+	# Try ServerSessionManager first (UT-style: tracks per-server associations).
+	var session_mgr: Node = get_node_or_null("/root/ServerSessionManager")
+	if session_mgr and session_mgr.is_session_active():
+		var file_name := cache.get_original_name(file_hash)
+		if file_name == "":
+			file_name = file_hash.left(12) + ".pk3"
+		var ok := session_mgr.install_file_for_session(
+			file_hash, file_name, ServerSessionManager.TYPE_MAP)
+		if ok:
+			_finish_install()
+			return
+		# Fall through to direct install if session install fails.
+
+	# Direct install fallback (no session manager or session failed).
 	var game_dir := ""
 	if _runner and _runner.has_method("vfs_get_gamedir"):
 		game_dir = _runner.vfs_get_gamedir()
 	if game_dir == "":
-		# Fallback: use basepath + "/main"
 		if _runner and _runner.has_method("get_basepath"):
 			game_dir = _runner.get_basepath()
 			if game_dir != "":
@@ -385,6 +476,11 @@ func _install_and_reconnect(file_hash: String) -> void:
 		_fail("Failed to install map to game directory")
 		return
 
+	_finish_install()
+
+
+## Common completion logic after successful install.
+func _finish_install() -> void:
 	var map_name := _current_map_name
 	_show_ui_reconnecting()
 	print("MapDownloader: Map installed — reconnecting in ", RECONNECT_DELAY, "s…")
