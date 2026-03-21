@@ -13,9 +13,10 @@
 ## UT-style isolation:
 ##   - Files are cached once and shared across servers (CacheManager).
 ##   - Each server session tracks its own file associations (ServerSessionManager).
-##   - Maps are flagged as "universal" (stay installed across servers).
-##   - Mods are flagged as "server-specific" (removed on disconnect).
-##   - If you already have a map from another server, it is reused (no re-download).
+##   - ALL downloaded content is server-specific — removed on disconnect to
+##     prevent cross-server conflicts (map pk3s can contain bundled models/mods).
+##   - If you already have a file from another server, it is reused from cache
+##     (no re-download) but still scoped to the current server session.
 ##
 ## The system works with any server — no server-side changes required.
 ##

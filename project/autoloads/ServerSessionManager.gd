@@ -9,13 +9,16 @@
 ##      belong to which server (by address).  When you connect to a server,
 ##      only that server's files are installed into the engine VFS.
 ##
-##   3. **Content types** — "map" files are universal (kept installed across
-##      all servers).  "mod" files are server-specific and removed on disconnect
-##      to prevent cross-server content bleed.
+##   3. **All content is server-specific** — ALL downloaded files (maps and mods
+##      alike) are removed from the game directory on disconnect.  This prevents
+##      cross-server conflicts, since map pk3s can contain bundled models,
+##      textures, or gameplay mods that would affect other servers.  The shared
+##      cache still deduplicates storage — a file is only downloaded once even
+##      if multiple servers use it.
 ##
 ##   4. **Session lifecycle** —
 ##        begin_session(server_addr)   → install server's cached files
-##        end_session()                → remove server-specific mods from VFS
+##        end_session()                → remove ALL session files from VFS
 ##        associate_file(hash, type)   → link a file to the current server
 ##
 ## Persistent data lives in user://servers/server_registry.json
@@ -34,9 +37,9 @@ signal session_ended(server_id: String)
 const SERVERS_DIR := "user://servers/"
 const REGISTRY_PATH := "user://servers/server_registry.json"
 
-## Content type constants.
-## Maps are universal — once installed, they stay for all servers.
-## Mods are server-specific — removed on disconnect to prevent conflicts.
+## Content type constants — kept for metadata/categorization in the registry.
+## Both types are treated identically: removed from game dir on disconnect.
+## The distinction is informational only (e.g. for UI or cache management).
 const TYPE_MAP := "map"
 const TYPE_MOD := "mod"
 
@@ -124,8 +127,9 @@ func begin_session(server_address: String) -> void:
 	print("ServerSessionManager: Session started for ", server_address, " (id=", server_id, ")")
 
 
-## End the current session.  Removes server-specific mod files from the game
-## directory.  Map files are left installed (they are universal).
+## End the current session.  Removes ALL session files from the game
+## directory to prevent cross-server content conflicts (map pk3s can contain
+## bundled models or mods that would affect other servers).
 func end_session() -> void:
 	if _active_server_id == "":
 		return
@@ -133,10 +137,10 @@ func end_session() -> void:
 	var ended_id := _active_server_id
 	_active_server_id = ""
 
-	# Remove server-specific mods (but keep maps).
+	# Remove all session files (maps AND mods) to prevent cross-server conflicts.
 	var game_dir := _get_game_dir()
 	if game_dir != "":
-		_cleanup_session_mods(game_dir)
+		_cleanup_session_files(game_dir)
 
 	_session_installed.clear()
 	session_ended.emit(ended_id)
@@ -346,20 +350,19 @@ func _install_server_files(server_id: String, game_dir: String) -> void:
 			print("ServerSessionManager: Pre-installed ", file_name, " for server ", server_id)
 
 
-## Remove server-specific mod files from the game directory.
-## Map files are left in place (universal content).
-func _cleanup_session_mods(game_dir: String) -> void:
+## Remove ALL session files from the game directory.
+## Both maps and mods are removed to prevent cross-server content conflicts
+## (map pk3s can contain bundled models, textures, or gameplay mods).
+func _cleanup_session_files(game_dir: String) -> void:
 	var dir_path := _ensure_trailing_slash(game_dir)
 	for file_name in _session_installed:
-		var content_type: String = _session_installed[file_name]
-		if content_type == TYPE_MOD:
-			var full_path := dir_path + file_name
-			if FileAccess.file_exists(full_path):
-				var err := DirAccess.remove_absolute(full_path)
-				if err == OK:
-					print("ServerSessionManager: Removed mod file ", file_name)
-				else:
-					push_warning("ServerSessionManager: Failed to remove ", file_name, " error=", err)
+		var full_path := dir_path + file_name
+		if FileAccess.file_exists(full_path):
+			var err := DirAccess.remove_absolute(full_path)
+			if err == OK:
+				print("ServerSessionManager: Removed session file ", file_name)
+			else:
+				push_warning("ServerSessionManager: Failed to remove ", file_name, " error=", err)
 
 
 # ---------------------------------------------------------------------------
